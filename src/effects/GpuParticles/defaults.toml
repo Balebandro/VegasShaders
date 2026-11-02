@@ -1,0 +1,9 @@
+[_Shaders.GPUParticles.Main]
+Enabled = false                      # UNOFFICIAL (2026-10-26), NEEDS the DXVK fork 1.5-particles (does nothing on native D3D9, stock DXVK or an older DXVK fork), live: while it rains or snows outdoors (ForceRain / ForceSnow count), real falling drops round the camera, simulated on the graphics card: they fall, land on what they hit (roofs, trees and ground from the rain's top-down map, and whatever the camera sees), splash (rain) or settle for a few seconds (snow), and start again at the top. Drawn over the frame after the screen-space rain (Precipitations, which stays as it is). Off = nothing changes.
+Count = 32768                        # [64-262144] How many drops live round the camera. More = denser rain and more cost (the simulation and the drawing both grow with it).
+Size = 1.0                           # [0.2-4] Drop width / splash and flake size, in game units (about 70 to a metre). Thinner than a pixel fades instead of flickering.
+Speed = 1.0                          # [0.2-3] Fall speed multiplier (rain ~650 units/s, snow ~70 units/s at 1).
+Opacity = 0.8                        # [0-1] How strongly the drops show.
+Radius = 1200                        # [200-4000] Half the width of the box round the camera the drops live in (game units). Larger reaches further but spreads the same Count thinner.
+Splashes = true                      # A landed rain drop is a small splash for 0.4 s (a snow flake settles for 4 s). Off: it simply starts again at the top.
+

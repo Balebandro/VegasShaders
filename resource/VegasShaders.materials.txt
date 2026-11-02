@@ -1,0 +1,153 @@
+# Vegas Shaders material rules ([Shaders.PBR.MaterialRules] Enabled; docs/MATERIAL-RULES-PLAN.md).
+# Picks how the object shaders treat a texture (metal or not, how rough) from its diffuse texture's path. Edit freely;
+# changes apply after a restart. A texture no line covers looks exactly as with the rules off.
+#
+#   class   <name> metal=<off|guess|mask|full> strength=<0-1> rough=<min>-<max> reflections=<x> tint=<r>,<g>,<b>
+#       metal: off = never metal; guess = the usual colour + highlight-mask guess; mask = the texture's _m environment
+#              mask is the metal map (guess where there is none); full = all metal
+#       strength: how metal it can get (replaces [Shaders.PBR.Metal] World / FirstPerson for these textures)
+#       rough: the roughness range the normal map's highlight mask is spread over (leave out = the global one)
+#       reflections: metal's reflection of its surroundings, times [Shaders.PBR.Metal] Reflections
+#       tint: the class's colour in [Shaders.PBR.MaterialRules] DebugView
+#   folder  <path prefix> <class> [final]   final = decided before the keywords (the keywords cannot change it)
+#   keyword <word in the file name> <class> [not=<word>,<word>]
+#   file    <full texture path> <class>
+#   strip   <folder>   look through one folder level: with "strip textures\nvdlc01", textures\nvdlc01\clutter\x.dds
+#                      matches as textures\clutter\x.dds
+# First match wins: file, final folder, keyword, folder. The class "default" means no rule.
+
+# ---- classes --------------------------------------------------------------------------------------------------------
+class gun           metal=mask  strength=1   rough=0.25-0.6  tint=1,0.1,0.1
+class blade         metal=mask  strength=1   rough=0.2-0.5   tint=1,0.4,0.4
+class fist          metal=guess strength=0.4 rough=0.4-0.8   tint=0.7,0.3,0.3
+class ordnance      metal=guess strength=0.6 rough=0.4-0.8   tint=0.8,0.5,0.2
+class vehicle       metal=guess strength=0.6 rough=0.5-0.9   reflections=0.5 tint=0.3,0.3,1
+class building      metal=off                                tint=0.6,0.6,0.6
+class interior      metal=off                                tint=0.5,0.5,0.45
+class interiormetal metal=guess strength=0.5 rough=0.4-0.9   reflections=0.6 tint=0.2,0.6,1
+class ground        metal=off               rough=0.7-1      reflections=0.3 tint=0.55,0.4,0.2
+class plant         metal=off               rough=0.6-1      reflections=0.3 tint=0.1,0.8,0.1
+class clothing      metal=off               rough=0.5-1      reflections=0.5 tint=0.8,0.2,0.8
+class armourmetal   metal=guess strength=0.7 rough=0.35-0.8  reflections=0.8 tint=0.5,0.2,1
+class robot         metal=guess strength=0.8 rough=0.3-0.7   tint=0,1,1
+class creature      metal=off                                reflections=0.5 tint=0.9,0.6,0.5
+class clutter       metal=guess strength=0.3                 tint=1,1,0.3
+class furniture     metal=off                                tint=0.7,0.5,0.3
+class chrome        metal=full  strength=1   rough=0.05-0.2  tint=1,1,1
+class metal         metal=guess strength=0.8 rough=0.3-0.8   tint=0.4,0.7,1
+class rustymetal    metal=guess strength=0.4 rough=0.7-1     tint=0.7,0.35,0.1
+class colouredmetal metal=full  strength=1   rough=0.2-0.5   tint=1,0.8,0
+class glass         metal=off               rough=0.02-0.1   reflections=1.5 tint=0.6,1,1
+class wood          metal=off               rough=0.6-0.95   tint=0.6,0.35,0.1
+class masonry       metal=off               rough=0.75-1     tint=0.75,0.7,0.65
+class rock          metal=off               rough=0.75-1     tint=0.45,0.45,0.4
+class soft          metal=off               rough=0.85-1     tint=1,0.6,0.8
+class leather       metal=off               rough=0.45-0.8   tint=0.5,0.25,0.1
+class rubber        metal=off               rough=0.6-0.9    tint=0.15,0.15,0.15
+class stonepolished metal=off               rough=0.3-0.6    tint=0.9,0.9,1
+class sign          metal=off                                tint=1,0,1
+
+# ---- DLC folders hold the same sub-folders as the base game: look through them ---------------------------------------
+strip textures\nvdlc01\
+strip textures\nvdlc02\
+strip textures\nvdlc03\
+strip textures\nvdlc04\
+strip textures\nvdlc05\
+strip textures\dlc03\
+strip textures\dlc04\
+strip textures\dlc05\
+strip textures\dlcanch\
+strip textures\dlcpitt\
+
+# ---- never touched (final: no keyword can change them) ----------------------------------------------------------------
+folder textures\interface\    default final
+folder textures\fonts\        default final
+folder textures\sky\          default final
+folder textures\effects\      default final
+folder textures\decals\       default final
+folder textures\gore\         default final
+folder textures\projectiles\  default final
+folder textures\characters\   default final
+
+# ---- weapons (final: the _m mask already tells steel from wood) ------------------------------------------------------
+folder textures\weapons\                     gun      final
+folder textures\weapons\1handmelee\          blade    final
+folder textures\weapons\2handmelee\          blade    final
+folder textures\weapons\hand2hand\           fist     final
+folder textures\weapons\1handgrenadethrow\   ordnance final
+folder textures\weapons\1handminedrop\       ordnance final
+
+# ---- folders ---------------------------------------------------------------------------------------------------------
+folder textures\vehicles\              vehicle
+folder textures\architecture\          building
+folder textures\dungeons\              interior
+folder textures\dungeons\vault\        interiormetal
+folder textures\dungeons\vaultruined\  interiormetal
+folder textures\dungeons\enclave\      interiormetal
+folder textures\dungeons\industrial\   interiormetal
+folder textures\dungeons\metro\        interiormetal
+folder textures\dungeons\utility\      interiormetal
+folder textures\landscape\             ground
+folder textures\landscape\lod\         default
+folder textures\landscape\plants\      plant
+folder textures\landscape\trees\       plant
+folder textures\trees\                 plant
+folder textures\plants\                plant
+folder textures\armor\                         clothing
+folder textures\armor\powerarmor\              armourmetal
+folder textures\armor\advancedpowerarmor\      armourmetal
+folder textures\armor\enclavepowerarmor\       armourmetal
+folder textures\armor\ncr_powerarmor\          armourmetal
+folder textures\armor\t-51bpowerarmor\         armourmetal
+folder textures\armor\teslapowerarmor\         armourmetal
+folder textures\armor\teslaekarmor\            armourmetal
+folder textures\armor\advancedteslaekarmor\    armourmetal
+folder textures\creatures\                     creature
+folder textures\creatures\robobrain\           robot
+folder textures\creatures\securitron\          robot
+folder textures\creatures\misterhandy\         robot
+folder textures\creatures\mistergutsy\         robot
+folder textures\creatures\sentrybot\           robot
+folder textures\creatures\protectron\          robot
+folder textures\creatures\eyebot\              robot
+folder textures\creatures\libertyprime\        robot
+folder textures\creatures\sentryturret\        robot
+folder textures\creatures\mountedsentryturret\ robot
+folder textures\clutter\               clutter
+folder textures\furniture\             furniture
+folder textures\terminals\             default    # mostly playing cards, books and paper
+
+# ---- keywords (the file name only; checked before the plain folders) -------------------------------------------------
+keyword chrome    chrome
+keyword brass     colouredmetal
+keyword copper    colouredmetal
+keyword gold      colouredmetal not=goldfinger,golden
+keyword rust      rustymetal    not=crust,trust
+keyword metal     metal
+keyword steel     metal
+keyword iron      metal         not=ironsights,environ
+keyword glass     glass         not=fxglass
+keyword marble    stonepolished
+keyword tile      stonepolished not=projectile,tiler,rooftile
+keyword wood      wood
+keyword plank     wood
+keyword plywood   wood
+keyword maple     wood
+keyword concrete  masonry
+keyword cement    masonry
+keyword brick     masonry
+keyword stone     masonry
+keyword asphalt   masonry
+keyword sidewalk  masonry
+keyword rock      rock          not=rockit,rocket,rocker
+keyword cliff     rock
+keyword cloth     soft
+keyword fabric    soft
+keyword carpet    soft
+keyword curtain   soft
+keyword mattress  soft
+keyword paper     soft
+keyword cardboard soft
+keyword leather   leather
+keyword rubber    rubber
+keyword neon      sign

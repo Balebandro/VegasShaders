@@ -1,0 +1,47 @@
+#version 460
+// UNOFFICIAL 2026-10-29 RT hit textures check ([Shaders.ShadowsExteriors.RT] DebugView 7 with [Main.Main.RayTracing] HitTextures;
+// core\RtSunShadows.cpp): a camera ray through each pixel, the luminance of the hit's colour (RtHit.glsl: the albedo atlas at the hit's
+// texcoords) as grey; white = nothing hit. The texture detail must show on surfaces. Runs in the helper.
+// DebugView 8 (2026-10-30, with GlowTextures; range.w = 4): the hit's glow (rtHitGlow, the glow atlas) as grey instead: black = no glow,
+// only the lit parts of neon / signs / windows light up.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtHitDebug.spv RtHitDebug.comp
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {   // RtSunShadow.comp's block (only the camera part is used)
+	vec4 size; vec4 forward; vec4 right; vec4 up; vec4 origin; vec4 sun; vec4 bias; vec4 range; vec4 alpha; vec4 full;
+} p;
+layout(set = 0, binding = 2, r16f) uniform writeonly image2D outImage;
+layout(set = 0, binding = 3, r16f) uniform readonly image2D alphaAtlas;
+layout(set = 0, binding = 4, rgba8) uniform readonly image2D albedoAtlas;
+layout(set = 0, binding = 5, rgba8) uniform readonly image2D glowAtlas;
+#define RT_ALPHA_ATLAS alphaAtlas
+#define RT_ALBEDO_ATLAS albedoAtlas
+#define RT_GLOW_ATLAS glowAtlas
+#include "RtAlpha.glsl"
+#include "RtHit.glsl"
+
+void main() {
+	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y)) return;
+	const vec2 uv = (vec2(pixel) + 0.5) * p.size.zw;
+	const vec3 direction = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, 0u, 0xFFu, p.origin.xyz, 1.0, direction, 8192.0);
+	while (rayQueryProceedEXT(q))
+		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
+	float result = 1.0;
+	if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+		const uint instance = rayQueryGetIntersectionInstanceIdEXT(q, true), primitive = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
+		const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(q, true);
+		const vec3 albedo = p.range.w == 4.0 ? rtHitGlow(instance, primitive, bary) : rtHitAlbedo(instance, primitive, bary);
+		result = clamp(dot(albedo, vec3(0.2126, 0.7152, 0.0722)) * 1.5, 0.0, 0.99);
+	}
+	imageStore(outImage, pixel, vec4(result, 0.0, 0.0, 0.0));
+}

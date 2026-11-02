@@ -1,0 +1,250 @@
+From 4f9acd964eeb86ebc912693ae34a354928339f71 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 16:39:13 -0400
+Subject: [PATCH 31/32] NVR: HDR output only into a swap chain that really is
+ HDR; ask for a 10-bit format; try HDR the desktop offers under FSE
+
+- PresentImage turns the NVR HDR blit on only when the acquired swap image is HDR10 / scRGB; an SDR swap chain from the
+  driver shows the picture as before and is logged ("the driver gave an SDR swap chain"), and GetHdrInfo's ActiveMode is OFF
+  then, so NVR can tell. The colour space presented to is logged whenever it changes while HDR output is on.
+- GetSurfaceFormat asks for A2B10G10R10 (HDR10) / R16G16B16A16_SFLOAT (scRGB) while NVR's HDR output is on, instead of the
+  back buffer's B8G8R8A8 (a pair no driver offers: a warning on every rebuild, and the last listed HDR10 format picked).
+- With dxvk.allowFse the driver's own SDR exclusive picture can hold the display in SDR, and the surface list may then lack HDR
+  although the desktop has it: SetHdrOutput now also reads the list without full-screen exclusive (Presenter::
+  listSurfaceFormats(desktop)) and, if it offers the mode, tries (logged). A refused request logs both lists.
+- SetHdrOutput with unchanged settings while the swap chain is SDR rebuilds it once more (Presenter::invalidateSwapChain): NVR
+  asks again a few times and on alt-tab.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 6e8f79efd9888101ff9e391bf009e727d804f5e2)
+---
+ src/d3d9/d3d9_nvr_ext_api.h |  2 +-
+ src/d3d9/d3d9_nvr_hdr.cpp   | 45 ++++++++++++++++++++++++++++++++-----
+ src/d3d9/d3d9_nvr_hdr.h     |  6 +++++
+ src/d3d9/d3d9_swapchain.cpp | 23 ++++++++++++++++++-
+ src/dxvk/dxvk_presenter.cpp | 15 ++++++++++++-
+ src/dxvk/dxvk_presenter.h   |  8 ++++++-
+ 6 files changed, 89 insertions(+), 10 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 736d773..a6d15e7 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -593,7 +593,7 @@ struct NVR_EXT_HDR_INFO {
+   FLOAT DisplayMinNits;         // from the monitor's EDID (0 when unknown)
+   FLOAT DisplayMaxNits;
+   FLOAT DisplayMaxFullFrameNits;
+-  UINT  ActiveMode;             // NVR_EXT_HDR_MODE in force
++  UINT  ActiveMode;             // NVR_EXT_HDR_MODE in force: OFF while the swap chain the driver gave is not HDR (the picture is then shown as SDR)
+ };
+ 
+ struct NVR_EXT_HDR_OUTPUT {
+diff --git a/src/d3d9/d3d9_nvr_hdr.cpp b/src/d3d9/d3d9_nvr_hdr.cpp
+index f82ad41..9b1fd07 100755
+--- a/src/d3d9/d3d9_nvr_hdr.cpp
++++ b/src/d3d9/d3d9_nvr_hdr.cpp
+@@ -30,10 +30,19 @@ namespace dxvk {
+     for (const auto& f : presenter->listSurfaceFormats())
+       formats += str::format(formats.empty() ? "" : ", ", f.format, " / ", f.colorSpace);
+ 
++    // With full-screen exclusive allowed, also the list without it (as the desktop compositor sees the window): tells "the driver
++    // hides HDR while its SDR exclusive picture holds the display" from "no HDR at all"
++    std::string desktop;
++    if (device->config().allowFse && device->features().extFullScreenExclusive) {
++      for (const auto& f : presenter->listSurfaceFormats(true))
++        desktop += str::format(desktop.empty() ? "" : ", ", f.format, " / ", f.colorSpace);
++      desktop = str::format("; without full-screen exclusive: ", desktop.empty() ? std::string("none") : desktop);
++    }
++
+     return str::format("VK_EXT_swapchain_colorspace ",
+       device->instance()->extensions().extSwapchainColorSpace.specVersion ? "on" : "OFF (driver offers SDR only)",
+       ", full-screen exclusive ", device->config().allowFse ? "allowed" : "off (dxvk.allowFse = False)",
+-      ", surface formats: ", formats.empty() ? std::string("none") : formats);
++      ", surface formats: ", formats.empty() ? std::string("none") : formats, desktop);
+   }
+ 
+ 
+@@ -128,7 +137,9 @@ namespace dxvk {
+       pInfo->DisplayMaxFullFrameNits = desc.MaxFullFrameLuminance;
+     }
+ 
+-    pInfo->ActiveMode = swapchain->m_nvrHdr.mode;
++    // The mode on screen: OFF while the swap chain last presented to is not HDR (the driver gave an SDR format)
++    const D3D9NvrHdrState& state = swapchain->m_nvrHdr;
++    pInfo->ActiveMode = D3D9NvrHdrState::IsHdr(state.swapColorSpace) ? state.mode : uint32_t(NVR_EXT_HDR_OFF);
+     return D3D_OK;
+   }
+ 
+@@ -155,9 +166,25 @@ namespace dxvk {
+     const Rc<Presenter>& presenter = swapchain->m_wctx->presenter;
+ 
+     if (pOutput->Mode != NVR_EXT_HDR_OFF && !presenter->supportsColorSpace(colorSpace)) {
+-      Logger::warn(str::format("NVR ext: HDR: the surface does not offer ", NvrHdrModeName(pOutput->Mode),
+-        "; output stays SDR (Windows HDR has to be on for this display); ", NvrHdrSurfaceText(m_device, presenter)));
+-      return D3DERR_NOTAVAILABLE;
++      // With full-screen exclusive allowed, the driver's own SDR exclusive picture can hold the display in SDR, and the list may then
++      // lack HDR although the desktop has it. If the list without full-screen exclusive offers it, try: the swap chain is rebuilt
++      // (which ends the SDR exclusive picture); an SDR swap chain from the driver is shown as SDR and reported (GetHdrInfo ActiveMode).
++      const VkColorSpaceKHR partner = colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ? VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT : VK_COLOR_SPACE_HDR10_ST2084_EXT;
++      bool desktop = false;
++
++      if (m_device->GetDXVKDevice()->config().allowFse && m_device->GetDXVKDevice()->features().extFullScreenExclusive) {
++        for (const auto& f : presenter->listSurfaceFormats(true))
++          desktop |= f.colorSpace == colorSpace || f.colorSpace == partner;
++      }
++
++      if (!desktop) {
++        Logger::warn(str::format("NVR ext: HDR: the surface does not offer ", NvrHdrModeName(pOutput->Mode),
++          "; output stays SDR (Windows HDR has to be on for this display); ", NvrHdrSurfaceText(m_device, presenter)));
++        return D3DERR_NOTAVAILABLE;
++      }
++
++      Logger::info(str::format("NVR ext: HDR: ", NvrHdrModeName(pOutput->Mode), " is offered only without full-screen exclusive: trying (",
++        NvrHdrSurfaceText(m_device, presenter), ")"));
+     }
+ 
+     D3D9NvrHdrState& state = swapchain->m_nvrHdr;
+@@ -197,6 +224,12 @@ namespace dxvk {
+       state.marked = false;
+     }
+ 
++    if (!changed && swapchain->m_colorspace == colorSpace && state.mode != NVR_EXT_HDR_OFF && !D3D9NvrHdrState::IsHdr(state.swapColorSpace)) {
++      // Asked again (same settings) while the driver's swap chain is SDR: rebuild it once more (the display may be back in HDR now)
++      presenter->invalidateSwapChain();
++      Logger::info(str::format("NVR ext: HDR: ", NvrHdrModeName(state.mode), " asked again while the swap chain is ", state.swapColorSpace, ": rebuilt on the next present"));
++    }
++
+     if (swapchain->m_colorspace != colorSpace) {
+       const VkColorSpaceKHR oldColorSpace = swapchain->m_colorspace;
+       swapchain->m_colorspace = colorSpace;
+@@ -208,7 +241,7 @@ namespace dxvk {
+       presenter->setSurfaceFormat(surfaceFormat);
+ 
+       Logger::info(str::format("NVR ext: HDR: swap chain colour space ", oldColorSpace, " -> ", colorSpace,
+-        " (back buffer ", surfaceFormat.format, "), recreated on the next present"));
++        " (format asked ", surfaceFormat.format, "), recreated on the next present"));
+     }
+ 
+     if (changed) {
+diff --git a/src/d3d9/d3d9_nvr_hdr.h b/src/d3d9/d3d9_nvr_hdr.h
+index 4b6a1b4..fb4b44f 100755
+--- a/src/d3d9/d3d9_nvr_hdr.h
++++ b/src/d3d9/d3d9_nvr_hdr.h
+@@ -34,6 +34,12 @@ namespace dxvk {
+     bool              marked          = false;   // ref/gain hold this frame's data
+     bool              warnedMark      = false;
+     int32_t           loggedSupport   = -1;      // GetHdrInfo logs the surface's HDR support when it changes
++    VkColorSpaceKHR   swapColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;   // of the swap image last presented to
++    VkFormat          swapFormat      = VK_FORMAT_UNDEFINED;
++
++    static bool IsHdr(VkColorSpaceKHR colorSpace) {
++      return colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT || colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
++    }
+ 
+     bool              captureRequested = false;
+     bool              captureRecorded  = false;
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 353c69b..1da4c64 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -883,7 +883,21 @@ namespace dxvk {
+       Rc<DxvkImage>  nvrCaptureImage;
+       Rc<DxvkBuffer> nvrCaptureBuffer;
+ 
+-      if (m_nvrHdr.mode != NVR_EXT_HDR_OFF) {
++      // The swap image's own colour space: the HDR blit only into an HDR swap chain (an SDR one, if the driver gave one, shows
++      // the picture as before). Logged when it changes while NVR's HDR output is on.
++      const VkColorSpaceKHR swapColorSpace = backBuffer->info().colorSpace;
++
++      if (m_nvrHdr.mode != NVR_EXT_HDR_OFF && (m_nvrHdr.swapColorSpace != swapColorSpace || m_nvrHdr.swapFormat != backBuffer->info().format)) {
++        if (D3D9NvrHdrState::IsHdr(swapColorSpace))
++          Logger::info(str::format("NVR ext: HDR: presenting to an HDR swap chain (", backBuffer->info().format, " / ", swapColorSpace, ")"));
++        else
++          Logger::warn(str::format("NVR ext: HDR: the driver gave an SDR swap chain (", backBuffer->info().format, " / ", swapColorSpace, "), HDR output asked: shown as SDR"));
++      }
++
++      m_nvrHdr.swapColorSpace = swapColorSpace;
++      m_nvrHdr.swapFormat     = backBuffer->info().format;
++
++      if (m_nvrHdr.mode != NVR_EXT_HDR_OFF && D3D9NvrHdrState::IsHdr(swapColorSpace)) {
+         nvrHdr.enabled      = true;
+         nvrHdr.paperWhite   = m_nvrHdr.paperWhiteNits / 80.0f;
+         nvrHdr.maxGain      = std::max(1.0f, m_nvrHdr.peakNits / m_nvrHdr.paperWhiteNits);
+@@ -1286,6 +1300,13 @@ namespace dxvk {
+ 
+ 
+   VkSurfaceFormatKHR D3D9SwapChainEx::GetSurfaceFormat() {
++    // NVR extension 1.5-hdr: the swap chain format for NVR's HDR output (the back buffer stays SDR)
++    if (m_nvrHdr.mode == NVR_EXT_HDR_HDR10)
++      return { VK_FORMAT_A2B10G10R10_UNORM_PACK32, m_colorspace };
++
++    if (m_nvrHdr.mode == NVR_EXT_HDR_SCRGB)
++      return { VK_FORMAT_R16G16B16A16_SFLOAT, m_colorspace };
++
+     D3D9Format format = EnumerateFormat(m_presentParams.BackBufferFormat);
+ 
+     switch (format) {
+diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+index 46ffc07..55f4c7a 100644
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -326,7 +326,7 @@ namespace dxvk {
+   }
+ 
+ 
+-  std::vector<VkSurfaceFormatKHR> Presenter::listSurfaceFormats() {
++  std::vector<VkSurfaceFormatKHR> Presenter::listSurfaceFormats(bool desktop) {
+     std::lock_guard lock(m_surfaceMutex);
+ 
+     std::vector<VkSurfaceFormatKHR> surfaceFormats;
+@@ -334,13 +334,26 @@ namespace dxvk {
+     if (!m_surface && createSurface() != VK_SUCCESS)
+       return surfaceFormats;
+ 
++    // getSupportedFormats chains m_fullscreenMode; the desktop query swaps it for the call (under the surface lock)
++    const VkFullScreenExclusiveEXT mode = m_fullscreenMode;
++
++    if (desktop)
++      m_fullscreenMode = VK_FULL_SCREEN_EXCLUSIVE_DISALLOWED_EXT;
++
+     if (getSupportedFormats(surfaceFormats) != VK_SUCCESS)
+       surfaceFormats.clear();
+ 
++    m_fullscreenMode = mode;
+     return surfaceFormats;
+   }
+ 
+ 
++  void Presenter::invalidateSwapChain() {
++    std::lock_guard lock(m_surfaceMutex);
++    m_dirtySwapchain = true;
++  }
++
++
+   void Presenter::invalidateSurface() {
+     std::lock_guard lock(m_surfaceMutex);
+ 
+diff --git a/src/dxvk/dxvk_presenter.h b/src/dxvk/dxvk_presenter.h
+index 064d3f5..a3c496a 100644
+--- a/src/dxvk/dxvk_presenter.h
++++ b/src/dxvk/dxvk_presenter.h
+@@ -200,9 +200,15 @@ namespace dxvk {
+     /**
+      * \brief NVR: the surface formats the surface offers (for the HDR log)
+      *
++     * \param [in] desktop Query without full-screen exclusive (as the desktop compositor sees it)
+      * \returns The formats, empty if there is no surface
+      */
+-    std::vector<VkSurfaceFormatKHR> listSurfaceFormats();
++    std::vector<VkSurfaceFormatKHR> listSurfaceFormats(bool desktop = false);
++
++    /**
++     * \brief NVR: recreates the swap chain on the next acquire (same format: asks the driver again)
++     */
++    void invalidateSwapChain();
+ 
+     /**
+      * \brief Invalidates Vulkan surface
+-- 
+2.43.0
+

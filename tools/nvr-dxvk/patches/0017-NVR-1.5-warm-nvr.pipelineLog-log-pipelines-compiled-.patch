@@ -1,0 +1,223 @@
+From 43068d39e7324a52564062626e8205a19e964bfd Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Tue, 27 Oct 2026 11:22:19 -0400
+Subject: [PATCH] NVR 1.5-warm: nvr.pipelineLog - log pipelines compiled at
+ first use on the recording thread
+
+Measurement only, off by default. dxvk.conf `nvr.pipelineLog = True` logs every graphics or
+compute pipeline that is created or linked at its first use on the thread that records the
+draw (dxvk-cs), with the time it took and the shaders' names: complete pipelines that could not
+be fast-linked from pipeline libraries, fast links whose libraries had been freed again (32-bit
+lifetime tracking re-creates them from the driver's disk cache), the NVR extension's own passes
+(never pipeline libraries, created lazily by NVR, so compiled at their first draw) and compute
+pipelines whose library was not ready. Background compiles on the worker threads are not
+counted. `nvr.pipelineLogMinUs` (default 1000) is the smallest wait with its own line; every
+wait goes into the per-kind session totals printed on each line. Answers how much of a DXVK
+arrival hitch is pipeline compiles before any warm-up is built.
+---
+ src/dxvk/dxvk_compute.cpp   | 21 ++++++++++-
+ src/dxvk/dxvk_graphics.cpp  | 14 ++++++++
+ src/dxvk/dxvk_nvr_pipelog.h | 69 +++++++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_options.cpp   |  3 ++
+ src/dxvk/dxvk_options.h     |  7 ++++
+ 5 files changed, 113 insertions(+), 1 deletion(-)
+ create mode 100644 src/dxvk/dxvk_nvr_pipelog.h
+
+diff --git a/src/dxvk/dxvk_compute.cpp b/src/dxvk/dxvk_compute.cpp
+index a1ce755..3aabca7 100644
+--- a/src/dxvk/dxvk_compute.cpp
++++ b/src/dxvk/dxvk_compute.cpp
+@@ -7,6 +7,7 @@
+ #include "dxvk_compute.h"
+ #include "dxvk_device.h"
+ #include "dxvk_graphics.h"
++#include "dxvk_nvr_pipelog.h"
+ #include "dxvk_pipemanager.h"
+ 
+ namespace dxvk {
+@@ -38,10 +39,19 @@ namespace dxvk {
+   VkPipeline DxvkComputePipeline::getPipelineHandle(
+     const DxvkComputePipelineStateInfo& state) {
+     if (!m_libraryHandle) {
++      // NVR: time first use on this thread (nvr.pipelineLog, off by default)
++      const bool nvrLog = m_device->config().nvrPipelineLog;
++      auto nvrStart = nvrLog ? DxvkNvrPipeLog::clock::now() : DxvkNvrPipeLog::clock::time_point();
++
+       // Retrieve actual pipeline handle on first use. This
+       // may wait for an ongoing compile job to finish, or
+       // compile the pipeline immediately on the calling thread.
+       m_libraryHandle = m_library->acquirePipelineHandle().handle;
++
++      if (unlikely(nvrLog)) {
++        DxvkNvrPipeLog::record(DxvkNvrPipeLog::Kind::Compute, nvrStart, m_shaders.cs->debugName(),
++          uint32_t(std::max(m_device->config().nvrPipelineLogMinUs, 0)));
++      }
+     }
+ 
+     if (*m_libraryHandle) {
+@@ -56,8 +66,17 @@ namespace dxvk {
+         std::lock_guard<dxvk::mutex> lock(m_mutex);
+         instance = this->findInstance(state);
+ 
+-        if (!instance)
++        if (!instance) {
++          const bool nvrLog = m_device->config().nvrPipelineLog;
++          auto nvrStart = nvrLog ? DxvkNvrPipeLog::clock::now() : DxvkNvrPipeLog::clock::time_point();
++
+           instance = this->createInstance(state);
++
++          if (unlikely(nvrLog)) {
++            DxvkNvrPipeLog::record(DxvkNvrPipeLog::Kind::Compute, nvrStart, m_shaders.cs->debugName() + " (spec)",
++              uint32_t(std::max(m_device->config().nvrPipelineLogMinUs, 0)));
++          }
++        }
+       }
+ 
+       return instance->handle;
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index d033217..04f12eb 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "dxvk_device.h"
+ #include "dxvk_graphics.h"
++#include "dxvk_nvr_pipelog.h"
+ #include "dxvk_pipemanager.h"
+ 
+ namespace dxvk {
+@@ -1094,11 +1095,24 @@ namespace dxvk {
+       instance = this->findInstance(state);
+ 
+       if (!instance) {
++        // NVR: time first-use pipeline creation on this thread (nvr.pipelineLog, off by default)
++        const bool nvrLog = m_device->config().nvrPipelineLog;
++        auto nvrStart = nvrLog ? DxvkNvrPipeLog::clock::now() : DxvkNvrPipeLog::clock::time_point();
++
+         // Keep pipeline object locked, at worst we're going to stall
+         // a state cache worker and the current thread needs priority.
+         bool canCreateBasePipeline = this->canCreateBasePipeline(state);
+         instance = this->createInstance(state, canCreateBasePipeline);
+ 
++        if (unlikely(nvrLog)) {
++          DxvkNvrPipeLog::record(instance->baseHandle.load()
++              ? DxvkNvrPipeLog::Kind::GraphicsLinked
++              : DxvkNvrPipeLog::Kind::GraphicsFull,
++            nvrStart, str::format(m_shaders.vs != nullptr ? m_shaders.vs->debugName() : std::string("-"), " + ",
++              m_shaders.fs != nullptr ? m_shaders.fs->debugName() : std::string("-")),
++            uint32_t(std::max(m_device->config().nvrPipelineLogMinUs, 0)));
++        }
++
+         // Unlock here since we may dispatch the pipeline to a worker,
+         // which will then acquire it to increment the use counter.
+         lock.unlock();
+diff --git a/src/dxvk/dxvk_nvr_pipelog.h b/src/dxvk/dxvk_nvr_pipelog.h
+new file mode 100644
+index 0000000..7b07e65
+--- /dev/null
++++ b/src/dxvk/dxvk_nvr_pipelog.h
+@@ -0,0 +1,69 @@
++#pragma once
++
++#include <atomic>
++#include <string>
++
++#include "../util/log/log.h"
++#include "../util/util_string.h"
++#include "../util/util_time.h"
++
++namespace dxvk {
++
++  /**
++   * \brief NVR: log of pipelines compiled on the thread that needs them
++   *
++   * Measurement only (dxvk.conf nvr.pipelineLog = True, off by default). Every pipeline that is
++   * created or linked at first use on the recording (dxvk-cs) thread is a wait the frame cannot hide:
++   * a graphics pipeline that cannot be fast-linked from pipeline libraries (compiled in full), a
++   * fast link whose libraries had been freed again (32-bit lifetime tracking, re-created from the
++   * driver's disk cache), the NVR extension's own passes (never libraries: created lazily by NVR, so
++   * compiled at their first draw), and compute pipelines whose library was not ready. Background
++   * compiles on DXVK's worker threads are not counted. Lines at or above nvr.pipelineLogMinUs
++   * (default 1000 = 1 ms) are logged with the shaders' names; every wait goes into the totals.
++   */
++  class DxvkNvrPipeLog {
++
++  public:
++
++    enum class Kind : uint32_t {
++      GraphicsLinked  = 0u, ///< fast link from pipeline libraries (includes re-created libraries)
++      GraphicsFull    = 1u, ///< complete pipeline compiled on the calling thread
++      Compute         = 2u, ///< compute pipeline (library acquire or spec-constant variant)
++    };
++
++    using clock = dxvk::high_resolution_clock;
++
++    static void record(
++            Kind                  kind,
++            clock::time_point     start,
++      const std::string&          names,
++            uint32_t              minUs) {
++      auto us = std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - start).count();
++
++      uint32_t index = uint32_t(kind);
++      uint32_t count = s_count[index].fetch_add(1u) + 1u;
++      uint64_t total = s_totalUs[index].fetch_add(uint64_t(us)) + uint64_t(us);
++
++      if (uint64_t(us) < uint64_t(minUs))
++        return;
++
++      static const char* s_kindNames[] = { "graphics linked", "graphics full", "compute" };
++
++      Logger::info(str::format("NVR pipeline: ", s_kindNames[index], " ",
++        double(us) / 1000.0, " ms: ", names,
++        " (session ", s_kindNames[index], ": ", count, " waits, ", double(total) / 1000.0, " ms; all kinds ",
++        double(totalUs()) / 1000.0, " ms)"));
++    }
++
++    static uint64_t totalUs() {
++      return s_totalUs[0].load() + s_totalUs[1].load() + s_totalUs[2].load();
++    }
++
++  private:
++
++    static inline std::atomic<uint32_t> s_count[3]   = { };
++    static inline std::atomic<uint64_t> s_totalUs[3] = { };
++
++  };
++
++}
+diff --git a/src/dxvk/dxvk_options.cpp b/src/dxvk/dxvk_options.cpp
+index a18d7c4..831883a 100644
+--- a/src/dxvk/dxvk_options.cpp
++++ b/src/dxvk/dxvk_options.cpp
+@@ -25,6 +25,9 @@ namespace dxvk {
+     lowerSinCos           = config.getOption<Tristate>("dxvk.lowerSinCos",            Tristate::Auto);
+     tilerMode             = config.getOption<Tristate>("dxvk.tilerMode",              Tristate::Auto);
+ 
++    nvrPipelineLog        = config.getOption<bool>    ("nvr.pipelineLog",             false);
++    nvrPipelineLogMinUs   = config.getOption<int32_t> ("nvr.pipelineLogMinUs",        1000);
++
+     auto budget = config.getOption<int32_t>("dxvk.maxMemoryBudget", 0);
+     maxMemoryBudget = VkDeviceSize(std::max(budget, 0)) << 20u;
+   }
+diff --git a/src/dxvk/dxvk_options.h b/src/dxvk/dxvk_options.h
+index 71deb59..0b04f69 100644
+--- a/src/dxvk/dxvk_options.h
++++ b/src/dxvk/dxvk_options.h
+@@ -72,6 +72,13 @@ namespace dxvk {
+     /// Overrides memory budget for DXVK
+     VkDeviceSize maxMemoryBudget = 0u;
+ 
++    /// NVR: log pipelines compiled or linked at first use on the
++    /// recording thread (dxvk_nvr_pipelog.h). Measurement only.
++    bool nvrPipelineLog = false;
++
++    /// NVR: smallest wait, in microseconds, that gets its own log line
++    int32_t nvrPipelineLogMinUs = 1000;
++
+     /// Whether to use custom sin/cos approximation
+     Tristate lowerSinCos = Tristate::Auto;
+ 
+-- 
+2.40.0.windows.1
+

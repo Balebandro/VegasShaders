@@ -1,0 +1,63 @@
+From f47b595f8f085c6deeb2f0d260f5bd922793dcc4 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Sun, 25 Oct 2026 21:33:23 -0400
+Subject: [PATCH] NVR extension 1.3: mipmapped and anisotropic samplers
+
+NVR_EXT_FILTER_LINEAR_MIPMAPS (trilinear over all mips) and NVR_EXT_FILTER_ANISOTROPIC (the same with
+16x anisotropy) for the file textures D3D9 samples with mip filtering (Underwater's caustics, puddle and
+dirt maps). New enum values only: older callers are unchanged; check ExtVersionMinor >= 3 before use.
+---
+ src/d3d9/d3d9_nvr_ext.cpp   | 10 ++++++----
+ src/d3d9/d3d9_nvr_ext_api.h |  4 +++-
+ 2 files changed, 9 insertions(+), 5 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 1cbfbd7..23cca2b 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -510,14 +510,16 @@ namespace dxvk {
+     if (unlikely(pDesc == nullptr || ppSampler == nullptr))
+       return D3DERR_INVALIDCALL;
+ 
+-    VkFilter filter = pDesc->Filter == NVR_EXT_FILTER_LINEAR ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
++    VkFilter filter = pDesc->Filter == NVR_EXT_FILTER_NEAREST ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
++    // 1.3: LINEAR_MIPMAPS / ANISOTROPIC read every mip of the bound view (views already span all mips)
++    bool mips = pDesc->Filter == NVR_EXT_FILTER_LINEAR_MIPMAPS || pDesc->Filter == NVR_EXT_FILTER_ANISOTROPIC;
+     VkSamplerAddressMode address = DecodeNvrAddressMode(pDesc->Address);
+ 
+     DxvkSamplerKey key = { };
+-    key.setFilter(filter, filter, VK_SAMPLER_MIPMAP_MODE_NEAREST);
++    key.setFilter(filter, filter, mips ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
+     key.setAddressModes(address, address, address);
+-    key.setLodRange(0.0f, 0.0f, 0.0f);
+-    key.setAniso(0u);
++    key.setLodRange(0.0f, mips ? 16.0f : 0.0f, 0.0f);
++    key.setAniso(pDesc->Filter == NVR_EXT_FILTER_ANISOTROPIC ? 16u : 0u);
+     key.setDepthCompare(false, VK_COMPARE_OP_NEVER);
+     key.setReduction(VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE);
+ 
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 9543050..47e3d1c 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -45,7 +45,7 @@
+ #include <unknwn.h>
+ 
+ #define NVR_EXT_VERSION_MAJOR 1
+-#define NVR_EXT_VERSION_MINOR 2
++#define NVR_EXT_VERSION_MINOR 3
+ 
+ #define NVR_EXT_MAX_SLOTS       32
+ #define NVR_EXT_MAX_BINDINGS    32
+@@ -76,6 +76,8 @@ enum NVR_EXT_BUFFER_FLAGS {
+ enum NVR_EXT_FILTER {
+   NVR_EXT_FILTER_NEAREST = 0,
+   NVR_EXT_FILTER_LINEAR  = 1,
++  NVR_EXT_FILTER_LINEAR_MIPMAPS = 2,  // (1.3) linear min/mag and between mip levels, all mips (file textures with mips)
++  NVR_EXT_FILTER_ANISOTROPIC    = 3,  // (1.3) as LINEAR_MIPMAPS with 16x anisotropic filtering (D3D9's ANISOTROPIC)
+ };
+ 
+ enum NVR_EXT_ADDRESS {
+-- 
+2.43.0
+

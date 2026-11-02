@@ -1,0 +1,42 @@
+﻿WHITE FURNACE (furnace grid, 2048 x 4096 directions), EnergySplit ON vs the old code; rows roughness, columns N.V
+ PBR (full pass), dielectric: new (old)
+   rough\NdotV        0.05        0.10        0.25        0.50        0.75        1.00
+    0.10       0.986(0.986) 1.001(1.047) 0.999(1.073) 1.003(1.008) 0.996(0.996) 0.991(0.991)
+    0.20       0.992(0.992) 0.997(1.026) 1.004(1.053) 1.001(1.005) 0.995(0.995) 1.000(1.000)
+    0.30       0.998(0.998) 0.998(1.014) 1.001(1.030) 0.998(1.001) 0.994(0.994) 0.999(0.999)
+    0.50       0.996(0.996) 0.997(0.998) 0.996(0.998) 0.991(0.991) 0.990(0.990) 0.994(0.994)
+    0.70       0.987(0.987) 0.986(0.986) 0.985(0.985) 0.983(0.983) 0.983(0.983) 0.985(0.985)
+    1.00       0.976(0.976) 0.975(0.975) 0.974(0.974) 0.974(0.974) 0.973(0.973) 0.972(0.972)
+ PBRSun (sun pass), dielectric: new (old)
+   rough\NdotV        0.05        0.10        0.25        0.50        0.75        1.00
+    0.10       0.985(0.985) 0.996(1.043) 0.992(1.067) 1.001(1.006) 0.995(0.995) 0.975(0.975)
+    0.20       0.990(0.990) 0.994(1.022) 0.999(1.048) 0.999(1.004) 0.995(0.995) 0.993(0.993)
+    0.30       0.996(0.996) 0.995(1.011) 0.997(1.026) 0.997(1.000) 0.994(0.994) 0.996(0.996)
+    0.50       0.994(0.994) 0.995(0.996) 0.994(0.997) 0.990(0.990) 0.989(0.989) 0.993(0.993)
+    0.70       0.985(0.985) 0.985(0.985) 0.984(0.984) 0.982(0.982) 0.983(0.983) 0.985(0.985)
+    1.00       0.975(0.975) 0.975(0.975) 0.974(0.974) 0.974(0.974) 0.973(0.973) 0.972(0.972)
+ fine grid (41 x 41, roughness 0.02-1, N.V 0.005-1), full pass: new max 1.0043 (at roughness 0.069 N.V 0.129), old max 1.0892; new min 0.9334, old min 0.9334
+E1 PASS  furnace max 1.0036 on the furnace grid (limit 1.005; old 1.073 / 1.067), 1.0043 on the fine grid (old 1.0892)
+E2 PASS  furnace min 0.9721 (limit: old min 0.9721 - 0.01); fine grid 0.9334 (old 0.9334)
+E3 PASS  metal tables, largest change 0.00000 (limit 0.001)
+
+SUN PASS EDGE CASES (bad = NaN / Inf / negative), new | old
+  sun exactly along the normal (N = L)                 ok | BAD
+  sun exactly along the normal, eye too (L = V = N)    ok | BAD
+  eye exactly opposite the sun (V = -L)                ok | ok
+  sun straight behind (N = -L)                         ok | BAD
+  grazing view (N.V = 0)                               ok | ok
+  grazing sun (N.L = 0)                                ok | ok
+  roughness 0                                          ok | ok
+  roughness 0, metal                                   ok | ok
+S2 PASS  sun pass: 0 bad on the edge cases (old 12), 0 bad on 1,000,000 random inputs
+
+OFF = OLD (EnergySplit off, 1,000,000 random inputs; inputs where the old code gives NaN skipped)
+  PBR              largest relative difference 0.00e+00 (0 skipped)
+  PBRSun           largest relative difference 0.00e+00 (0 skipped)
+  PBRSunSpecular   largest relative difference 0.00e+00 (0 skipped)
+  PBRDiffuse       largest relative difference 0.00e+00 (0 skipped)
+  PBRSpecular      largest relative difference 0.00e+00 (0 skipped)
+M1 PASS  EnergySplit off vs old, largest relative difference 0.00e+00 (limit 1e-5)
+
+ALL CPU LIMITS PASS

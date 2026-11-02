@@ -1,0 +1,200 @@
+// AvgLuma with a brightness histogram (UNOFFICIAL 2026-10-26; needs NVR DXVK; [Shaders.Exposure.Main] Histogram).
+//
+// The first fork-only feature: the exposure's screen average leaves out the darkest and the brightest pixels. Each 16x16
+// tile counts its pixels into 128 log2-luminance bins in shared memory (atomics), the tiles add their counts into one
+// frame histogram (atomics in a storage buffer); one group then averages the linear luma of the pixels between the
+// LowPercent and the 100 - HighPercent percentiles. Shader Model 3 has no atomics, no shared memory and no scattered
+// writes, so the D3D9 pass can only average fixed taps; a sun disc, a lamp or a bright window then pulls the whole
+// exposure down, black corners pull it up.
+//
+// The result is in the same units as AvgLuma.comp's exact average (linear BT.709 luma), so MinBrightness and
+// MaxBrightness keep their meaning; LowPercent 0 and HighPercent 0 give that average within the bins' precision
+// (1/8 stop; pixels above the top bin count as the top bin, so a very bright sun counts a little lower). Everything after
+// the average -- the 8-frame smoothing, the adaptation speeds, the depth of field focus -- is AvgLuma.comp's code (and the
+// .fx's) unchanged, into the same 1x1 TESR_AvgLumaBuffer.
+//
+// Dispatch (effects/AvgLuma.cpp RenderCompute):
+//   ClearBuffer(histogram) first, then
+//   phase 0: groups (ceil(w/16), ceil(h/16)): each tile's counts added into the histogram
+//   phase 1: one group: the trimmed average, then the per-frame logic; writes StateOut (32 bytes)
+//   then NVR copies StateOut.packed into the 1x1 RGBA16F texture, as for AvgLuma.comp.
+// Build: tools/nvr-dxvk/compile-compute.sh AvgLumaHistogram
+
+#version 450
+#extension GL_EXT_nonuniform_qualifier : enable
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler s_samplers[];
+
+layout(set = 1, binding = 0) uniform texture2D t_color;   // TESR_RenderedBuffer (the chain's current image)
+layout(set = 1, binding = 1) uniform texture2D t_depth;   // TESR_DepthBuffer
+
+layout(set = 1, binding = 2, std430) buffer Histogram {
+    uint bins[];                                        // HistogramBins counts (cleared by the host every frame)
+};
+
+layout(set = 1, binding = 3, std430) readonly buffer StateIn {
+    vec4  prev;                                         // last frame's (newLuma, animatedLuma, focus, 1)
+    uvec2 prevPacked;
+};
+
+layout(set = 1, binding = 4, std430) writeonly buffer StateOut {
+    vec4  cur;                                          // this frame's (newLuma, animatedLuma, focus, 1)
+    uvec2 packed;                                       // the same as four half floats: the texture's texel
+    float average;                                      // this frame's trimmed average alone
+    float kept;                                         // the share of the screen it averaged (test log)
+};
+
+layout(push_constant) uniform Push {
+    uint  width;                                        // 0
+    uint  height;                                       // 4
+    uint  groupsX;                                      // 8
+    uint  groupsY;                                      // 12
+    uint  phase;                                        // 16
+    uint  samplerIndex;                                 // 20: linear, clamp (low 16 bits)
+    uint  pad0;                                         // 24
+    uint  pad1;                                         // 28
+    vec4  motionBlurData;                               // 32: TESR_MotionBlurData
+    vec4  depthOfFieldData;                             // 48: TESR_DepthOfFieldData
+    vec4  gameTime;                                     // 64: TESR_GameTime (w: frame time)
+    vec4  exposureData;                                 // 80: TESR_ExposureData (z: dark adapt speed, w: light adapt speed)
+    vec4  cameraData;                                   // 96: TESR_CameraData (x: nearZ, y: farZ)
+    vec4  histogram;                                    // 112: x low fraction, y high fraction, z log2 of the lowest bin's top, w log2 of the top bin's bottom
+} pc;                                                   // 128 bytes
+
+const uint HistogramBins = 128u;
+shared uint s_bins[HistogramBins];
+
+// ---- Helpers.hlsl (as AvgLuma.comp) ----------------------------------------------
+vec3 linearize(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(abs((c + 0.055) / 1.055), vec3(2.4));
+    return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));   // lo where c <= 0.04045
+}
+
+float luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));          // BT.709
+}
+
+// ---- Depth.hlsl (as AvgLuma.comp) ------------------------------------------------
+float readDepth(vec2 uv) {
+    float farZ = pc.cameraData.y;
+    return texture(sampler2D(t_depth, s_samplers[pc.samplerIndex & 0xFFFFu]), uv).x * farZ;
+}
+
+// ---- AvgLuma.fx.hlsl (as AvgLuma.comp) -------------------------------------------
+const vec2 taps[12] = vec2[12](
+    vec2(-0.326212, -0.405810),
+    vec2(-0.840144, -0.073580),
+    vec2(-0.695914,  0.457137),
+    vec2(-0.203345,  0.620716),
+    vec2( 0.962340, -0.194983),
+    vec2( 0.473434, -0.480026),
+    vec2( 0.519456,  0.767022),
+    vec2( 0.185461, -0.893124),
+    vec2( 0.507431,  0.064425),
+    vec2( 0.896420,  0.412458),
+    vec2(-0.321940, -0.932615),
+    vec2(-0.791559, -0.597710)
+);
+
+const vec2 center = vec2(0.5, 0.5);
+
+float stepTo(float startValue, float endValue, float minStep, float maxStep) {
+    minStep = abs(minStep) * -1.0;
+    maxStep = abs(maxStep);
+    float diff = clamp(endValue - startValue, minStep, maxStep);
+    return startValue + diff;
+}
+
+float getFocalDistance(float oldFocus) {
+    float hyperFocalDistance = max(0.0000001, pc.depthOfFieldData.x * 1000.0);
+
+    vec2 speed = clamp(abs(pc.motionBlurData.xy), 0.0, 1.0) + 0.1;
+
+    float centerDepth = readDepth(center);
+    float depth = centerDepth;
+    vec2 samplingRange = speed;
+    for (int i = 0; i < 12; i++)
+        depth += readDepth(center + 0.3 * taps[i] * samplingRange);
+    depth /= 12.0;
+
+    depth = centerDepth > depth ? centerDepth : depth;
+    depth = clamp(depth / hyperFocalDistance, 0.0, 1.0);
+
+    float step = pow(max(oldFocus, depth), 0.1);
+    return stepTo(oldFocus, depth, 3.0 * step * pc.gameTime.w, 1.0 * step * pc.gameTime.w);
+}
+
+// ---- the histogram ---------------------------------------------------------------
+// Bin 0: luma at or below 2^histogram.z (black: counts as 0). Bins 1..126: equal log2 steps up to 2^histogram.w. Bin 127:
+// everything above. A bin's luma is its log2 middle (the top bin: its bottom edge).
+float binStep() { return (pc.histogram.w - pc.histogram.z) / float(HistogramBins - 2u); }
+
+uint binOf(float l) {
+    if (!(l > exp2(pc.histogram.z))) return 0u;          // (also NaN)
+    float t = (log2(l) - pc.histogram.z) / binStep();
+    return uint(clamp(floor(t), 0.0, float(HistogramBins - 3u))) + 1u + (log2(l) >= pc.histogram.w ? 1u : 0u);
+}
+
+float lumaOf(uint b) {
+    if (b == 0u) return 0.0;
+    if (b == HistogramBins - 1u) return exp2(pc.histogram.w);
+    return exp2(pc.histogram.z + (float(b) - 0.5) * binStep());
+}
+
+void main() {
+    if (pc.phase == 0u) {
+        if (gl_LocalInvocationIndex < HistogramBins) s_bins[gl_LocalInvocationIndex] = 0u;
+        barrier();
+
+        ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+        if (pos.x < int(pc.width) && pos.y < int(pc.height))
+            atomicAdd(s_bins[binOf(luma(linearize(texelFetch(t_color, pos, 0).rgb)))], 1u);
+        barrier();
+
+        if (gl_LocalInvocationIndex < HistogramBins) {
+            uint count = s_bins[gl_LocalInvocationIndex];
+            if (count != 0u) atomicAdd(bins[gl_LocalInvocationIndex], count);
+        }
+    }
+    else {
+        if (gl_LocalInvocationIndex < HistogramBins) s_bins[gl_LocalInvocationIndex] = bins[gl_LocalInvocationIndex];
+        barrier();
+
+        if (gl_LocalInvocationIndex == 0u) {
+            // The pixels from the low percentile to the high one, each at its bin's luma; a bin across a cut counts in part.
+            float total = float(pc.width * pc.height);
+            float from = total * clamp(pc.histogram.x, 0.0, 0.99);
+            float to = total * (1.0 - clamp(pc.histogram.y, 0.0, 0.99));
+            if (to <= from) { float middle = 0.5 * (from + to); from = middle; to = middle + 1.0; }
+            float below = 0.0, sum = 0.0, count = 0.0;
+            for (uint b = 0u; b < HistogramBins; b++) {
+                float n = float(s_bins[b]);
+                float inside = max(0.0, min(below + n, to) - max(below, from));
+                sum += inside * lumaOf(b);
+                count += inside;
+                below += n;
+            }
+            float average_ = count > 0.0 ? sum / count : 0.0;
+
+            // From here AvgLuma.comp line for line.
+            vec2 oldLuma = prev.rg;
+            float newLuma = (average_ + (7.0 * oldLuma.r)) / 8.0;  // average over 8 frames
+
+            float decreaseRate = -pc.exposureData.z;
+            float increaseRate = pc.exposureData.w;
+            float animatedLuma = stepTo(oldLuma.g, newLuma, pc.gameTime.w * decreaseRate, pc.gameTime.w * increaseRate);
+
+            float focus = getFocalDistance(prev.b);
+
+            vec4 result = vec4(newLuma, animatedLuma, focus, 1.0);
+            cur = result;
+            packed = uvec2(packHalf2x16(result.rg), packHalf2x16(result.ba));
+            average = average_;
+            kept = count / max(total, 1.0);
+        }
+    }
+}

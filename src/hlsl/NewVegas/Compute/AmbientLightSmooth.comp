@@ -1,0 +1,164 @@
+// AmbientLight's normal smoothing (technique AmbientLightSmooth in Effects/AmbientLight.fx.hlsl) as ONE compute dispatch
+// (needs NVR DXVK: the NVR extension on DXVK's d3d9.dll). UNOFFICIAL 2026-10-25, [Main.Main.Performance] AmbientLightSmoothCompute.
+//
+// Same result as the two D3D9 passes, line for line: pass X averages the prep's normal along x (3 taps each side at r/3, 2r/3, r),
+// pass Y averages that along y and packs it again as Prepare does. Differences from the D3D9 route are only in where things live:
+// - X's result (the D3D9 pass writes it into NVR_AmbientLight1, A16B16G16R16F) is kept in shared memory, rounded to 16-bit floats
+//   the same way (packHalf2x16), so pass Y reads exactly the values the render target would hold, viewZ included.
+// - NVR_ALPrep and NVR_ALBuffer are POINT samplers, so every tap is one texel: floor(uv * size), clamped to the texture (as the
+//   sampler's CLAMP does at u = 1). X reads the prep with texelFetch at that texel; Y reads X's result from shared memory.
+// - The pixel's texture coordinate is the D3D9 full-screen quad's: pixel i of the half-resolution viewport gets
+//   u = i / halfWidth + 0.5 / fullWidth (ShaderManager::CreateFrameVertex's offset is the full resolution's), the same for v.
+// - The result goes to a buffer (tightly packed RGBA32F, the prep's own format) that NVR then copies into the prep: the
+//   dispatch reads the prep's neighbours across tile borders, so it cannot write the prep in place.
+//
+// Tiling: a group is 8 columns x tileRows rows of output (tileRows = 256 - 2r, the push block's); it first runs pass X for its 8
+// columns over tileRows + 2r = 256 rows (the rows pass Y's taps reach: at most r away), into s_x (16 KB, the Vulkan minimum),
+// then pass Y for its own rows. So r <= 64 (NormalSmoothing's range is 0-64).
+//
+// Build: glslangValidator -V --target-env vulkan1.1 -S comp -o AmbientLightSmooth.spv AmbientLightSmooth.comp
+// (the .spv next to this file is what NVR loads: Shaders\NewVegasReloaded\Compute\AmbientLightSmooth.spv)
+
+#version 450
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 32, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_prep;     // NVR_AmbientLightPrep (A32B32G32R32F): x view depth, y packed normal
+
+layout(set = 1, binding = 1, std430) writeonly buffer Result {
+    vec4 result[];                                       // width * height texels, row by row: the smoothed prep
+};
+
+layout(push_constant) uniform Push {
+    uint  width;                                         // 0: half-resolution size (the prep's)
+    uint  height;                                        // 4
+    uint  tileRows;                                      // 8: rows of output per group (256 - 2 * reachTexels)
+    uint  reachTexels;                                   // 12: r as an integer (the apron)
+    float reach;                                         // 16: NVR_ALEdges.x (NormalSmoothing)
+    float drawDistance;                                  // 20: max(TESR_AmbientLightData.w, 100)
+    float invWidth;                                      // 24: NVR_ALLayout.z
+    float invHeight;                                     // 28: NVR_ALLayout.w
+    float uvOffsetX;                                     // 32: the frame quad's offset (0.5 / full width)
+    float uvOffsetY;                                     // 36: (0.5 / full height)
+    float proj00;                                        // 40: TESR_ProjectionTransform[0][0]
+    float proj11;                                        // 44: TESR_ProjectionTransform[1][1]
+} pc;                                                    // 48 bytes
+
+const uint REGION_ROWS = 256u;
+shared uvec2 s_x[REGION_ROWS * 8u];                      // pass X's result per (row, column): packHalf2x16(normal.xy), (normal.z, viewZ)
+
+// D3D's saturate: NaN -> 0 (DXVK converts it with NClamp; GLSL clamp leaves NaN undefined). It matters: a sky texel's view depth
+// becomes +inf in pass X's 16-bit result, so a Y tap on it has an infinite or NaN plane distance, and its weight must be 0.
+float saturate(float v) { return v > 0.0 ? min(v, 1.0) : 0.0; }
+
+// ---- AmbientLight.fx.hlsl ---------------------------------------------------------
+vec3 PositionFromViewZ(vec2 uv, float z) {
+    return vec3((uv.x * 2.0 - 1.0) / pc.proj00, (1.0 - uv.y * 2.0) / pc.proj11, 1.0) * z;
+}
+
+float Pack2(vec2 v) { v = floor(clamp(v, 0.0, 1.0) * 4095.0 + 0.5); return v.x * 4096.0 + v.y; }
+vec2 Unpack2(float p) { float high = floor(p / 4096.0); return vec2(high, p - high * 4096.0) / 4095.0; }
+vec2 OctEncode(vec3 n) {
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    vec2 s = vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * s;
+    return e * 0.5 + 0.5;
+}
+vec3 OctDecode(vec2 e) {
+    e = e * 2.0 - 1.0;
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    float t = saturate(-n.z);
+    n.x += n.x >= 0.0 ? -t : t;
+    n.y += n.y >= 0.0 ? -t : t;
+    return normalize(n);
+}
+
+// The texel a POINT sampler reads at this (already saturated) coordinate.
+int PointTexel(float u, uint size) { return clamp(int(floor(u * float(size))), 0, int(size) - 1); }
+
+// One tap's weight (SmoothNormal's loop body).
+float TapWeight(vec2 tapUV, float tapZ, vec3 tapNormal, vec3 origin, vec3 normal, float viewZ, float dist, float onScreen) {
+    float tolerance = max(viewZ * 0.001 * dist, 0.5);
+    float plane = abs(dot(PositionFromViewZ(tapUV, tapZ) - origin, normal));
+    return saturate(1.0 - plane / tolerance) * smoothstep(0.5, 0.8, dot(tapNormal, normal)) * onScreen;
+}
+
+float OnScreen(vec2 t) { return step(0.0, t.x) * step(t.x, 1.0) * step(0.0, t.y) * step(t.y, 1.0); }
+
+// Pass X at texel (x, y): (normal, view depth), as the D3D9 pass writes it (before the 16-bit rounding).
+vec4 SmoothX(int x, int y) {
+    vec2 uv = vec2(float(x) * pc.invWidth + pc.uvOffsetX, float(y) * pc.invHeight + pc.uvOffsetY);
+    vec4 c = texelFetch(t_prep, ivec2(x, y), 0);
+    float viewZ = c.x;
+    vec3 normal = OctDecode(Unpack2(c.y));
+    if (viewZ < pc.drawDistance && pc.reach > 0.5) {
+        vec3 origin = PositionFromViewZ(uv, viewZ);
+        float spacing = pc.reach / 3.0;
+        vec3 sum = normal;
+        for (int k = -3; k <= 3; k++) {
+            if (k == 0) continue;
+            float dist = abs(float(k)) * spacing;
+            vec2 tapUV = uv + vec2(1.0, 0.0) * (float(k) * spacing) * vec2(pc.invWidth, pc.invHeight);
+            float onScreen = OnScreen(tapUV);
+            tapUV = clamp(tapUV, 0.0, 1.0);
+            vec4 t = texelFetch(t_prep, ivec2(PointTexel(tapUV.x, pc.width), y), 0);
+            float tapZ = t.x;
+            vec3 tapNormal = OctDecode(Unpack2(t.y));
+            sum += tapNormal * TapWeight(tapUV, tapZ, tapNormal, origin, normal, viewZ, dist, onScreen);
+        }
+        normal = normalize(sum);
+    }
+    return vec4(normal, viewZ);
+}
+
+vec4 ReadX(uint row, uint column) {
+    uvec2 p = s_x[row * 8u + column];
+    return vec4(unpackHalf2x16(p.x), unpackHalf2x16(p.y));
+}
+
+void main() {
+    uint column = gl_LocalInvocationID.x;
+    int x = int(gl_WorkGroupID.x * 8u + column);
+    int firstRow = int(gl_WorkGroupID.y * pc.tileRows);     // this group's first output row
+    int regionTop = firstRow - int(pc.reachTexels);          // the image row of s_x row 0
+    bool inX = x < int(pc.width);
+
+    // Pass X over the group's 8 columns and every row pass Y can reach (rows outside the image are never read: Y's taps clamp).
+    for (uint row = gl_LocalInvocationID.y; row < REGION_ROWS; row += 32u) {
+        int y = regionTop + int(row);
+        if (inX && y >= 0 && y < int(pc.height)) {
+            vec4 v = SmoothX(x, y);
+            s_x[row * 8u + column] = uvec2(packHalf2x16(v.xy), packHalf2x16(v.zw));   // the A16B16G16R16F target's rounding
+        }
+    }
+    barrier();
+
+    // Pass Y for the group's own rows, then packed as Prepare does.
+    for (uint row = gl_LocalInvocationID.y; row < pc.tileRows; row += 32u) {
+        int y = firstRow + int(row);
+        if (!inX || y >= int(pc.height)) continue;
+        vec2 uv = vec2(float(x) * pc.invWidth + pc.uvOffsetX, float(y) * pc.invHeight + pc.uvOffsetY);
+        vec4 c = ReadX(uint(y - regionTop), column);
+        vec3 normal = c.xyz;
+        float viewZ = c.w;
+        if (viewZ < pc.drawDistance && pc.reach > 0.5) {
+            vec3 origin = PositionFromViewZ(uv, viewZ);
+            float spacing = pc.reach / 3.0;
+            vec3 sum = normal;
+            for (int k = -3; k <= 3; k++) {
+                if (k == 0) continue;
+                float dist = abs(float(k)) * spacing;
+                vec2 tapUV = uv + vec2(0.0, 1.0) * (float(k) * spacing) * vec2(pc.invWidth, pc.invHeight);
+                float onScreen = OnScreen(tapUV);
+                tapUV = clamp(tapUV, 0.0, 1.0);
+                vec4 t = ReadX(uint(PointTexel(tapUV.y, pc.height) - regionTop), column);
+                vec3 tapNormal = t.xyz;
+                float tapZ = t.w;
+                sum += tapNormal * TapWeight(tapUV, tapZ, tapNormal, origin, normal, viewZ, dist, onScreen);
+            }
+            normal = normalize(sum);
+        }
+        result[uint(y) * pc.width + uint(x)] = vec4(viewZ, Pack2(OctEncode(normal)), 0.0, 0.0);
+    }
+}

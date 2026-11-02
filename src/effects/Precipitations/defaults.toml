@@ -1,0 +1,13 @@
+[_Shaders.Precipitations.Main]
+Bloom = 0.5                          # Rain effect that is blocked by objects above and refracts light.
+Coloring = 1.1                       # Base coloring amount added to the refracted color.
+Opacity = 1.0                        # Opacity of the drops.
+Refraction = 1.0                     # Distance of the refraction of the screen image by the droplets.
+Speed = 3.0                          # Multiplier for the rain speed.
+VerticalScale = 1.6                  # Multiplier for the length of the drops/streaks.
+SkipHiddenLayers = true              # UNOFFICIAL: skips the rain layers that lie behind walls and ground (they add nothing): same picture, less work. Off = as before.
+ForceRain = false                    # UNOFFICIAL TEST AID (2026-10-25), live: the rain effects act as if it rained outdoors in any weather (FalloutNV.esm has no rainy weather; the DLCs and weather mods do), like Snow's ForceSnow. Leave off for play.
+
+[_Shaders.Precipitations.Status]
+Enabled = true                       # Rain effect that is blocked by objects above and refracts light.
+

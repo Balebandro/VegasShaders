@@ -1,0 +1,19 @@
+[_Shaders.Specular.Exterior]
+SunStrength = 0.6                   # [0-4] The sun's highlight on every surface outdoors (1: as much as real non-metal surfaces reflect). Strongest looking toward the sun; none in the sun's shadow.
+Roughness = 0.8                     # [0.05-1] How rough surfaces are: lower is a smaller, brighter highlight and a clearer reflection, higher a broad, faint sheen. Dry ground and walls are rough.
+SkyReflections = 0.3                # [0-4] The sky's reflection, mostly seen on surfaces at a glancing angle (1: as much as real surfaces reflect).
+DistanceFade = 30000                # [500-300000] Fades out toward this distance (game units, about 70 to a metre).
+SpecularAA = 1.0                    # [0-1] Softens the highlight where the surface's shape varies within a few pixels (far away, sharp corners), so it does not crawl or blotch. 0: off.
+Reflectance = 0.04                  # [0-0.2] How much a surface reflects head on (0.04: most non-metals; water 0.02).
+
+[_Shaders.Specular.Rain]
+SunStrength = 0.6                   # [0-4] As in Exterior, while it rains (blended in with the rain).
+Roughness = 0.55                    # [0.05-1] Wet surfaces are smoother: a smaller, brighter highlight and a clearer reflection.
+SkyReflections = 0.4                # [0-4] As in Exterior, while it rains.
+DistanceFade = 30000                # [500-300000] As in Exterior, while it rains.
+SpecularAA = 1.0                    # [0-1] As in Exterior, while it rains.
+Reflectance = 0.04                  # [0-0.2] As in Exterior, while it rains.
+
+[_Shaders.Specular.Status]
+Enabled = false                      # The sun's highlight and the sky's reflection on every surface outdoors (UNOFFICIAL: modern GGX specular, about 0.4 ms at 1440p).
+

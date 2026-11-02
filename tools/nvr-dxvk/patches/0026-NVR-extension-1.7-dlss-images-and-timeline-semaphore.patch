@@ -1,0 +1,1070 @@
+From f4caa856f71d2e337234d40976d2f5e638a08a87 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Tue, 27 Oct 2026 10:24:11 -0400
+Subject: [PATCH] NVR extension 1.7-dlss: images and timeline semaphores shared
+ with another process (ID3D9NvrExtShare)
+
+CreateSharedImage / CreateSharedFence: DXVK images with a dedicated exportable
+allocation (OPAQUE_WIN32 NT handles, kept in GENERAL between uses) and exportable
+timeline semaphores, for a 64-bit helper process on the same GPU (NVR's DLSS helper:
+NVIDIA's DLSS runtime is 64-bit only). GetInfo reports what the importer needs to
+create the identical VkImage (format, usage, flags, tiling, allocation size, memory
+type index; DxvkResourceAllocation::getMemoryTypeIndex is new). CopyToShared /
+CopyFromShared (image copy, or a 1:1 blit between formats), SignalShared (signal +
+flush) and WaitShared (GPU wait in the command list being recorded) are recorded in
+DXVK's command stream; no CPU waits. SignalFromHost / GetCompletedValue for a
+watchdog that releases the GPU when the other process dies. No NVIDIA code: plain
+Vulkan external memory / semaphores, which DXVK already enables when present.
+
+NT handles are exported once: Vulkan allows one vkGet*Win32HandleKHR per object
+and NT handle type, and NVIDIA returns the SAME handle value on a second export.
+DXVK's DxvkFence / DxvkResourceAllocation exported once at creation and closed it,
+so every later export was a dead handle (Win32 error 6: the helper never got its
+semaphores). They now keep that handle (DxvkFence::ntHandle, exportResult;
+DxvkResourceAllocation::sharedNtHandle) and sharedHandle() / CreateHandle return
+duplicates. Failures say which step: NVR_EXT_HRESULT_FROM_VK(VkResult) or
+HRESULT_FROM_WIN32(error).
+---
+ src/d3d9/d3d9_nvr_ext.cpp   | 515 ++++++++++++++++++++++++++++++++++++
+ src/d3d9/d3d9_nvr_ext.h     |  97 ++++++-
+ src/d3d9/d3d9_nvr_ext_api.h | 163 ++++++++++++
+ src/dxvk/dxvk_fence.cpp     |  22 +-
+ src/dxvk/dxvk_fence.h       |  22 ++
+ src/dxvk/dxvk_image.cpp     |  12 +
+ src/dxvk/dxvk_memory.cpp    |   9 +-
+ src/dxvk/dxvk_memory.h      |  25 ++
+ 8 files changed, 862 insertions(+), 3 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 6974c5d..558f0ae 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -169,6 +169,12 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    // 1.7-dlss: images and semaphores shared with another process
++    if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtShare)) {
++      *ppvObject = ref(static_cast<ID3D9NvrExtShare*>(this));
++      return S_OK;
++    }
++
+     return m_device->QueryInterface(riid, ppvObject);
+   }
+ 
+@@ -2038,4 +2044,513 @@ namespace dxvk {
+     return D3D_OK;
+   }
+ 
++
++
++  // ---- 1.7-dlss: ID3D9NvrExtShare -----------------------------------------------------------------
++  //
++  // Images and timeline semaphores another process imports (NVR's 64-bit DLSS helper). Plain Vulkan
++  // external memory / semaphores with Win32 NT handles; DXVK already enables both extensions when the
++  // driver has them. A shared image is a DXVK image of its own: shared (kept in its default layout,
++  // GENERAL, after every submission), dedicated exportable allocation, never relocated.
++
++  // A caller-owned duplicate of a kept NT handle; a failure says which Win32 error.
++  static HRESULT DuplicateNvrSharedHandle(HANDLE kept, HANDLE* pHandle, const char* what) {
++    HANDLE copy = nullptr;
++
++    if (!DuplicateHandle(GetCurrentProcess(), kept, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
++      DWORD error = GetLastError();
++      Logger::err(str::format("NVR ext: ", what, ": DuplicateHandle failed: Win32 error ", error));
++      return HRESULT_FROM_WIN32(error);
++    }
++
++    *pHandle = copy;
++    return D3D_OK;
++  }
++
++
++  static VkFormat DecodeNvrSharedFormat(NVR_EXT_SHARED_FORMAT format) {
++    switch (format) {
++      case NVR_EXT_SHARED_RGBA16F: return VK_FORMAT_R16G16B16A16_SFLOAT;
++      case NVR_EXT_SHARED_RG16F:   return VK_FORMAT_R16G16_SFLOAT;
++      case NVR_EXT_SHARED_R32F:    return VK_FORMAT_R32_SFLOAT;
++      case NVR_EXT_SHARED_RG32F:   return VK_FORMAT_R32G32_SFLOAT;
++      case NVR_EXT_SHARED_RGBA8:   return VK_FORMAT_R8G8B8A8_UNORM;
++      case NVR_EXT_SHARED_R16F:    return VK_FORMAT_R16_SFLOAT;
++      default:                     return VK_FORMAT_UNDEFINED;
++    }
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtSharedImage::QueryInterface(REFIID riid, void** ppvObject) {
++    if (ppvObject == nullptr)
++      return E_POINTER;
++
++    *ppvObject = nullptr;
++
++    if (riid == __uuidof(IUnknown)
++     || riid == __uuidof(ID3D9NvrExtSharedImage)) {
++      *ppvObject = ref(this);
++      return S_OK;
++    }
++
++    return E_NOINTERFACE;
++  }
++
++
++  void STDMETHODCALLTYPE D3D9NvrExtSharedImage::GetInfo(NVR_EXT_SHARED_IMAGE_INFO* pInfo) {
++    if (pInfo != nullptr)
++      *pInfo = m_info;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtSharedImage::CreateHandle(HANDLE* pHandle) {
++    if (pHandle == nullptr)
++      return E_POINTER;
++
++    *pHandle = nullptr;
++
++    HANDLE kept = m_image->storage()->sharedNtHandle();
++
++    if (kept == INVALID_HANDLE_VALUE || kept == nullptr) {
++      Logger::err("NVR ext: SharedImage::CreateHandle: the image's memory has no exported NT handle");
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    return DuplicateNvrSharedHandle(kept, pHandle, "SharedImage::CreateHandle");
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtSharedFence::QueryInterface(REFIID riid, void** ppvObject) {
++    if (ppvObject == nullptr)
++      return E_POINTER;
++
++    *ppvObject = nullptr;
++
++    if (riid == __uuidof(IUnknown)
++     || riid == __uuidof(ID3D9NvrExtSharedFence)) {
++      *ppvObject = ref(this);
++      return S_OK;
++    }
++
++    return E_NOINTERFACE;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtSharedFence::CreateHandle(HANDLE* pHandle) {
++    if (pHandle == nullptr)
++      return E_POINTER;
++
++    *pHandle = nullptr;
++
++    HANDLE kept = m_fence->ntHandle();
++
++    if (kept == INVALID_HANDLE_VALUE || kept == nullptr) {
++      VkResult vr = m_fence->exportResult();
++      Logger::err(str::format("NVR ext: SharedFence::CreateHandle: the semaphore has no exported NT handle (export: ", vr, ")"));
++      return vr != VK_SUCCESS ? NVR_EXT_HRESULT_FROM_VK(vr) : D3DERR_NOTAVAILABLE;
++    }
++
++    return DuplicateNvrSharedHandle(kept, pHandle, "SharedFence::CreateHandle");
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtSharedFence::GetCompletedValue(UINT64* pValue) {
++    if (pValue == nullptr)
++      return E_POINTER;
++
++    uint64_t value = 0u;
++
++    if (m_vkd->vkGetSemaphoreCounterValue(m_vkd->device(), m_fence->handle(), &value) != VK_SUCCESS)
++      return D3DERR_DEVICELOST;
++
++    *pValue = value;
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtSharedFence::SignalFromHost(UINT64 Value) {
++    VkSemaphoreSignalInfo info = { VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO };
++    info.semaphore = m_fence->handle();
++    info.value = Value;
++
++    VkResult vr = m_vkd->vkSignalSemaphore(m_vkd->device(), &info);
++
++    if (vr != VK_SUCCESS) {
++      Logger::err(str::format("NVR ext: SignalFromHost: vkSignalSemaphore failed: ", vr));
++      return D3DERR_INVALIDCALL;
++    }
++
++    return D3D_OK;
++  }
++
++
++  void STDMETHODCALLTYPE D3D9NvrExt::GetShareInfo(NVR_EXT_SHARE_INFO* pInfo) {
++    if (pInfo == nullptr)
++      return;
++
++    Rc<DxvkDevice> device = m_device->GetDXVKDevice();
++    const auto& props = device->properties();
++    const auto& features = device->features();
++
++    *pInfo = NVR_EXT_SHARE_INFO();
++    pInfo->Supported = features.khrExternalMemoryWin32 && features.khrExternalSemaphoreWin32;
++    pInfo->VendorId = props.core.properties.vendorID;
++    pInfo->DeviceId = props.core.properties.deviceID;
++    pInfo->DriverVersion = props.core.properties.driverVersion;
++    pInfo->ApiVersion = props.core.properties.apiVersion;
++    std::memcpy(pInfo->DeviceUUID, props.vk11.deviceUUID, sizeof(pInfo->DeviceUUID));
++    std::memcpy(pInfo->DriverUUID, props.vk11.driverUUID, sizeof(pInfo->DriverUUID));
++    std::memcpy(pInfo->DeviceLUID, props.vk11.deviceLUID, sizeof(pInfo->DeviceLUID));
++    pInfo->DeviceLUIDValid = props.vk11.deviceLUIDValid;
++    std::strncpy(pInfo->DeviceName, props.core.properties.deviceName, sizeof(pInfo->DeviceName) - 1u);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CreateSharedImage(
++    const NVR_EXT_SHARED_IMAGE_DESC*      pDesc,
++          ID3D9NvrExtSharedImage**        ppImage) {
++    InitReturnPtr(ppImage);
++
++    if (unlikely(pDesc == nullptr || ppImage == nullptr || !pDesc->Width || !pDesc->Height))
++      return D3DERR_INVALIDCALL;
++
++    VkFormat format = DecodeNvrSharedFormat(pDesc->Format);
++
++    if (unlikely(format == VK_FORMAT_UNDEFINED))
++      return D3DERR_INVALIDCALL;
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    Rc<DxvkDevice> device = m_device->GetDXVKDevice();
++
++    if (!device->features().khrExternalMemoryWin32) {
++      Logger::err("NVR ext: CreateSharedImage: VK_KHR_external_memory_win32 is not enabled on this device");
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    DxvkImageCreateInfo info;
++    info.type          = VK_IMAGE_TYPE_2D;
++    info.format        = format;
++    info.flags         = 0u;
++    info.sampleCount   = VK_SAMPLE_COUNT_1_BIT;
++    info.extent        = { pDesc->Width, pDesc->Height, 1u };
++    info.numLayers     = 1u;
++    info.mipLevels     = 1u;
++    info.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
++                       | VK_IMAGE_USAGE_TRANSFER_DST_BIT
++                       | VK_IMAGE_USAGE_SAMPLED_BIT
++                       | VK_IMAGE_USAGE_STORAGE_BIT
++                       | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++    info.stages        = VK_PIPELINE_STAGE_TRANSFER_BIT
++                       | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
++                       | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
++                       | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
++    info.access        = VK_ACCESS_TRANSFER_READ_BIT
++                       | VK_ACCESS_TRANSFER_WRITE_BIT
++                       | VK_ACCESS_SHADER_READ_BIT
++                       | VK_ACCESS_SHADER_WRITE_BIT
++                       | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
++                       | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
++    info.tiling        = VK_IMAGE_TILING_OPTIMAL;
++    info.layout        = VK_IMAGE_LAYOUT_GENERAL;
++    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++    info.shared        = VK_TRUE;
++    info.sharing.mode  = DxvkSharedHandleMode::Export;
++    info.sharing.type  = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++    info.debugName     = pDesc->pDebugName ? pDesc->pDebugName : "NVR shared image";
++
++    // Exportable at that size with that usage? (DxvkImage would otherwise quietly make an unshared image.)
++    DxvkFormatQuery query = { };
++    query.format     = format;
++    query.type       = VK_IMAGE_TYPE_2D;
++    query.tiling     = VK_IMAGE_TILING_OPTIMAL;
++    query.usage      = info.usage;
++    query.flags      = 0u;
++    query.handleType = info.sharing.type;
++
++    auto limits = device->getFormatLimits(query);
++
++    if (!limits || !(limits->externalFeatures & VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT)
++     || limits->maxExtent.width < pDesc->Width || limits->maxExtent.height < pDesc->Height) {
++      Logger::err(str::format("NVR ext: CreateSharedImage: format ", uint32_t(format), " ", pDesc->Width, "x", pDesc->Height,
++        " cannot be exported (OPAQUE_WIN32) on this device"));
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    Rc<DxvkImage> image;
++
++    try {
++      image = device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext: CreateSharedImage: ", e.message()));
++      return D3DERR_OUTOFVIDEOMEMORY;
++    }
++
++    // An image that could not be shared after all has no handle (checked without a second export).
++    Rc<DxvkResourceAllocation> storage = image->storage();
++
++    if (storage->sharedNtHandle() == INVALID_HANDLE_VALUE || storage->sharedNtHandle() == nullptr) {
++      Logger::err("NVR ext: CreateSharedImage: the image was made but its memory has no exported NT handle (the DXVK log above says why)");
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    DxvkResourceMemoryInfo memory = storage->getMemoryInfo();
++
++    if (memory.offset != 0u) {
++      Logger::err(str::format("NVR ext: CreateSharedImage: the allocation is not dedicated (offset ", memory.offset, ")"));
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    NVR_EXT_SHARED_IMAGE_INFO out = { };
++    out.VkFormat        = uint32_t(format);
++    out.Width           = pDesc->Width;
++    out.Height          = pDesc->Height;
++    out.MipLevels       = 1u;
++    out.ArrayLayers     = 1u;
++    out.Samples         = uint32_t(VK_SAMPLE_COUNT_1_BIT);
++    out.Usage           = uint32_t(image->info().usage);
++    out.Flags           = uint32_t(image->info().flags);
++    out.Tiling          = uint32_t(image->info().tiling);
++    out.Layout          = uint32_t(VK_IMAGE_LAYOUT_GENERAL);
++    out.HandleType      = uint32_t(VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT);
++    out.MemoryTypeIndex = storage->getMemoryTypeIndex();
++    out.AllocationSize  = memory.size;
++    out.Dedicated       = TRUE;
++
++    // Into its default layout (GENERAL), cleared to black, before anyone else touches it.
++    m_device->EmitCs([
++      cImage = image
++    ] (DxvkContext* ctx) {
++      ctx->initImage(cImage, VK_IMAGE_LAYOUT_UNDEFINED);
++    });
++
++    Logger::info(str::format("NVR ext: shared image ", info.debugName, " ", pDesc->Width, "x", pDesc->Height,
++      " format ", uint32_t(format), ", ", memory.size, " bytes, memory type ", out.MemoryTypeIndex));
++
++    *ppImage = ref(new D3D9NvrExtSharedImage(std::move(image), out));
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CreateSharedFence(
++          UINT64                          InitialValue,
++          ID3D9NvrExtSharedFence**        ppFence) {
++    InitReturnPtr(ppFence);
++
++    if (unlikely(ppFence == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    Rc<DxvkDevice> device = m_device->GetDXVKDevice();
++
++    if (!device->features().khrExternalSemaphoreWin32) {
++      Logger::err("NVR ext: CreateSharedFence: VK_KHR_external_semaphore_win32 is not enabled on this device");
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    DxvkFenceCreateInfo info;
++    info.initialValue = InitialValue;
++    info.sharedType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
++
++    Rc<DxvkFence> fence;
++
++    try {
++      fence = device->createFence(info);
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext: CreateSharedFence: ", e.message()));
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    // DxvkFence makes a plain semaphore when export is not supported: no handle then (checked without a second export).
++    if (fence->ntHandle() == INVALID_HANDLE_VALUE || fence->ntHandle() == nullptr) {
++      VkResult vr = fence->exportResult();
++      Logger::err(str::format("NVR ext: CreateSharedFence: the timeline semaphore was not exported (export: ", vr, ")"));
++      return vr != VK_SUCCESS ? NVR_EXT_HRESULT_FROM_VK(vr) : D3DERR_NOTAVAILABLE;
++    }
++
++    *ppFence = ref(new D3D9NvrExtSharedFence(std::move(fence), device->vkd()));
++    return D3D_OK;
++  }
++
++
++  HRESULT D3D9NvrExt::RecordSharedCopy(
++    const Rc<DxvkImage>&                  DstImage,
++          uint32_t                        DstMip,
++          uint32_t                        DstLayer,
++          UINT                            DstX,
++          UINT                            DstY,
++    const Rc<DxvkImage>&                  SrcImage,
++          uint32_t                        SrcMip,
++          uint32_t                        SrcLayer,
++    const RECT*                           pSrcRect) {
++    if (unlikely(DstImage == nullptr || SrcImage == nullptr || DstImage == SrcImage))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(DstImage->info().sampleCount != VK_SAMPLE_COUNT_1_BIT || SrcImage->info().sampleCount != VK_SAMPLE_COUNT_1_BIT))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(!(lookupFormatInfo(DstImage->info().format)->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)
++              || !(lookupFormatInfo(SrcImage->info().format)->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)))
++      return D3DERR_INVALIDCALL;
++
++    VkExtent3D srcExtent = SrcImage->mipLevelExtent(SrcMip);
++    VkExtent3D dstExtent = DstImage->mipLevelExtent(DstMip);
++
++    RECT rect = { 0, 0, LONG(srcExtent.width), LONG(srcExtent.height) };
++
++    if (pSrcRect != nullptr)
++      rect = *pSrcRect;
++
++    if (unlikely(rect.left < 0 || rect.top < 0 || rect.right <= rect.left || rect.bottom <= rect.top
++              || UINT(rect.right) > srcExtent.width || UINT(rect.bottom) > srcExtent.height))
++      return D3DERR_INVALIDCALL;
++
++    UINT width  = UINT(rect.right - rect.left);
++    UINT height = UINT(rect.bottom - rect.top);
++
++    if (unlikely(DstX + width > dstExtent.width || DstY + height > dstExtent.height))
++      return D3DERR_INVALIDCALL;
++
++    VkImageSubresourceLayers dstLayers = { VK_IMAGE_ASPECT_COLOR_BIT, DstMip, DstLayer, 1u };
++    VkImageSubresourceLayers srcLayers = { VK_IMAGE_ASPECT_COLOR_BIT, SrcMip, SrcLayer, 1u };
++
++    if (DstImage->info().format == SrcImage->info().format) {
++      m_device->EmitCs([
++        cDst       = DstImage,
++        cDstLayers = dstLayers,
++        cDstOffset = VkOffset3D { int32_t(DstX), int32_t(DstY), 0 },
++        cSrc       = SrcImage,
++        cSrcLayers = srcLayers,
++        cSrcOffset = VkOffset3D { int32_t(rect.left), int32_t(rect.top), 0 },
++        cExtent    = VkExtent3D { width, height, 1u }
++      ] (DxvkContext* ctx) {
++        ctx->copyImage(cDst, cDstLayers, cDstOffset, cSrc, cSrcLayers, cSrcOffset, cExtent);
++      });
++
++      return D3D_OK;
++    }
++
++    // Different formats: a 1:1 blit (format conversion, nearest), the way D3D9's StretchRect does it.
++    DxvkImageViewKey dstKey;
++    dstKey.viewType   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++    dstKey.usage      = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    dstKey.format     = DstImage->info().format;
++    dstKey.aspects    = VK_IMAGE_ASPECT_COLOR_BIT;
++    dstKey.mipIndex   = DstMip;
++    dstKey.mipCount   = 1u;
++    dstKey.layerIndex = DstLayer;
++    dstKey.layerCount = 1u;
++
++    DxvkImageViewKey srcKey;
++    srcKey.viewType   = VK_IMAGE_VIEW_TYPE_2D;
++    srcKey.usage      = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++    srcKey.format     = SrcImage->info().format;
++    srcKey.aspects    = VK_IMAGE_ASPECT_COLOR_BIT;
++    srcKey.mipIndex   = SrcMip;
++    srcKey.mipCount   = 1u;
++    srcKey.layerIndex = SrcLayer;
++    srcKey.layerCount = 1u;
++
++    std::array<VkOffset3D, 2> dstOffsets = {{ { int32_t(DstX), int32_t(DstY), 0 },
++      { int32_t(DstX + width), int32_t(DstY + height), 1 } }};
++    std::array<VkOffset3D, 2> srcOffsets = {{ { int32_t(rect.left), int32_t(rect.top), 0 },
++      { int32_t(rect.right), int32_t(rect.bottom), 1 } }};
++
++    m_device->EmitCs([
++      cDstView    = DstImage->createView(dstKey),
++      cSrcView    = SrcImage->createView(srcKey),
++      cDstOffsets = dstOffsets,
++      cSrcOffsets = srcOffsets
++    ] (DxvkContext* ctx) {
++      ctx->blitImageView(cDstView, cDstOffsets.data(), cSrcView, cSrcOffsets.data(), VK_FILTER_NEAREST);
++    });
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CopyToShared(
++          ID3D9NvrExtSharedImage*         pDst,
++          UINT                            DstX,
++          UINT                            DstY,
++          IUnknown*                       pSrc,
++    const RECT*                           pSrcRect) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pDst == nullptr || pSrc == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    TextureRef ref;
++    if (unlikely(!ResolveTexture(pSrc, 0u, 0u, ref)))
++      return D3DERR_INVALIDCALL;
++
++    Rc<DxvkImage> src = ref.texture->GetImage();
++    Rc<DxvkImage> dst = static_cast<D3D9NvrExtSharedImage*>(pDst)->GetImage();
++
++    return RecordSharedCopy(dst, 0u, 0u, DstX, DstY, src, ref.mipLevel, ref.layer, pSrcRect);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CopyFromShared(
++          IUnknown*                       pDst,
++          UINT                            DstX,
++          UINT                            DstY,
++          ID3D9NvrExtSharedImage*         pSrc,
++    const RECT*                           pSrcRect) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pDst == nullptr || pSrc == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    TextureRef ref;
++    if (unlikely(!ResolveTexture(pDst, 0u, 0u, ref)))
++      return D3DERR_INVALIDCALL;
++
++    Rc<DxvkImage> dst = ref.texture->GetImage();
++    Rc<DxvkImage> src = static_cast<D3D9NvrExtSharedImage*>(pSrc)->GetImage();
++
++    return RecordSharedCopy(dst, ref.mipLevel, ref.layer, DstX, DstY, src, 0u, 0u, pSrcRect);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::SignalShared(
++          ID3D9NvrExtSharedFence*         pFence,
++          UINT64                          Value) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pFence == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    m_device->EmitCs([
++      cFence = static_cast<D3D9NvrExtSharedFence*>(pFence)->GetFence(),
++      cValue = uint64_t(Value)
++    ] (DxvkContext* ctx) {
++      ctx->signalFence(cFence, cValue);
++    });
++
++    // The command list so far goes to the GPU now, with the signal (the other process waits for it).
++    m_device->ExecuteFlush(false);
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::WaitShared(
++          ID3D9NvrExtSharedFence*         pFence,
++          UINT64                          Value) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pFence == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    m_device->EmitCs([
++      cFence = static_cast<D3D9NvrExtSharedFence*>(pFence)->GetFence(),
++      cValue = uint64_t(Value)
++    ] (DxvkContext* ctx) {
++      ctx->waitFence(cFence, cValue);
++    });
++
++    return D3D_OK;
++  }
++
+ }
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index 0df885b..3383b4a 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -12,6 +12,7 @@
+ 
+ #include "../dxvk/dxvk_buffer.h"
+ #include "../dxvk/dxvk_constant_state.h"
++#include "../dxvk/dxvk_fence.h"
+ #include "../dxvk/dxvk_image.h"
+ #include "../dxvk/dxvk_sampler.h"
+ #include "../dxvk/dxvk_shader.h"
+@@ -135,12 +136,60 @@ namespace dxvk {
+ 
+   };
+ 
++  /** 1.7-dlss: an exportable image shared with another process (ID3D9NvrExtShare). */
++  class D3D9NvrExtSharedImage final : public ComObject<ID3D9NvrExtSharedImage> {
++
++  public:
++
++    D3D9NvrExtSharedImage(Rc<DxvkImage>&& image, const NVR_EXT_SHARED_IMAGE_INFO& info)
++    : m_image(std::move(image)), m_info(info) { }
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    void STDMETHODCALLTYPE GetInfo(NVR_EXT_SHARED_IMAGE_INFO* pInfo);
++
++    HRESULT STDMETHODCALLTYPE CreateHandle(HANDLE* pHandle);
++
++    const Rc<DxvkImage>& GetImage() const { return m_image; }
++
++  private:
++
++    Rc<DxvkImage>              m_image;
++    NVR_EXT_SHARED_IMAGE_INFO  m_info;
++
++  };
++
++  /** 1.7-dlss: an exportable timeline semaphore (ID3D9NvrExtShare). */
++  class D3D9NvrExtSharedFence final : public ComObject<ID3D9NvrExtSharedFence> {
++
++  public:
++
++    D3D9NvrExtSharedFence(Rc<DxvkFence>&& fence, Rc<vk::DeviceFn> vkd)
++    : m_fence(std::move(fence)), m_vkd(std::move(vkd)) { }
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    HRESULT STDMETHODCALLTYPE CreateHandle(HANDLE* pHandle);
++
++    HRESULT STDMETHODCALLTYPE GetCompletedValue(UINT64* pValue);
++
++    HRESULT STDMETHODCALLTYPE SignalFromHost(UINT64 Value);
++
++    const Rc<DxvkFence>& GetFence() const { return m_fence; }
++
++  private:
++
++    Rc<DxvkFence>     m_fence;
++    Rc<vk::DeviceFn>  m_vkd;
++
++  };
++
+   /**
+    * \brief NVR extension object, owned by the D3D9 device
+    *
+    * Like D3D9VkInteropDevice: its reference count is the device's.
+    */
+-  class D3D9NvrExt final : public ID3D9NvrExt, public ID3D9NvrExtGeometry, public ID3D9NvrExtReadback, public ID3D9NvrExtGeometryScene {
++  class D3D9NvrExt final : public ID3D9NvrExt, public ID3D9NvrExtGeometry, public ID3D9NvrExtReadback, public ID3D9NvrExtGeometryScene, public ID3D9NvrExtShare {
+ 
+   public:
+ 
+@@ -285,6 +334,40 @@ namespace dxvk {
+             UINT                            Size,
+             void*                           pData);
+ 
++    // 1.7-dlss: ID3D9NvrExtShare
++    void STDMETHODCALLTYPE GetShareInfo(
++            NVR_EXT_SHARE_INFO*             pInfo);
++
++    HRESULT STDMETHODCALLTYPE CreateSharedImage(
++      const NVR_EXT_SHARED_IMAGE_DESC*      pDesc,
++            ID3D9NvrExtSharedImage**        ppImage);
++
++    HRESULT STDMETHODCALLTYPE CreateSharedFence(
++            UINT64                          InitialValue,
++            ID3D9NvrExtSharedFence**        ppFence);
++
++    HRESULT STDMETHODCALLTYPE CopyToShared(
++            ID3D9NvrExtSharedImage*         pDst,
++            UINT                            DstX,
++            UINT                            DstY,
++            IUnknown*                       pSrc,
++      const RECT*                           pSrcRect);
++
++    HRESULT STDMETHODCALLTYPE CopyFromShared(
++            IUnknown*                       pDst,
++            UINT                            DstX,
++            UINT                            DstY,
++            ID3D9NvrExtSharedImage*         pSrc,
++      const RECT*                           pSrcRect);
++
++    HRESULT STDMETHODCALLTYPE SignalShared(
++            ID3D9NvrExtSharedFence*         pFence,
++            UINT64                          Value);
++
++    HRESULT STDMETHODCALLTYPE WaitShared(
++            ID3D9NvrExtSharedFence*         pFence,
++            UINT64                          Value);
++
+   private:
+ 
+     /** CreateGraphicsPipeline and CreateGeometryPipeline. */
+@@ -308,6 +391,18 @@ namespace dxvk {
+ 
+     uint64_t m_profileOverhead100 = 0u;   // NVR profiling: the timer's own cost per call x 100 (SetProfiling)
+ 
++    /** 1.7-dlss: CopyToShared / CopyFromShared: an image copy, or a 1:1 blit between different formats. */
++    HRESULT RecordSharedCopy(
++      const Rc<DxvkImage>&                  DstImage,
++            uint32_t                        DstMip,
++            uint32_t                        DstLayer,
++            UINT                            DstX,
++            UINT                            DstY,
++      const Rc<DxvkImage>&                  SrcImage,
++            uint32_t                        SrcMip,
++            uint32_t                        SrcLayer,
++      const RECT*                           pSrcRect);
++
+     /** Draw, DrawShifted, DrawDepthStencil (pDepthStencil null: none) and DrawGeometry (VertexCount x InstanceCount). */
+     HRESULT DrawImpl(
+       const NVR_EXT_DRAW_DESC*              pDesc,
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index f6f14eb..40f1844 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -803,3 +803,166 @@ __CRT_UUID_DECL(ID3D9NvrExtPipeline, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf
+ __CRT_UUID_DECL(ID3D9NvrExtBuffer,   0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x02);
+ __CRT_UUID_DECL(ID3D9NvrExtSampler,  0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x03);
+ #endif
++
++/*
++ * 1.7-dlss: GPU images and timeline semaphores shared with another process (ID3D9NvrExtShare).
++ *
++ * For a 64-bit helper process (NVR's DLSS helper, tools/nvr-dlss-helper in the NVR repository)
++ * that works on the same GPU with its own Vulkan device: NVIDIA's DLSS runtime is 64-bit only,
++ * the game and this d3d9.dll are 32-bit. Nothing NVIDIA-specific is in DXVK: this is plain
++ * Vulkan external memory / external semaphores (VK_KHR_external_memory_win32 and
++ * VK_KHR_external_semaphore_win32, which DXVK enables whenever the driver has them) and works
++ * with any Vulkan helper.
++ *
++ * A separate interface, queried from ID3D9NvrExt (QueryInterface with its GUID), so a d3d9.dll
++ * without it returns E_NOINTERFACE and ID3D9NvrExt's own method table is untouched.
++ *
++ * Shared images are DXVK images of their own (not D3D9 textures) with a dedicated, exportable
++ * allocation, kept in VK_IMAGE_LAYOUT_GENERAL between uses. CopyToShared / CopyFromShared move
++ * pixels between them and D3D9 textures in DXVK's command stream. Shared fences are exportable
++ * timeline semaphores: SignalShared submits everything recorded so far with a signal (it flushes),
++ * WaitShared makes the GPU wait in the command list being recorded (work recorded since the last
++ * flush and everything after it, up to the next flush). No CPU waits anywhere. The importer must
++ * create its VkImage exactly as GetInfo describes it and import the memory with the same size and
++ * memory type (dedicated, handle type OPAQUE_WIN32).
++ *
++ * Usage per frame: CopyToShared (inputs) -> SignalShared(ready, N) -> [the other process waits
++ * for N, works, signals done = N] -> WaitShared(done, N) -> CopyFromShared (output).
++ */
++enum NVR_EXT_SHARED_FORMAT {
++  NVR_EXT_SHARED_RGBA16F = 0,  // VK_FORMAT_R16G16B16A16_SFLOAT
++  NVR_EXT_SHARED_RG16F   = 1,  // VK_FORMAT_R16G16_SFLOAT
++  NVR_EXT_SHARED_R32F    = 2,  // VK_FORMAT_R32_SFLOAT
++  NVR_EXT_SHARED_RG32F   = 3,  // VK_FORMAT_R32G32_SFLOAT
++  NVR_EXT_SHARED_RGBA8   = 4,  // VK_FORMAT_R8G8B8A8_UNORM
++  NVR_EXT_SHARED_R16F    = 5,  // VK_FORMAT_R16_SFLOAT
++};
++
++struct NVR_EXT_SHARE_INFO {
++  BOOL  Supported;          // external memory + external semaphores (Win32 handles) and timeline semaphores are there
++  UINT  VendorId;           // the Vulkan device's (0x10DE NVIDIA, 0x1002 AMD, 0x8086 Intel)
++  UINT  DeviceId;
++  UINT  DriverVersion;      // VkPhysicalDeviceProperties::driverVersion (vendor encoding)
++  UINT  ApiVersion;         // the Vulkan version of DXVK's device
++  BYTE  DeviceUUID[16];     // VkPhysicalDeviceIDProperties: the importer picks the same GPU by these
++  BYTE  DriverUUID[16];
++  BYTE  DeviceLUID[8];
++  BOOL  DeviceLUIDValid;
++  char  DeviceName[256];
++};
++
++struct NVR_EXT_SHARED_IMAGE_DESC {
++  UINT                  Width;
++  UINT                  Height;
++  NVR_EXT_SHARED_FORMAT Format;
++  const char*           pDebugName;
++};
++
++/** Everything an importer needs to create the identical VkImage and import its memory. */
++struct NVR_EXT_SHARED_IMAGE_INFO {
++  UINT    VkFormat;         // VkFormat
++  UINT    Width;
++  UINT    Height;
++  UINT    MipLevels;        // 1
++  UINT    ArrayLayers;      // 1
++  UINT    Samples;          // VK_SAMPLE_COUNT_1_BIT
++  UINT    Usage;            // VkImageUsageFlags
++  UINT    Flags;            // VkImageCreateFlags (0)
++  UINT    Tiling;           // VkImageTiling (OPTIMAL)
++  UINT    Layout;           // VkImageLayout it is in between uses (GENERAL)
++  UINT    HandleType;       // VkExternalMemoryHandleTypeFlagBits (OPAQUE_WIN32)
++  UINT    MemoryTypeIndex;  // of DXVK's device (the same GPU and driver: the same index in the importer)
++  UINT64  AllocationSize;   // bytes of the dedicated allocation
++  BOOL    Dedicated;        // TRUE: import with VkMemoryDedicatedAllocateInfo for the importer's image
++};
++
++/*
++ * CreateHandle / CreateShared* failures say which step failed: NVR_EXT_HRESULT_FROM_VK(VkResult) for a Vulkan call
++ * (the export), HRESULT_FROM_WIN32(error) for a Win32 call (the handle duplication), D3DERR_NOTAVAILABLE when the
++ * object is not shared at all. The DXVK log has a line for each.
++ */
++#define NVR_EXT_FACILITY_VK 0x7E1
++#define NVR_EXT_HRESULT_FROM_VK(vr) ((HRESULT)(0x80000000u | (0x7E1u << 16) | ((UINT)(-(INT)(vr)) & 0xFFFFu)))
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d327")
++ID3D9NvrExtSharedImage : public IUnknown {
++  virtual void STDMETHODCALLTYPE GetInfo(
++          NVR_EXT_SHARED_IMAGE_INFO*      pInfo) = 0;
++
++  /**
++   * A new NT handle to the image's memory, owned by the caller (DuplicateHandle it into the other process, then CloseHandle).
++   * Every call returns a duplicate of the one handle exported when the image was made (Vulkan allows one NT export).
++   */
++  virtual HRESULT STDMETHODCALLTYPE CreateHandle(
++          HANDLE*                         pHandle) = 0;
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d328")
++ID3D9NvrExtSharedFence : public IUnknown {
++  /** A new NT handle to the timeline semaphore (VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT), owned by the caller (a duplicate, as above). */
++  virtual HRESULT STDMETHODCALLTYPE CreateHandle(
++          HANDLE*                         pHandle) = 0;
++
++  /** The semaphore's current value (vkGetSemaphoreCounterValue). Any thread, never waits. */
++  virtual HRESULT STDMETHODCALLTYPE GetCompletedValue(
++          UINT64*                         pValue) = 0;
++
++  /**
++   * Signals the semaphore from the CPU now (vkSignalSemaphore), Value above the current one. Any thread.
++   * For recovery only: when the other process died or hung, this releases GPU work waiting on it.
++   */
++  virtual HRESULT STDMETHODCALLTYPE SignalFromHost(
++          UINT64                          Value) = 0;
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d326")
++ID3D9NvrExtShare : public IUnknown {
++  virtual void STDMETHODCALLTYPE GetShareInfo(
++          NVR_EXT_SHARE_INFO*             pInfo) = 0;
++
++  /** D3DERR_NOTAVAILABLE when the device cannot export images of that format and size. */
++  virtual HRESULT STDMETHODCALLTYPE CreateSharedImage(
++    const NVR_EXT_SHARED_IMAGE_DESC*      pDesc,
++          ID3D9NvrExtSharedImage**        ppImage) = 0;
++
++  /** An exportable timeline semaphore. D3DERR_NOTAVAILABLE without external semaphores. */
++  virtual HRESULT STDMETHODCALLTYPE CreateSharedFence(
++          UINT64                          InitialValue,
++          ID3D9NvrExtSharedFence**        ppFence) = 0;
++
++  /**
++   * Records a copy of pSrcRect (null = the whole subresource) of a D3D9 texture or surface (mip 0, layer 0
++   * of a texture) to (DstX, DstY) of the shared image. Same VkFormat: an image copy; otherwise a 1:1 blit
++   * (format conversion, nearest).
++   */
++  virtual HRESULT STDMETHODCALLTYPE CopyToShared(
++          ID3D9NvrExtSharedImage*         pDst,
++          UINT                            DstX,
++          UINT                            DstY,
++          IUnknown*                       pSrc,
++    const RECT*                           pSrcRect) = 0;
++
++  /** The reverse: pSrcRect (null = whole) of the shared image to (DstX, DstY) of a D3D9 texture or surface. */
++  virtual HRESULT STDMETHODCALLTYPE CopyFromShared(
++          IUnknown*                       pDst,
++          UINT                            DstX,
++          UINT                            DstY,
++          ID3D9NvrExtSharedImage*         pSrc,
++    const RECT*                           pSrcRect) = 0;
++
++  /** Records a signal of Value and submits everything recorded so far with it (a flush). */
++  virtual HRESULT STDMETHODCALLTYPE SignalShared(
++          ID3D9NvrExtSharedFence*         pFence,
++          UINT64                          Value) = 0;
++
++  /** Records a GPU wait for Value in the command list being recorded (see above). Never waits on the CPU. */
++  virtual HRESULT STDMETHODCALLTYPE WaitShared(
++          ID3D9NvrExtSharedFence*         pFence,
++          UINT64                          Value) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtShare,       0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x26);
++__CRT_UUID_DECL(ID3D9NvrExtSharedImage, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x27);
++__CRT_UUID_DECL(ID3D9NvrExtSharedFence, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x28);
++#endif
+diff --git a/src/dxvk/dxvk_fence.cpp b/src/dxvk/dxvk_fence.cpp
+index 8485c40..5e423c4 100644
+--- a/src/dxvk/dxvk_fence.cpp
++++ b/src/dxvk/dxvk_fence.cpp
+@@ -76,6 +76,10 @@ namespace dxvk {
+       desc.hSyncObject = m_kmtLocal;
+       D3DKMTDestroySynchronizationObject(&desc);
+     }
++#ifdef _WIN32
++    if (m_ntHandle != INVALID_HANDLE_VALUE)
++      CloseHandle(m_ntHandle);
++#endif
+     m_vkd->vkDestroySemaphore(m_vkd->device(), m_semaphore, nullptr);
+   }
+ 
+@@ -177,6 +181,20 @@ namespace dxvk {
+     if (m_info.sharedType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_FLAG_BITS_MAX_ENUM)
+       return INVALID_HANDLE_VALUE;
+ 
++#ifdef _WIN32
++    // NVR 1.7-dlss: a duplicate of the one NT handle exported at creation (a second export is invalid)
++    if (m_ntHandle != INVALID_HANDLE_VALUE) {
++      HANDLE copy = INVALID_HANDLE_VALUE;
++
++      if (!DuplicateHandle(GetCurrentProcess(), m_ntHandle, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
++        Logger::err(str::format("DxvkFence::sharedHandle: DuplicateHandle failed: Win32 error ", GetLastError()));
++        return INVALID_HANDLE_VALUE;
++      }
++
++      return copy;
++    }
++#endif
++
+     VkSemaphoreGetWin32HandleInfoKHR win32HandleInfo = { VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR };
+     win32HandleInfo.semaphore = m_semaphore;
+     win32HandleInfo.handleType = m_info.sharedType;
+@@ -200,6 +218,7 @@ namespace dxvk {
+     HANDLE sharedHandle = INVALID_HANDLE_VALUE;
+     VkResult vr = m_vkd->vkGetSemaphoreWin32HandleKHR(m_vkd->device(), &win32HandleInfo, &sharedHandle);
+     if (vr != VK_SUCCESS) {
++      m_exportResult = vr;
+       Logger::err(str::format("Failed to get semaphore handle: ", vr));
+     } else if (m_info.sharedType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT) {
+       D3DKMT_OPENSYNCHRONIZATIONOBJECT desc = { };
+@@ -220,7 +239,8 @@ namespace dxvk {
+       } else {
+         m_kmtLocal = desc.hSyncObject;
+       }
+-      CloseHandle(sharedHandle);
++      // NVR 1.7-dlss: kept, not closed (sharedHandle() duplicates it; see ntHandle())
++      m_ntHandle = sharedHandle;
+     }
+ #else
+     Logger::warn("DxvkFence::initKmtHandles: Not implemented on this platform");
+diff --git a/src/dxvk/dxvk_fence.h b/src/dxvk/dxvk_fence.h
+index f348a53..c252569 100644
+--- a/src/dxvk/dxvk_fence.h
++++ b/src/dxvk/dxvk_fence.h
+@@ -85,6 +85,26 @@ namespace dxvk {
+       return m_kmtGlobal;
+     }
+ 
++    /**
++     * \brief The NT handle exported once at creation
++     *
++     * NVR 1.7-dlss: an NT handle may be exported only once per object (Vulkan: vkGet*Win32HandleKHR
++     * at most once per handle type for NT handles). NVIDIA hands the SAME handle value back on a second
++     * export; closing the first one therefore killed every later export (the DLSS helper got a dead
++     * semaphore handle, Win32 error 6). The first export is kept and duplicated instead.
++     * \returns INVALID_HANDLE_VALUE if not shared with an NT handle (or the export failed)
++     */
++    HANDLE ntHandle() const {
++      return m_ntHandle;
++    }
++
++    /**
++     * \brief Result of that one export (VK_SUCCESS if it worked or was not needed)
++     */
++    VkResult exportResult() const {
++      return m_exportResult;
++    }
++
+     /**
+      * \brief Retrieves current semaphore value
+      * \returns Current semaphore value
+@@ -139,6 +159,8 @@ namespace dxvk {
+     VkSemaphore                     m_semaphore;
+     D3DKMT_HANDLE                   m_kmtLocal = 0;
+     D3DKMT_HANDLE                   m_kmtGlobal = 0;
++    HANDLE                          m_ntHandle = INVALID_HANDLE_VALUE;  // NVR 1.7-dlss
++    VkResult                        m_exportResult = VK_SUCCESS;
+ 
+     std::priority_queue<QueueItem>  m_queue;
+     bool                            m_running    = false;
+diff --git a/src/dxvk/dxvk_image.cpp b/src/dxvk/dxvk_image.cpp
+index 3b5b739..1994e1f 100644
+--- a/src/dxvk/dxvk_image.cpp
++++ b/src/dxvk/dxvk_image.cpp
+@@ -205,6 +205,18 @@ namespace dxvk {
+       return INVALID_HANDLE_VALUE;
+ 
+ #ifdef _WIN32
++    // NVR 1.7-dlss: a duplicate of the one NT handle the allocation exported (a second export is invalid)
++    HANDLE kept = m_storage->sharedNtHandle();
++
++    if (kept != INVALID_HANDLE_VALUE) {
++      if (!DuplicateHandle(GetCurrentProcess(), kept, GetCurrentProcess(), &handle, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
++        Logger::warn(str::format("DxvkImage::sharedHandle: DuplicateHandle failed: Win32 error ", GetLastError()));
++        return INVALID_HANDLE_VALUE;
++      }
++
++      return handle;
++    }
++
+     DxvkResourceMemoryInfo memoryInfo = m_storage->getMemoryInfo();
+ 
+     VkMemoryGetWin32HandleInfoKHR handleInfo = { VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR };
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index 65c3669..86411ab 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -282,6 +282,12 @@ namespace dxvk {
+       D3DKMTDestroyAllocation(&destroy);
+     }
+ 
++#ifdef _WIN32
++    // NVR 1.7-dlss: the one NT handle exported at creation
++    if (unlikely(m_ntHandle != INVALID_HANDLE_VALUE))
++      CloseHandle(m_ntHandle);
++#endif
++
+     if (m_buffer) {
+       if (unlikely(m_bufferViews))
+         delete m_bufferViews;
+@@ -388,7 +394,8 @@ namespace dxvk {
+           D3DKMTDestroySynchronizationObject(&destroy_sync);
+         }
+       }
+-      CloseHandle(sharedHandle);
++      // NVR 1.7-dlss: kept, not closed (DxvkImage::sharedHandle() duplicates it; see sharedNtHandle())
++      m_ntHandle = sharedHandle;
+     }
+ #else
+     Logger::warn("DxvkResourceAllocation::initKmtHandles: Not implemented on this platform");
+diff --git a/src/dxvk/dxvk_memory.h b/src/dxvk/dxvk_memory.h
+index a8e4486..ecfd738 100644
+--- a/src/dxvk/dxvk_memory.h
++++ b/src/dxvk/dxvk_memory.h
+@@ -573,6 +573,19 @@ namespace dxvk {
+       return m_kmtGlobal;
+     }
+ 
++    /**
++     * \brief The NT handle of an exported allocation, exported once at creation
++     *
++     * NVR 1.7-dlss: an NT handle may be exported only once per object (Vulkan: vkGet*Win32HandleKHR
++     * at most once per handle type for NT handles). NVIDIA hands the SAME handle value back on a second
++     * export; closing the first one therefore killed every later export (the DLSS helper got a dead
++     * semaphore handle, Win32 error 6). The first export is kept and duplicated instead.
++     * \returns INVALID_HANDLE_VALUE if not exported with an NT handle
++     */
++    HANDLE sharedNtHandle() const {
++      return m_ntHandle;
++    }
++
+     /**
+      * \brief Queries memory info
+      * \returns Memory info
+@@ -630,6 +643,17 @@ namespace dxvk {
+       return m_type ? m_type->properties.propertyFlags : 0u;
+     }
+ 
++    /**
++     * \brief Queries the memory type index
++     *
++     * NVR 1.7-dlss: a process importing an exported dedicated
++     * allocation must use the same type (same device and driver).
++     * \returns Memory type index, ~0u for imported or foreign resources
++     */
++    uint32_t getMemoryTypeIndex() const {
++      return m_type ? m_type->index : ~0u;
++    }
++
+     /**
+      * \brief Creates buffer view
+      *
+@@ -669,6 +693,7 @@ namespace dxvk {
+     DxvkResourceImageViewMap*   m_imageViews = nullptr;
+     D3DKMT_HANDLE               m_kmtLocal = 0;
+     D3DKMT_HANDLE               m_kmtGlobal = 0;
++    HANDLE                      m_ntHandle = INVALID_HANDLE_VALUE;  // NVR 1.7-dlss
+ 
+     DxvkSparsePageTable*        m_sparsePageTable = nullptr;
+ 
+-- 
+2.40.0.windows.1
+

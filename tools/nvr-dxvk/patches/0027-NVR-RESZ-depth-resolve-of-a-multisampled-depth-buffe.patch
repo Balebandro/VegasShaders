@@ -1,0 +1,1810 @@
+From 009d3486512323b5879488fdb9c1b97be38621e6 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 03:33:27 -0400
+Subject: [PATCH] NVR: RESZ depth resolve of a multisampled depth buffer takes
+ the nearest sample (nvr.depthResolve)
+
+The first sample of an MSAA depth buffer is whatever happened to cover it (with transparency multisampled grass: a blade or the
+ground behind it, pixel by pixel), so the depth NVR rebuilds its normals and occlusion from was noisy along every grass edge
+(the cloud-shadow crust on grass, the shadow ring round the player). ResolveZ now resolves the nearest sample: MIN for normal
+depth, MAX for reversed depth, judged by the value that depth buffer was last cleared to (D3D9DeviceEx::Clear records it per
+texture; sample 0 while it is not known). DxvkContext::resolveImage already falls back to its shader resolve where the device
+cannot resolve MIN / MAX in a render pass. dxvk.conf nvr.depthResolve = sample0 restores the stock behaviour (default nearest).
+Logs the mode once (and on each change).
+---
+ src/d3d9/d3d9_common_texture.h | 1138 ++++++++++++++++----------------
+ src/d3d9/d3d9_device.cpp       |   27 +-
+ src/d3d9/d3d9_options.cpp      |  229 +++----
+ src/d3d9/d3d9_options.h        |  349 +++++-----
+ 4 files changed, 889 insertions(+), 854 deletions(-)
+
+diff --git a/src/d3d9/d3d9_common_texture.h b/src/d3d9/d3d9_common_texture.h
+index 5989859..218ed80 100644
+--- a/src/d3d9/d3d9_common_texture.h
++++ b/src/d3d9/d3d9_common_texture.h
+@@ -1,566 +1,572 @@
+-#pragma once
+-
+-#include "d3d9_format.h"
+-#include "d3d9_util.h"
+-#include "d3d9_caps.h"
+-#include "d3d9_interop.h"
+-
+-#include "../dxvk/dxvk_device.h"
+-
+-#include "../util/util_bit.h"
+-#include "../util/util_unmap.h"
+-
+-namespace dxvk {
+-
+-  class D3D9DeviceEx;
+-
+-  /**
+-   * \brief Image memory mapping mode
+-   * 
+-   * Determines how exactly \c LockBox will
+-   * behave when mapping an image.
+-   */
+-  enum D3D9_COMMON_TEXTURE_MAP_MODE {
+-    D3D9_COMMON_TEXTURE_MAP_MODE_NONE,      ///< No mapping available
+-    D3D9_COMMON_TEXTURE_MAP_MODE_BACKED,    ///< Mapped image through buffer
+-    D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM, ///< Only a buffer - no image
+-    D3D9_COMMON_TEXTURE_MAP_MODE_UNMAPPABLE,   ///< Non-Vulkan memory that can be unmapped
+-  };
+-  
+-  /**
+-   * \brief Common texture description
+-   * 
+-   * Contains all members that can be
+-   * defined for 2D, Cube and 3D textures.
+-   */
+-  struct D3D9_COMMON_TEXTURE_DESC {
+-    UINT                Width;
+-    UINT                Height;
+-    UINT                Depth;
+-    UINT                ArraySize;
+-    UINT                MipLevels;
+-    DWORD               Usage;
+-    D3D9Format          Format;
+-    D3DPOOL             Pool;
+-    D3DMULTISAMPLE_TYPE MultiSample;
+-    DWORD               MultisampleQuality;
+-    bool                Discard;
+-    bool                IsBackBuffer;
+-    bool                IsAttachmentOnly;
+-    bool                IsLockable;
+-
+-    // Additional parameters for ID3D9VkInteropDevice
+-    VkImageUsageFlags   ImageUsage = 0;
+-  };
+-
+-  struct D3D9ColorView {
+-    inline Rc<DxvkImageView>& Pick(bool Srgb) {
+-      return Srgb ? this->Srgb : this->Color;
+-    }
+-
+-    inline const Rc<DxvkImageView>& Pick(bool Srgb) const {
+-      return Srgb ? this->Srgb : this->Color;
+-    }
+-
+-    Rc<DxvkImageView> Color;
+-    Rc<DxvkImageView> Srgb;
+-  };
+-
+-  template <typename T>
+-  using D3D9SubresourceArray = std::array<T, caps::MaxSubresources>;
+-
+-  using D3D9SubresourceBitset = bit::bitset<caps::MaxSubresources>;
+-
+-  class D3D9CommonTexture {
+-
+-  public:
+-
+-    static constexpr UINT AllLayers = std::numeric_limits<uint32_t>::max();
+-
+-    D3D9CommonTexture(
+-            D3D9DeviceEx*             pDevice,
+-            IUnknown*                 pInterface,
+-      const D3D9_COMMON_TEXTURE_DESC* pDesc,
+-            D3DRESOURCETYPE           ResourceType,
+-            HANDLE*                   pSharedHandle);
+-
+-    ~D3D9CommonTexture();
+-
+-    /**
+-     * \brief Device
+-     * \returns The parent device
+-     */
+-    D3D9DeviceEx* Device() const {
+-      return m_device;
+-    }
+-
+-    /**
+-      * \brief Texture properties
+-      *
+-      * The returned data can be used to fill in
+-      * \c D3D11_TEXTURE2D_DESC and similar structs.
+-      * \returns Pointer to texture description
+-      */
+-    const D3D9_COMMON_TEXTURE_DESC* Desc() const {
+-      return &m_desc;
+-    }
+-
+-    /**
+-     * \brief Vulkan Format
+-     * \returns The Vulkan format of the resource
+-     */
+-    const D3D9_VK_FORMAT_MAPPING& GetFormatMapping() const {
+-      return m_mapping;
+-    }
+-
+-    /**
+-     * \brief Counts number of subresources
+-     * \returns Number of subresources
+-     */
+-    UINT CountSubresources() const {
+-      return m_desc.ArraySize * m_desc.MipLevels;
+-    }
+-
+-    /**
+-     * \brief Map mode
+-     * \returns Map mode
+-     */
+-    D3D9_COMMON_TEXTURE_MAP_MODE GetMapMode() const {
+-      return m_mapMode;
+-    }
+-
+-    /**
+-     * \brief The DXVK image
+-     * Note, this will be nullptr if the map mode is D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM
+-     * \returns The DXVK image
+-     */
+-    const Rc<DxvkImage>& GetImage() const {
+-      return m_image;
+-    }
+-
+-    /**
+-     * \brief Get a copy of the main image, but with a single sample
+-     * This function will allocate/reuse an image with the same info
+-     * as the main image
+-     * \returns An image with identical info, but 1 sample
+-     */
+-    const Rc<DxvkImage>& GetResolveImage() {
+-      if (unlikely(m_resolveImage == nullptr))
+-        m_resolveImage = CreateResolveImage();
+-
+-      return m_resolveImage;
+-    }
+-
+-    /**
+-     * \brief Returns a pointer to the internal data used for LockRect/LockBox
+-     *
+-     * This works regardless of the map mode used by this texture
+-     * and will map the memory if necessary.
+-     * \param [in] Subresource Subresource index
+-     * @return Pointer to locking data
+-     */
+-    void* GetData(UINT Subresource);
+-
+-    const Rc<DxvkBuffer>& GetBuffer();
+-
+-    DxvkBufferSlice GetBufferSlice(UINT Subresource);
+-
+-    /**
+-     * \brief Computes subresource from the subresource index
+-     *
+-     * Used by some functions that operate on only
+-     * one subresource, such as \c UpdateSurface.
+-     * \param [in] Aspect The image aspect
+-     * \param [in] Subresource Subresource index
+-     * \returns The Vulkan image subresource
+-     */
+-    VkImageSubresource GetSubresourceFromIndex(
+-            VkImageAspectFlags    Aspect,
+-            UINT                  Subresource) const;
+-
+-    /**
+-     * \brief Normalizes and validates texture description
+-     * 
+-     * Fills in undefined values and validates the texture
+-     * parameters. Any error returned by this method should
+-     * be forwarded to the application.
+-     * \param [in] pDevice D3D9 device
+-     * \param [in] ResourceType Resource type
+-     * \param [in,out] pDesc Texture description
+-     * \returns \c S_OK if the parameters are valid
+-     */
+-    static HRESULT NormalizeTextureProperties(
+-            D3D9DeviceEx*              pDevice,
+-            D3DRESOURCETYPE            ResourceType,
+-            D3D9_COMMON_TEXTURE_DESC*  pDesc);
+-
+-    /**
+-     * \brief Returns whether a Vulkan image is used for this D3D9 texture
+-     *
+-     * \param pDesc The texture description
+-     */
+-    static bool TextureUsesImage(const D3D9_COMMON_TEXTURE_DESC* pDesc) {
+-      return pDesc->Pool   != D3DPOOL_SYSTEMMEM
+-          && pDesc->Pool   != D3DPOOL_SCRATCH
+-          && pDesc->Format != D3D9Format::NULL_FORMAT;
+-    }
+-
+-    /**
+-     * \brief Shadow
+-     * \returns Whether the texture is to be depth compared
+-     */
+-    bool IsShadow() const {
+-      return m_shadow;
+-    }
+-
+-    /**
+-     * \brief Cube
+-     * \returns Whether the texture is a cube map
+-     */
+-    bool IsCube() const {
+-      return m_type == D3DRTYPE_CUBETEXTURE;
+-    }
+-
+-    /**
+-     * \brief Dref Clamp
+-     * \returns Whether the texture emulates an UNORM format with D32f
+-     */
+-    bool IsUpgradedToD32f() const {
+-      return m_upgradedToD32f;
+-    }
+-
+-    /**
+-     * \brief FETCH4 compatibility
+-     * \returns Whether the format of the texture supports the FETCH4 hack
+-     */
+-    bool SupportsFetch4() const {
+-      return m_supportsFetch4;
+-    }
+-
+-    /**
+-     * \brief Null
+-     * \returns Whether the texture is D3DFMT_NULL or not
+-     */
+-    bool IsNull() const {
+-      return m_desc.Format == D3D9Format::NULL_FORMAT;
+-    }
+-
+-    /**
+-     * \brief Subresource
+-     * \returns The subresource idx of a given face and mip level
+-     */
+-    UINT CalcSubresource(UINT Face, UINT MipLevel) const {
+-      return Face * m_desc.MipLevels + MipLevel;
+-    }
+-
+-    void UnmapData() {
+-      m_data.unmap();
+-    }
+-
+-    /**
+-     * \brief Destroys a buffer
+-     * Destroys mapping and staging buffers for a given subresource
+-     */
+-    void DestroyBuffer() {
+-      m_buffer = nullptr;
+-      MarkAllNeedReadback();
+-    }
+-
+-    bool IsDynamic() const {
+-      return m_desc.Usage & D3DUSAGE_DYNAMIC;
+-    }
+-
+-    /**
+-     * \brief Managed
+-     * \returns Whether a resource is managed (pool) or not
+-     */
+-    bool IsManaged() const {
+-      return IsPoolManaged(m_desc.Pool);
+-    }
+-
+-    /**
+-     * \brief Render Target
+-     * \returns Whether a resource is a render target or not
+-     */
+-    bool IsRenderTarget() const {
+-      return m_desc.Usage & D3DUSAGE_RENDERTARGET;
+-    }
+-
+-    /**
+-     * \brief Depth stencil
+-     * \returns Whether a resource is a depth stencil or not
+-     */
+-    bool IsDepthStencil() const {
+-      return m_desc.Usage & D3DUSAGE_DEPTHSTENCIL;
+-    }
+-
+-    /**
+-     * \brief Autogen Mipmap
+-     * \returns Whether the texture is to have automatic mip generation
+-     */
+-    bool IsAutomaticMip() const {
+-      return m_desc.Usage & D3DUSAGE_AUTOGENMIPMAP;
+-    }
+-
+-    /**
+-     * \brief Checks whether sRGB views can be created
+-     * \returns Whether the format is sRGB compatible.
+-     */
+-    bool IsSrgbCompatible() const {
+-      return m_mapping.FormatSrgb;
+-    }
+-
+-    /**
+-     * \brief Recreate main image view
+-     * Recreates the main view of the sampler w/ a specific LOD.
+-     * SetLOD only works on MANAGED textures so this is A-okay.
+-     */
+-    void CreateSampleView(UINT Lod);
+-
+-    /**
+-     * \brief Extent
+-     * \returns The extent of the top-level mip
+-     */
+-    VkExtent3D GetExtent() const {
+-      return VkExtent3D{ m_desc.Width, m_desc.Height, m_desc.Depth };
+-    }
+-
+-    /**
+-     * \brief Mip Extent
+-     * \returns The extent of a mip or subresource
+-     */
+-    VkExtent3D GetExtentMip(UINT Subresource) const {
+-      UINT MipLevel = Subresource % m_desc.MipLevels;
+-      return util::computeMipLevelExtent(GetExtent(), MipLevel);
+-    }
+-
+-    bool MarkTransitionedToHazardLayout() {
+-      return std::exchange(m_transitionedToHazardLayout, true);
+-    }
+-
+-    bool HasBeenTransitionedToHazardLayout() const {
+-      return m_transitionedToHazardLayout;
+-    }
+-
+-    D3DRESOURCETYPE GetType() const {
+-      return m_type;
+-    }
+-
+-    uint32_t GetPlaneCount() const;
+-
+-    D3DPOOL GetPool() const { return m_desc.Pool; }
+-
+-    const D3D9_VK_FORMAT_MAPPING& GetMapping() { return m_mapping; }
+-
+-    void SetLocked(UINT Subresource, bool value) { m_locked.set(Subresource, value); }
+-
+-    bool GetLocked(UINT Subresource) const { return m_locked.get(Subresource); }
+-
+-    bool IsAnySubresourceLocked() const { return m_locked.any(); }
+-
+-    void SetNeedsReadback(UINT Subresource, bool value) { m_needsReadback.set(Subresource, value); }
+-
+-    bool NeedsReadback(UINT Subresource) const { return m_needsReadback.get(Subresource); }
+-
+-    void MarkAllNeedReadback() { m_needsReadback.setAll(); }
+-
+-    const Rc<DxvkImageView>& GetSampleView(bool srgb) const {
+-      return m_sampleView.Pick(srgb && IsSrgbCompatible());
+-    }
+-
+-    Rc<DxvkImageView> CreateView(
+-            UINT                   Layer,
+-            UINT                   Lod,
+-            VkImageUsageFlags      UsageFlags,
+-            VkImageLayout          Layout,
+-            bool                   Srgb);
+-    D3D9SubresourceBitset& GetUploadBitmask() { return m_needsUpload; }
+-
+-    void SetAllNeedUpload() {
+-      if (likely(!IsAutomaticMip())) {
+-        m_needsUpload.setAll();
+-      } else {
+-        for (uint32_t a = 0; a < m_desc.ArraySize; a++) {
+-          for (uint32_t m = 0; m < ExposedMipLevels(); m++) {
+-            SetNeedsUpload(CalcSubresource(a, m), true);
+-          }
+-        }
+-      }
+-    }
+-    void SetNeedsUpload(UINT Subresource, bool upload) { m_needsUpload.set(Subresource, upload); }
+-    bool NeedsUpload(UINT Subresource) const { return m_needsUpload.get(Subresource); }
+-    bool NeedsAnyUpload() { return m_needsUpload.any(); }
+-    void ClearNeedsUpload() { return m_needsUpload.clearAll();  }
+-
+-    void SetNeedsMipGen(bool value) { m_needsMipGen = value; }
+-    bool NeedsMipGen() const { return m_needsMipGen; }
+-
+-    DWORD ExposedMipLevels() const { return m_exposedMipLevels; }
+-
+-    void SetMipFilter(D3DTEXTUREFILTERTYPE filter) { m_mipFilter = filter; }
+-    D3DTEXTUREFILTERTYPE GetMipFilter() const { return m_mipFilter; }
+-
+-    void PreLoadAll();
+-    void PreLoadSubresource(UINT Subresource);
+-
+-    void AddDirtyBox(CONST D3DBOX* pDirtyBox, uint32_t layer) {
+-      if (pDirtyBox) {
+-        D3DBOX box = *pDirtyBox;
+-        if (box.Right <= box.Left
+-          || box.Bottom <= box.Top
+-          || box.Back <= box.Front)
+-          return;
+-
+-        box.Right = std::min(box.Right, m_desc.Width);
+-        box.Bottom = std::min(box.Bottom, m_desc.Height);
+-        box.Back = std::min(box.Back, m_desc.Depth);
+-
+-        D3DBOX& dirtyBox = m_dirtyBoxes[layer];
+-        if (dirtyBox.Left == dirtyBox.Right) {
+-          dirtyBox = box;
+-        } else {
+-          dirtyBox.Left    = std::min(dirtyBox.Left,   box.Left);
+-          dirtyBox.Right   = std::max(dirtyBox.Right,  box.Right);
+-          dirtyBox.Top     = std::min(dirtyBox.Top,    box.Top);
+-          dirtyBox.Bottom  = std::max(dirtyBox.Bottom, box.Bottom);
+-          dirtyBox.Front   = std::min(dirtyBox.Front,  box.Front);
+-          dirtyBox.Back    = std::max(dirtyBox.Back,   box.Back);
+-        }
+-      } else {
+-        m_dirtyBoxes[layer] = { 0, 0, m_desc.Width, m_desc.Height, 0, m_desc.Depth };
+-      }
+-    }
+-
+-    void ClearDirtyBoxes() {
+-      for (uint32_t i = 0; i < m_dirtyBoxes.size(); i++) {
+-        m_dirtyBoxes[i] = { 0, 0, 0, 0, 0, 0 };
+-      }
+-    }
+-
+-    const D3DBOX& GetDirtyBox(uint32_t layer) const {
+-      return m_dirtyBoxes[layer];
+-    }
+-
+-    static VkImageType GetImageTypeFromResourceType(
+-            D3DRESOURCETYPE  Dimension);
+-
+-    static VkImageViewType GetImageViewTypeFromResourceType(
+-            D3DRESOURCETYPE  Dimension,
+-            UINT             Layer);
+-
+-     /**
+-     * \brief Tracks sequence number for a given subresource
+-     *
+-     * Stores which CS chunk the resource was last used on.
+-     * \param [in] Subresource Subresource index
+-     * \param [in] Seq Sequence number
+-     */
+-    void TrackMappingBufferSequenceNumber(UINT Subresource, uint64_t Seq) {
+-      if (Subresource < m_seqs.size())
+-        m_seqs[Subresource] = Seq;
+-    }
+-
+-    /**
+-     * \brief Queries sequence number for a given subresource
+-     *
+-     * Returns which CS chunk the resource was last used on.
+-     * \param [in] Subresource Subresource index
+-     * \returns Sequence number for the given subresource
+-     */
+-    uint64_t GetMappingBufferSequenceNumber(UINT Subresource) {
+-      return Subresource < m_seqs.size()
+-        ? m_seqs[Subresource]
+-        : 0ull;
+-    }
+-
+-    /**
+-     * \brief Mip level
+-     * \returns Size of packed mip level in bytes
+-     */
+-    VkDeviceSize GetMipSize(UINT Subresource) const;
+-
+-    uint32_t GetTotalSize() const {
+-      return m_totalSize;
+-    }
+-
+-    /**
+-     * \brief Creates a buffer
+-     * Creates the mapping buffer if necessary
+-     * \param [in] Initialize Whether to copy over existing data (or clear if there is no data)
+-     * \param [in] Size The size of the buffer
+-     * \returns Whether an allocation happened
+-     */
+-    void CreateBuffer(bool Initialize, uint32_t Size);
+-
+-    ID3D9VkInteropTexture* GetVkInterop() { return &m_d3d9Interop; }
+-
+-  private:
+-
+-    D3D9DeviceEx*                 m_device;
+-    D3D9_COMMON_TEXTURE_DESC      m_desc;
+-    D3DRESOURCETYPE               m_type;
+-    D3D9_COMMON_TEXTURE_MAP_MODE  m_mapMode;
+-
+-    Rc<DxvkImage>                 m_image;
+-    Rc<DxvkImage>                 m_resolveImage;
+-    Rc<DxvkBuffer>                m_buffer;
+-    MemoryFileRegion              m_data = { };
+-
+-    D3D9SubresourceArray<
+-      uint64_t>                   m_seqs = { };
+-
+-    D3D9SubresourceArray<
+-      uint32_t>                   m_memoryOffset = { };
+-    
+-    uint32_t                      m_totalSize = 0;
+-
+-    D3D9_VK_FORMAT_MAPPING        m_mapping;
+-
+-    bool                          m_shadow; //< Depth Compare-ness
+-    bool                          m_upgradedToD32f; // Dref Clamp
+-    bool                          m_supportsFetch4;
+-
+-    int64_t                       m_size = 0;
+-
+-    bool                          m_transitionedToHazardLayout = false;
+-
+-    D3D9ColorView                 m_sampleView;
+-
+-    D3D9SubresourceBitset         m_locked = { };
+-
+-    D3D9SubresourceBitset         m_needsReadback = { };
+-
+-    D3D9SubresourceBitset         m_needsUpload = { };
+-
+-    DWORD                         m_exposedMipLevels = 0;
+-
+-    bool                          m_needsMipGen = false;
+-
+-    D3DTEXTUREFILTERTYPE          m_mipFilter = D3DTEXF_LINEAR;
+-
+-    std::array<D3DBOX, 6>         m_dirtyBoxes;
+-
+-    D3D9VkInteropTexture          m_d3d9Interop;
+-
+-    Rc<DxvkImage> CreatePrimaryImage(D3DRESOURCETYPE ResourceType, HANDLE* pSharedHandle) const;
+-
+-    Rc<DxvkImage> CreateResolveImage() const;
+-
+-    BOOL DetermineShadowState() const;
+-
+-    BOOL DetermineFetch4Compatibility() const;
+-
+-    BOOL CheckImageSupport(
+-      const DxvkImageCreateInfo*  pImageInfo,
+-            VkImageTiling         Tiling) const;
+-
+-    D3D9_COMMON_TEXTURE_MAP_MODE DetermineMapMode() const;
+-
+-    VkImageLayout OptimizeLayout(
+-            VkImageUsageFlags         Usage) const;
+-
+-    void ExportImageInfo();
+-
+-  };
+-
+-}
++#pragma once
++
++#include "d3d9_format.h"
++#include "d3d9_util.h"
++#include "d3d9_caps.h"
++#include "d3d9_interop.h"
++
++#include "../dxvk/dxvk_device.h"
++
++#include "../util/util_bit.h"
++#include "../util/util_unmap.h"
++
++namespace dxvk {
++
++  class D3D9DeviceEx;
++
++  /**
++   * \brief Image memory mapping mode
++   * 
++   * Determines how exactly \c LockBox will
++   * behave when mapping an image.
++   */
++  enum D3D9_COMMON_TEXTURE_MAP_MODE {
++    D3D9_COMMON_TEXTURE_MAP_MODE_NONE,      ///< No mapping available
++    D3D9_COMMON_TEXTURE_MAP_MODE_BACKED,    ///< Mapped image through buffer
++    D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM, ///< Only a buffer - no image
++    D3D9_COMMON_TEXTURE_MAP_MODE_UNMAPPABLE,   ///< Non-Vulkan memory that can be unmapped
++  };
++  
++  /**
++   * \brief Common texture description
++   * 
++   * Contains all members that can be
++   * defined for 2D, Cube and 3D textures.
++   */
++  struct D3D9_COMMON_TEXTURE_DESC {
++    UINT                Width;
++    UINT                Height;
++    UINT                Depth;
++    UINT                ArraySize;
++    UINT                MipLevels;
++    DWORD               Usage;
++    D3D9Format          Format;
++    D3DPOOL             Pool;
++    D3DMULTISAMPLE_TYPE MultiSample;
++    DWORD               MultisampleQuality;
++    bool                Discard;
++    bool                IsBackBuffer;
++    bool                IsAttachmentOnly;
++    bool                IsLockable;
++
++    // Additional parameters for ID3D9VkInteropDevice
++    VkImageUsageFlags   ImageUsage = 0;
++  };
++
++  struct D3D9ColorView {
++    inline Rc<DxvkImageView>& Pick(bool Srgb) {
++      return Srgb ? this->Srgb : this->Color;
++    }
++
++    inline const Rc<DxvkImageView>& Pick(bool Srgb) const {
++      return Srgb ? this->Srgb : this->Color;
++    }
++
++    Rc<DxvkImageView> Color;
++    Rc<DxvkImageView> Srgb;
++  };
++
++  template <typename T>
++  using D3D9SubresourceArray = std::array<T, caps::MaxSubresources>;
++
++  using D3D9SubresourceBitset = bit::bitset<caps::MaxSubresources>;
++
++  class D3D9CommonTexture {
++
++  public:
++
++    static constexpr UINT AllLayers = std::numeric_limits<uint32_t>::max();
++
++    D3D9CommonTexture(
++            D3D9DeviceEx*             pDevice,
++            IUnknown*                 pInterface,
++      const D3D9_COMMON_TEXTURE_DESC* pDesc,
++            D3DRESOURCETYPE           ResourceType,
++            HANDLE*                   pSharedHandle);
++
++    ~D3D9CommonTexture();
++
++    /**
++     * \brief Device
++     * \returns The parent device
++     */
++    D3D9DeviceEx* Device() const {
++      return m_device;
++    }
++
++    /**
++      * \brief Texture properties
++      *
++      * The returned data can be used to fill in
++      * \c D3D11_TEXTURE2D_DESC and similar structs.
++      * \returns Pointer to texture description
++      */
++    const D3D9_COMMON_TEXTURE_DESC* Desc() const {
++      return &m_desc;
++    }
++
++    /**
++     * \brief Vulkan Format
++     * \returns The Vulkan format of the resource
++     */
++    const D3D9_VK_FORMAT_MAPPING& GetFormatMapping() const {
++      return m_mapping;
++    }
++
++    /**
++     * \brief Counts number of subresources
++     * \returns Number of subresources
++     */
++    UINT CountSubresources() const {
++      return m_desc.ArraySize * m_desc.MipLevels;
++    }
++
++    /**
++     * \brief Map mode
++     * \returns Map mode
++     */
++    D3D9_COMMON_TEXTURE_MAP_MODE GetMapMode() const {
++      return m_mapMode;
++    }
++
++    /**
++     * \brief The DXVK image
++     * Note, this will be nullptr if the map mode is D3D9_COMMON_TEXTURE_MAP_MODE_SYSTEMMEM
++     * \returns The DXVK image
++     */
++    const Rc<DxvkImage>& GetImage() const {
++      return m_image;
++    }
++
++    /**
++     * \brief Get a copy of the main image, but with a single sample
++     * This function will allocate/reuse an image with the same info
++     * as the main image
++     * \returns An image with identical info, but 1 sample
++     */
++    const Rc<DxvkImage>& GetResolveImage() {
++      if (unlikely(m_resolveImage == nullptr))
++        m_resolveImage = CreateResolveImage();
++
++      return m_resolveImage;
++    }
++
++    /**
++     * \brief Returns a pointer to the internal data used for LockRect/LockBox
++     *
++     * This works regardless of the map mode used by this texture
++     * and will map the memory if necessary.
++     * \param [in] Subresource Subresource index
++     * @return Pointer to locking data
++     */
++    void* GetData(UINT Subresource);
++
++    const Rc<DxvkBuffer>& GetBuffer();
++
++    DxvkBufferSlice GetBufferSlice(UINT Subresource);
++
++    /**
++     * \brief Computes subresource from the subresource index
++     *
++     * Used by some functions that operate on only
++     * one subresource, such as \c UpdateSurface.
++     * \param [in] Aspect The image aspect
++     * \param [in] Subresource Subresource index
++     * \returns The Vulkan image subresource
++     */
++    VkImageSubresource GetSubresourceFromIndex(
++            VkImageAspectFlags    Aspect,
++            UINT                  Subresource) const;
++
++    /**
++     * \brief Normalizes and validates texture description
++     * 
++     * Fills in undefined values and validates the texture
++     * parameters. Any error returned by this method should
++     * be forwarded to the application.
++     * \param [in] pDevice D3D9 device
++     * \param [in] ResourceType Resource type
++     * \param [in,out] pDesc Texture description
++     * \returns \c S_OK if the parameters are valid
++     */
++    static HRESULT NormalizeTextureProperties(
++            D3D9DeviceEx*              pDevice,
++            D3DRESOURCETYPE            ResourceType,
++            D3D9_COMMON_TEXTURE_DESC*  pDesc);
++
++    /**
++     * \brief Returns whether a Vulkan image is used for this D3D9 texture
++     *
++     * \param pDesc The texture description
++     */
++    static bool TextureUsesImage(const D3D9_COMMON_TEXTURE_DESC* pDesc) {
++      return pDesc->Pool   != D3DPOOL_SYSTEMMEM
++          && pDesc->Pool   != D3DPOOL_SCRATCH
++          && pDesc->Format != D3D9Format::NULL_FORMAT;
++    }
++
++    /**
++     * \brief Shadow
++     * \returns Whether the texture is to be depth compared
++     */
++    bool IsShadow() const {
++      return m_shadow;
++    }
++
++    /**
++     * \brief Cube
++     * \returns Whether the texture is a cube map
++     */
++    bool IsCube() const {
++      return m_type == D3DRTYPE_CUBETEXTURE;
++    }
++
++    /**
++     * \brief Dref Clamp
++     * \returns Whether the texture emulates an UNORM format with D32f
++     */
++    bool IsUpgradedToD32f() const {
++      return m_upgradedToD32f;
++    }
++
++    /**
++     * \brief FETCH4 compatibility
++     * \returns Whether the format of the texture supports the FETCH4 hack
++     */
++    bool SupportsFetch4() const {
++      return m_supportsFetch4;
++    }
++
++    /**
++     * \brief Null
++     * \returns Whether the texture is D3DFMT_NULL or not
++     */
++    bool IsNull() const {
++      return m_desc.Format == D3D9Format::NULL_FORMAT;
++    }
++
++    /**
++     * \brief Subresource
++     * \returns The subresource idx of a given face and mip level
++     */
++    UINT CalcSubresource(UINT Face, UINT MipLevel) const {
++      return Face * m_desc.MipLevels + MipLevel;
++    }
++
++    void UnmapData() {
++      m_data.unmap();
++    }
++
++    /**
++     * \brief Destroys a buffer
++     * Destroys mapping and staging buffers for a given subresource
++     */
++    void DestroyBuffer() {
++      m_buffer = nullptr;
++      MarkAllNeedReadback();
++    }
++
++    bool IsDynamic() const {
++      return m_desc.Usage & D3DUSAGE_DYNAMIC;
++    }
++
++    /**
++     * \brief Managed
++     * \returns Whether a resource is managed (pool) or not
++     */
++    bool IsManaged() const {
++      return IsPoolManaged(m_desc.Pool);
++    }
++
++    /**
++     * \brief Render Target
++     * \returns Whether a resource is a render target or not
++     */
++    bool IsRenderTarget() const {
++      return m_desc.Usage & D3DUSAGE_RENDERTARGET;
++    }
++
++    /**
++     * \brief Depth stencil
++     * \returns Whether a resource is a depth stencil or not
++     */
++    bool IsDepthStencil() const {
++      return m_desc.Usage & D3DUSAGE_DEPTHSTENCIL;
++    }
++
++    /**
++     * \brief Autogen Mipmap
++     * \returns Whether the texture is to have automatic mip generation
++     */
++    bool IsAutomaticMip() const {
++      return m_desc.Usage & D3DUSAGE_AUTOGENMIPMAP;
++    }
++
++    /**
++     * \brief Checks whether sRGB views can be created
++     * \returns Whether the format is sRGB compatible.
++     */
++    bool IsSrgbCompatible() const {
++      return m_mapping.FormatSrgb;
++    }
++
++    /**
++     * \brief Recreate main image view
++     * Recreates the main view of the sampler w/ a specific LOD.
++     * SetLOD only works on MANAGED textures so this is A-okay.
++     */
++    void CreateSampleView(UINT Lod);
++
++    /**
++     * \brief Extent
++     * \returns The extent of the top-level mip
++     */
++    VkExtent3D GetExtent() const {
++      return VkExtent3D{ m_desc.Width, m_desc.Height, m_desc.Depth };
++    }
++
++    /**
++     * \brief Mip Extent
++     * \returns The extent of a mip or subresource
++     */
++    VkExtent3D GetExtentMip(UINT Subresource) const {
++      UINT MipLevel = Subresource % m_desc.MipLevels;
++      return util::computeMipLevelExtent(GetExtent(), MipLevel);
++    }
++
++    bool MarkTransitionedToHazardLayout() {
++      return std::exchange(m_transitionedToHazardLayout, true);
++    }
++
++    bool HasBeenTransitionedToHazardLayout() const {
++      return m_transitionedToHazardLayout;
++    }
++
++    D3DRESOURCETYPE GetType() const {
++      return m_type;
++    }
++
++    uint32_t GetPlaneCount() const;
++
++    D3DPOOL GetPool() const { return m_desc.Pool; }
++
++    const D3D9_VK_FORMAT_MAPPING& GetMapping() { return m_mapping; }
++
++    void SetLocked(UINT Subresource, bool value) { m_locked.set(Subresource, value); }
++
++    bool GetLocked(UINT Subresource) const { return m_locked.get(Subresource); }
++
++    bool IsAnySubresourceLocked() const { return m_locked.any(); }
++
++    void SetNeedsReadback(UINT Subresource, bool value) { m_needsReadback.set(Subresource, value); }
++
++    bool NeedsReadback(UINT Subresource) const { return m_needsReadback.get(Subresource); }
++
++    void MarkAllNeedReadback() { m_needsReadback.setAll(); }
++
++    /// NVR: the depth this depth buffer was last cleared to (D3D9DeviceEx::Clear), negative = not known (ResolveZ).
++    void  SetNvrDepthClear(float Z) { m_nvrDepthClear = Z; }
++    float GetNvrDepthClear() const  { return m_nvrDepthClear; }
++
++    const Rc<DxvkImageView>& GetSampleView(bool srgb) const {
++      return m_sampleView.Pick(srgb && IsSrgbCompatible());
++    }
++
++    Rc<DxvkImageView> CreateView(
++            UINT                   Layer,
++            UINT                   Lod,
++            VkImageUsageFlags      UsageFlags,
++            VkImageLayout          Layout,
++            bool                   Srgb);
++    D3D9SubresourceBitset& GetUploadBitmask() { return m_needsUpload; }
++
++    void SetAllNeedUpload() {
++      if (likely(!IsAutomaticMip())) {
++        m_needsUpload.setAll();
++      } else {
++        for (uint32_t a = 0; a < m_desc.ArraySize; a++) {
++          for (uint32_t m = 0; m < ExposedMipLevels(); m++) {
++            SetNeedsUpload(CalcSubresource(a, m), true);
++          }
++        }
++      }
++    }
++    void SetNeedsUpload(UINT Subresource, bool upload) { m_needsUpload.set(Subresource, upload); }
++    bool NeedsUpload(UINT Subresource) const { return m_needsUpload.get(Subresource); }
++    bool NeedsAnyUpload() { return m_needsUpload.any(); }
++    void ClearNeedsUpload() { return m_needsUpload.clearAll();  }
++
++    void SetNeedsMipGen(bool value) { m_needsMipGen = value; }
++    bool NeedsMipGen() const { return m_needsMipGen; }
++
++    DWORD ExposedMipLevels() const { return m_exposedMipLevels; }
++
++    void SetMipFilter(D3DTEXTUREFILTERTYPE filter) { m_mipFilter = filter; }
++    D3DTEXTUREFILTERTYPE GetMipFilter() const { return m_mipFilter; }
++
++    void PreLoadAll();
++    void PreLoadSubresource(UINT Subresource);
++
++    void AddDirtyBox(CONST D3DBOX* pDirtyBox, uint32_t layer) {
++      if (pDirtyBox) {
++        D3DBOX box = *pDirtyBox;
++        if (box.Right <= box.Left
++          || box.Bottom <= box.Top
++          || box.Back <= box.Front)
++          return;
++
++        box.Right = std::min(box.Right, m_desc.Width);
++        box.Bottom = std::min(box.Bottom, m_desc.Height);
++        box.Back = std::min(box.Back, m_desc.Depth);
++
++        D3DBOX& dirtyBox = m_dirtyBoxes[layer];
++        if (dirtyBox.Left == dirtyBox.Right) {
++          dirtyBox = box;
++        } else {
++          dirtyBox.Left    = std::min(dirtyBox.Left,   box.Left);
++          dirtyBox.Right   = std::max(dirtyBox.Right,  box.Right);
++          dirtyBox.Top     = std::min(dirtyBox.Top,    box.Top);
++          dirtyBox.Bottom  = std::max(dirtyBox.Bottom, box.Bottom);
++          dirtyBox.Front   = std::min(dirtyBox.Front,  box.Front);
++          dirtyBox.Back    = std::max(dirtyBox.Back,   box.Back);
++        }
++      } else {
++        m_dirtyBoxes[layer] = { 0, 0, m_desc.Width, m_desc.Height, 0, m_desc.Depth };
++      }
++    }
++
++    void ClearDirtyBoxes() {
++      for (uint32_t i = 0; i < m_dirtyBoxes.size(); i++) {
++        m_dirtyBoxes[i] = { 0, 0, 0, 0, 0, 0 };
++      }
++    }
++
++    const D3DBOX& GetDirtyBox(uint32_t layer) const {
++      return m_dirtyBoxes[layer];
++    }
++
++    static VkImageType GetImageTypeFromResourceType(
++            D3DRESOURCETYPE  Dimension);
++
++    static VkImageViewType GetImageViewTypeFromResourceType(
++            D3DRESOURCETYPE  Dimension,
++            UINT             Layer);
++
++     /**
++     * \brief Tracks sequence number for a given subresource
++     *
++     * Stores which CS chunk the resource was last used on.
++     * \param [in] Subresource Subresource index
++     * \param [in] Seq Sequence number
++     */
++    void TrackMappingBufferSequenceNumber(UINT Subresource, uint64_t Seq) {
++      if (Subresource < m_seqs.size())
++        m_seqs[Subresource] = Seq;
++    }
++
++    /**
++     * \brief Queries sequence number for a given subresource
++     *
++     * Returns which CS chunk the resource was last used on.
++     * \param [in] Subresource Subresource index
++     * \returns Sequence number for the given subresource
++     */
++    uint64_t GetMappingBufferSequenceNumber(UINT Subresource) {
++      return Subresource < m_seqs.size()
++        ? m_seqs[Subresource]
++        : 0ull;
++    }
++
++    /**
++     * \brief Mip level
++     * \returns Size of packed mip level in bytes
++     */
++    VkDeviceSize GetMipSize(UINT Subresource) const;
++
++    uint32_t GetTotalSize() const {
++      return m_totalSize;
++    }
++
++    /**
++     * \brief Creates a buffer
++     * Creates the mapping buffer if necessary
++     * \param [in] Initialize Whether to copy over existing data (or clear if there is no data)
++     * \param [in] Size The size of the buffer
++     * \returns Whether an allocation happened
++     */
++    void CreateBuffer(bool Initialize, uint32_t Size);
++
++    ID3D9VkInteropTexture* GetVkInterop() { return &m_d3d9Interop; }
++
++  private:
++
++    float m_nvrDepthClear = -1.0f;
++
++    D3D9DeviceEx*                 m_device;
++    D3D9_COMMON_TEXTURE_DESC      m_desc;
++    D3DRESOURCETYPE               m_type;
++    D3D9_COMMON_TEXTURE_MAP_MODE  m_mapMode;
++
++    Rc<DxvkImage>                 m_image;
++    Rc<DxvkImage>                 m_resolveImage;
++    Rc<DxvkBuffer>                m_buffer;
++    MemoryFileRegion              m_data = { };
++
++    D3D9SubresourceArray<
++      uint64_t>                   m_seqs = { };
++
++    D3D9SubresourceArray<
++      uint32_t>                   m_memoryOffset = { };
++    
++    uint32_t                      m_totalSize = 0;
++
++    D3D9_VK_FORMAT_MAPPING        m_mapping;
++
++    bool                          m_shadow; //< Depth Compare-ness
++    bool                          m_upgradedToD32f; // Dref Clamp
++    bool                          m_supportsFetch4;
++
++    int64_t                       m_size = 0;
++
++    bool                          m_transitionedToHazardLayout = false;
++
++    D3D9ColorView                 m_sampleView;
++
++    D3D9SubresourceBitset         m_locked = { };
++
++    D3D9SubresourceBitset         m_needsReadback = { };
++
++    D3D9SubresourceBitset         m_needsUpload = { };
++
++    DWORD                         m_exposedMipLevels = 0;
++
++    bool                          m_needsMipGen = false;
++
++    D3DTEXTUREFILTERTYPE          m_mipFilter = D3DTEXF_LINEAR;
++
++    std::array<D3DBOX, 6>         m_dirtyBoxes;
++
++    D3D9VkInteropTexture          m_d3d9Interop;
++
++    Rc<DxvkImage> CreatePrimaryImage(D3DRESOURCETYPE ResourceType, HANDLE* pSharedHandle) const;
++
++    Rc<DxvkImage> CreateResolveImage() const;
++
++    BOOL DetermineShadowState() const;
++
++    BOOL DetermineFetch4Compatibility() const;
++
++    BOOL CheckImageSupport(
++      const DxvkImageCreateInfo*  pImageInfo,
++            VkImageTiling         Tiling) const;
++
++    D3D9_COMMON_TEXTURE_MAP_MODE DetermineMapMode() const;
++
++    VkImageLayout OptimizeLayout(
++            VkImageUsageFlags         Usage) const;
++
++    void ExportImageInfo();
++
++  };
++
++}
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 00e5843..00ec689 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -1958,6 +1958,10 @@ namespace dxvk {
+         depthAspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+ 
+       depthAspectMask &= lookupFormatInfo(m_state.depthStencil->GetCommonTexture()->GetFormatMapping().FormatColor)->aspectMask;
++
++      // NVR (nvr.depthResolve): which way this depth buffer runs, for ResolveZ's nearest-sample resolve.
++      if (depthAspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
++        m_state.depthStencil->GetCommonTexture()->SetNvrDepthClear(Z);
+     }
+ 
+     auto ClearImageView = [this](
+@@ -8633,11 +8637,30 @@ namespace dxvk {
+           cDstImage->mipLevelExtent(cDstLayers.mipLevel));
+       });
+     } else {
++      // NVR (nvr.depthResolve, default 'nearest'): the first sample of an MSAA depth buffer is whatever happened to cover it
++      // (with transparency multisampled grass: a blade or the ground behind it, pixel by pixel), so the depth NVR rebuilds its
++      // normals and occlusion from came out noisy along every grass edge (the cloud-shadow 'crust', the ring round the player).
++      // The nearest sample is the same choice every frame: MIN for normal depth, MAX for reversed depth, judged by the value
++      // the game last cleared this depth buffer to (sample 0 while that is not known). DxvkContext::resolveImage falls back
++      // to its shader resolve when the device cannot do MIN / MAX in a render pass.
++      VkResolveModeFlagBits depthMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
++      const float lastClear = srcTextureInfo->GetNvrDepthClear();
++      if (m_d3d9Options.nvrDepthResolve == 1 && lastClear >= 0.0f)
++        depthMode = lastClear < 0.5f ? VK_RESOLVE_MODE_MAX_BIT : VK_RESOLVE_MODE_MIN_BIT;
++      static VkResolveModeFlagBits s_loggedMode = VkResolveModeFlagBits(0);
++      if (depthMode != s_loggedMode) {
++        s_loggedMode = depthMode;
++        Logger::info(str::format("NVR: RESZ depth resolve of a multisampled depth buffer: ",
++          depthMode == VK_RESOLVE_MODE_MAX_BIT ? "nearest sample (MAX, reversed depth)" :
++          depthMode == VK_RESOLVE_MODE_MIN_BIT ? "nearest sample (MIN)" : "sample 0"));
++      }
++
+       EmitCs([
+         cDstImage  = dstTextureInfo->GetImage(),
+         cSrcImage  = srcTextureInfo->GetImage(),
+         cDstSubres = dstSubresourceLayers,
+-        cSrcSubres = srcSubresourceLayers
++        cSrcSubres = srcSubresourceLayers,
++        cDepthMode = depthMode
+       ] (DxvkContext* ctx) {
+         // We should resolve using the first sample according to
+         // http://amd-dev.wpengine.netdna-cdn.com/wordpress/media/2012/10/Advanced-DX9-Capabilities-for-ATI-Radeon-Cards_v2.pdf
+@@ -8650,7 +8673,7 @@ namespace dxvk {
+         region.extent         = cDstImage->mipLevelExtent(cDstSubres.mipLevel);
+ 
+         ctx->resolveImage(cDstImage, cSrcImage, region, cSrcImage->info().format,
+-          VK_RESOLVE_MODE_SAMPLE_ZERO_BIT, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT);
++          cDepthMode, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT);
+       });
+     }
+ 
+diff --git a/src/d3d9/d3d9_options.cpp b/src/d3d9/d3d9_options.cpp
+index f9f4d46..6515ebf 100644
+--- a/src/d3d9/d3d9_options.cpp
++++ b/src/d3d9/d3d9_options.cpp
+@@ -1,114 +1,115 @@
+-#include "../util/util_math.h"
+-
+-#include "d3d9_options.h"
+-
+-#include "d3d9_caps.h"
+-
+-namespace dxvk {
+-
+-  static int32_t parsePciId(const std::string& str) {
+-    if (str.size() != 4)
+-      return -1;
+-    
+-    int32_t id = 0;
+-
+-    for (size_t i = 0; i < str.size(); i++) {
+-      id *= 16;
+-
+-      if (str[i] >= '0' && str[i] <= '9')
+-        id += str[i] - '0';
+-      else if (str[i] >= 'A' && str[i] <= 'F')
+-        id += str[i] - 'A' + 10;
+-      else if (str[i] >= 'a' && str[i] <= 'f')
+-        id += str[i] - 'a' + 10;
+-      else
+-        return -1;
+-    }
+-
+-    return id;
+-  }
+-
+-
+-  D3D9Options::D3D9Options(const Rc<DxvkDevice>& device, const Config& config) {
+-    const Rc<DxvkAdapter> adapter = device != nullptr ? device->adapter() : nullptr;
+-
+-    // Fetch these as a string representing a hexadecimal number and parse it.
+-    this->customVendorId                = parsePciId(config.getOption<std::string>("d3d9.customVendorId"));
+-    this->customDeviceId                = parsePciId(config.getOption<std::string>("d3d9.customDeviceId"));
+-    this->customDeviceDesc              = config.getOption<std::string> ("d3d9.customDeviceDesc");
+-
+-    this->hideNvidiaGpu                 = config.getOption<Tristate>    ("d3d9.hideNvidiaGpu",                 Tristate::Auto) == Tristate::True;
+-    this->hideNvkGpu                    = config.getOption<Tristate>    ("d3d9.hideNvkGpu",                    Tristate::Auto) == Tristate::True;
+-    this->hideAmdGpu                    = config.getOption<Tristate>    ("d3d9.hideAmdGpu",                    Tristate::Auto) == Tristate::True;
+-    this->hideIntelGpu                  = config.getOption<Tristate>    ("d3d9.hideIntelGpu",                  Tristate::True) == Tristate::True;
+-    this->maxFrameLatency               = config.getOption<int32_t>     ("d3d9.maxFrameLatency",               0);
+-    this->maxFrameRate                  = config.getOption<int32_t>     ("dxvk.maxFrameRate",
+-                                          config.getOption<int32_t>     ("d3d9.maxFrameRate",                  0));
+-    this->presentInterval               = config.getOption<int32_t>     ("d3d9.presentInterval",               -1);
+-    this->shaderModel                   = config.getOption<int32_t>     ("d3d9.shaderModel",                   3u);
+-    this->dpiAware                      = config.getOption<bool>        ("d3d9.dpiAware",                      true);
+-    this->lenientClear                  = config.getOption<bool>        ("d3d9.lenientClear",                  false);
+-    this->deferSurfaceCreation          = config.getOption<bool>        ("d3d9.deferSurfaceCreation",          false);
+-    this->samplerAnisotropy             = config.getOption<int32_t>     ("d3d9.samplerAnisotropy",             -1);
+-    this->maxAvailableMemory            = config.getOption<int32_t>     ("d3d9.maxAvailableMemory",            4096);
+-    this->supportCubeDepthFormats       = config.getOption<bool>        ("d3d9.supportCubeDepthFormats",       false);
+-    this->supportDFFormats              = config.getOption<bool>        ("d3d9.supportDFFormats",              true);
+-    this->supportX4R4G4B4               = config.getOption<bool>        ("d3d9.supportX4R4G4B4",               true);
+-    this->useD32forD24                  = config.getOption<bool>        ("d3d9.useD32forD24",                  false);
+-    this->disableA8RT                   = config.getOption<bool>        ("d3d9.disableA8RT",                   false);
+-    this->memoryTrackTest               = config.getOption<bool>        ("d3d9.memoryTrackTest",               false);
+-    this->forceSamplerTypeSpecConstants = config.getOption<bool>        ("d3d9.forceSamplerTypeSpecConstants", false);
+-    this->forceSampleRateShading        = config.getOption<bool>        ("d3d9.forceSampleRateShading",        false);
+-    this->forceAspectRatio              = config.getOption<std::string> ("d3d9.forceAspectRatio",              "");
+-    this->forceRefreshRate              = config.getOption<int32_t>     ("d3d9.forceRefreshRate",              0u);
+-    this->modeCountCompatibility        = config.getOption<bool>        ("d3d9.modeCountCompatibility",        false);
+-    this->allowDiscard                  = config.getOption<bool>        ("d3d9.allowDiscard",                  true);
+-    this->enumerateByDisplays           = config.getOption<bool>        ("d3d9.enumerateByDisplays",           true);
+-    this->cachedWriteOnlyBuffers        = config.getOption<bool>        ("d3d9.cachedWriteOnlyBuffers",          false);
+-    this->deviceLocalConstantBuffers    = config.getOption<Tristate>    ("d3d9.deviceLocalConstantBuffers",    Tristate::Auto);
+-    this->allowDirectBufferMapping      = config.getOption<bool>        ("d3d9.allowDirectBufferMapping",      true);
+-    this->forceDrawTimeBufferUpload     = config.getOption<bool>        ("d3d9.forceDrawTimeBufferUpload",     false);
+-    this->seamlessCubes                 = config.getOption<bool>        ("d3d9.seamlessCubes",                 false);
+-    this->textureMemory                 = config.getOption<int32_t>     ("d3d9.textureMemory",                 100) << 20;
+-    this->deviceLossOnFocusLoss         = config.getOption<bool>        ("d3d9.deviceLossOnFocusLoss",         false);
+-    this->samplerLodBias                = config.getOption<float>       ("d3d9.samplerLodBias",                0.0f);
+-    this->clampNegativeLodBias          = config.getOption<bool>        ("d3d9.clampNegativeLodBias",          false);
+-    this->countLosableResources         = config.getOption<bool>        ("d3d9.countLosableResources",         true);
+-    this->reproducibleCommandStream     = config.getOption<bool>        ("d3d9.reproducibleCommandStream",     false);
+-    this->extraFrontbuffer              = config.getOption<bool>        ("d3d9.extraFrontbuffer",              false);
+-
+-    // D3D8 options
+-    this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
+-
+-    // Clamp the shader model value between 0 and 3
+-    this->shaderModel = dxvk::clamp(this->shaderModel, 0u, 3u);
+-    // Clamp LOD bias so that people don't abuse this in unintended ways
+-    this->samplerLodBias = dxvk::fclamp(this->samplerLodBias, -2.0f, 1.0f);
+-
+-    bool hasMulz = adapter != nullptr
+-                  && (adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV)
+-                   || adapter->matchesDriver(VK_DRIVER_ID_MESA_NVK)
+-                   || adapter->matchesDriver(VK_DRIVER_ID_AMD_OPEN_SOURCE, Version(2, 0, 316), Version())
+-                   || adapter->matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY, Version(565, 57, 1), Version()));
+-    std::string floatEmulation = Config::toLower(config.getOption<std::string>("d3d9.floatEmulation", "auto"));
+-    if (floatEmulation == "strict") {
+-      this->d3d9FloatEmulation = D3D9FloatEmulation::Strict;
+-    } else if (floatEmulation == "false") {
+-      this->d3d9FloatEmulation = D3D9FloatEmulation::Disabled;
+-    } else if (floatEmulation == "true") {
+-      this->d3d9FloatEmulation = D3D9FloatEmulation::Enabled;
+-    } else {
+-      this->d3d9FloatEmulation = hasMulz ? D3D9FloatEmulation::Strict : D3D9FloatEmulation::Enabled;
+-    }
+-
+-    Tristate useFP16 = config.getOption<Tristate>("d3d9.useFP16", Tristate::False);
+-    if (useFP16 == Tristate::Auto) {
+-      this->useFP16 = !hasMulz;
+-    } else {
+-      this->useFP16 = useFP16 == Tristate::True;
+-    }
+-
+-    this->shaderDumpPath = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
+-  }
+-
+-}
++#include "../util/util_math.h"
++
++#include "d3d9_options.h"
++
++#include "d3d9_caps.h"
++
++namespace dxvk {
++
++  static int32_t parsePciId(const std::string& str) {
++    if (str.size() != 4)
++      return -1;
++    
++    int32_t id = 0;
++
++    for (size_t i = 0; i < str.size(); i++) {
++      id *= 16;
++
++      if (str[i] >= '0' && str[i] <= '9')
++        id += str[i] - '0';
++      else if (str[i] >= 'A' && str[i] <= 'F')
++        id += str[i] - 'A' + 10;
++      else if (str[i] >= 'a' && str[i] <= 'f')
++        id += str[i] - 'a' + 10;
++      else
++        return -1;
++    }
++
++    return id;
++  }
++
++
++  D3D9Options::D3D9Options(const Rc<DxvkDevice>& device, const Config& config) {
++    const Rc<DxvkAdapter> adapter = device != nullptr ? device->adapter() : nullptr;
++
++    // Fetch these as a string representing a hexadecimal number and parse it.
++    this->customVendorId                = parsePciId(config.getOption<std::string>("d3d9.customVendorId"));
++    this->customDeviceId                = parsePciId(config.getOption<std::string>("d3d9.customDeviceId"));
++    this->customDeviceDesc              = config.getOption<std::string> ("d3d9.customDeviceDesc");
++
++    this->hideNvidiaGpu                 = config.getOption<Tristate>    ("d3d9.hideNvidiaGpu",                 Tristate::Auto) == Tristate::True;
++    this->hideNvkGpu                    = config.getOption<Tristate>    ("d3d9.hideNvkGpu",                    Tristate::Auto) == Tristate::True;
++    this->hideAmdGpu                    = config.getOption<Tristate>    ("d3d9.hideAmdGpu",                    Tristate::Auto) == Tristate::True;
++    this->hideIntelGpu                  = config.getOption<Tristate>    ("d3d9.hideIntelGpu",                  Tristate::True) == Tristate::True;
++    this->maxFrameLatency               = config.getOption<int32_t>     ("d3d9.maxFrameLatency",               0);
++    this->nvrDepthResolve               = config.getOption<std::string> ("nvr.depthResolve", "nearest") == "sample0" ? 0 : 1;
++    this->maxFrameRate                  = config.getOption<int32_t>     ("dxvk.maxFrameRate",
++                                          config.getOption<int32_t>     ("d3d9.maxFrameRate",                  0));
++    this->presentInterval               = config.getOption<int32_t>     ("d3d9.presentInterval",               -1);
++    this->shaderModel                   = config.getOption<int32_t>     ("d3d9.shaderModel",                   3u);
++    this->dpiAware                      = config.getOption<bool>        ("d3d9.dpiAware",                      true);
++    this->lenientClear                  = config.getOption<bool>        ("d3d9.lenientClear",                  false);
++    this->deferSurfaceCreation          = config.getOption<bool>        ("d3d9.deferSurfaceCreation",          false);
++    this->samplerAnisotropy             = config.getOption<int32_t>     ("d3d9.samplerAnisotropy",             -1);
++    this->maxAvailableMemory            = config.getOption<int32_t>     ("d3d9.maxAvailableMemory",            4096);
++    this->supportCubeDepthFormats       = config.getOption<bool>        ("d3d9.supportCubeDepthFormats",       false);
++    this->supportDFFormats              = config.getOption<bool>        ("d3d9.supportDFFormats",              true);
++    this->supportX4R4G4B4               = config.getOption<bool>        ("d3d9.supportX4R4G4B4",               true);
++    this->useD32forD24                  = config.getOption<bool>        ("d3d9.useD32forD24",                  false);
++    this->disableA8RT                   = config.getOption<bool>        ("d3d9.disableA8RT",                   false);
++    this->memoryTrackTest               = config.getOption<bool>        ("d3d9.memoryTrackTest",               false);
++    this->forceSamplerTypeSpecConstants = config.getOption<bool>        ("d3d9.forceSamplerTypeSpecConstants", false);
++    this->forceSampleRateShading        = config.getOption<bool>        ("d3d9.forceSampleRateShading",        false);
++    this->forceAspectRatio              = config.getOption<std::string> ("d3d9.forceAspectRatio",              "");
++    this->forceRefreshRate              = config.getOption<int32_t>     ("d3d9.forceRefreshRate",              0u);
++    this->modeCountCompatibility        = config.getOption<bool>        ("d3d9.modeCountCompatibility",        false);
++    this->allowDiscard                  = config.getOption<bool>        ("d3d9.allowDiscard",                  true);
++    this->enumerateByDisplays           = config.getOption<bool>        ("d3d9.enumerateByDisplays",           true);
++    this->cachedWriteOnlyBuffers        = config.getOption<bool>        ("d3d9.cachedWriteOnlyBuffers",          false);
++    this->deviceLocalConstantBuffers    = config.getOption<Tristate>    ("d3d9.deviceLocalConstantBuffers",    Tristate::Auto);
++    this->allowDirectBufferMapping      = config.getOption<bool>        ("d3d9.allowDirectBufferMapping",      true);
++    this->forceDrawTimeBufferUpload     = config.getOption<bool>        ("d3d9.forceDrawTimeBufferUpload",     false);
++    this->seamlessCubes                 = config.getOption<bool>        ("d3d9.seamlessCubes",                 false);
++    this->textureMemory                 = config.getOption<int32_t>     ("d3d9.textureMemory",                 100) << 20;
++    this->deviceLossOnFocusLoss         = config.getOption<bool>        ("d3d9.deviceLossOnFocusLoss",         false);
++    this->samplerLodBias                = config.getOption<float>       ("d3d9.samplerLodBias",                0.0f);
++    this->clampNegativeLodBias          = config.getOption<bool>        ("d3d9.clampNegativeLodBias",          false);
++    this->countLosableResources         = config.getOption<bool>        ("d3d9.countLosableResources",         true);
++    this->reproducibleCommandStream     = config.getOption<bool>        ("d3d9.reproducibleCommandStream",     false);
++    this->extraFrontbuffer              = config.getOption<bool>        ("d3d9.extraFrontbuffer",              false);
++
++    // D3D8 options
++    this->drefScaling = config.getOption<int32_t>("d3d8.scaleDref", 0);
++
++    // Clamp the shader model value between 0 and 3
++    this->shaderModel = dxvk::clamp(this->shaderModel, 0u, 3u);
++    // Clamp LOD bias so that people don't abuse this in unintended ways
++    this->samplerLodBias = dxvk::fclamp(this->samplerLodBias, -2.0f, 1.0f);
++
++    bool hasMulz = adapter != nullptr
++                  && (adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV)
++                   || adapter->matchesDriver(VK_DRIVER_ID_MESA_NVK)
++                   || adapter->matchesDriver(VK_DRIVER_ID_AMD_OPEN_SOURCE, Version(2, 0, 316), Version())
++                   || adapter->matchesDriver(VK_DRIVER_ID_NVIDIA_PROPRIETARY, Version(565, 57, 1), Version()));
++    std::string floatEmulation = Config::toLower(config.getOption<std::string>("d3d9.floatEmulation", "auto"));
++    if (floatEmulation == "strict") {
++      this->d3d9FloatEmulation = D3D9FloatEmulation::Strict;
++    } else if (floatEmulation == "false") {
++      this->d3d9FloatEmulation = D3D9FloatEmulation::Disabled;
++    } else if (floatEmulation == "true") {
++      this->d3d9FloatEmulation = D3D9FloatEmulation::Enabled;
++    } else {
++      this->d3d9FloatEmulation = hasMulz ? D3D9FloatEmulation::Strict : D3D9FloatEmulation::Enabled;
++    }
++
++    Tristate useFP16 = config.getOption<Tristate>("d3d9.useFP16", Tristate::False);
++    if (useFP16 == Tristate::Auto) {
++      this->useFP16 = !hasMulz;
++    } else {
++      this->useFP16 = useFP16 == Tristate::True;
++    }
++
++    this->shaderDumpPath = env::getEnvVar("DXVK_SHADER_DUMP_PATH");
++  }
++
++}
+diff --git a/src/d3d9/d3d9_options.h b/src/d3d9/d3d9_options.h
+index 84621a3..090e71e 100644
+--- a/src/d3d9/d3d9_options.h
++++ b/src/d3d9/d3d9_options.h
+@@ -1,172 +1,177 @@
+-#pragma once
+-
+-#include "../util/config/config.h"
+-#include "../dxvk/dxvk_device.h"
+-
+-namespace dxvk {
+-
+-  enum class D3D9FloatEmulation : uint8_t {
+-    Disabled = 0,
+-    Enabled  = 1,
+-    Strict   = 2
+-  };
+-
+-  struct D3D9Options {
+-
+-    D3D9Options(const Rc<DxvkDevice>& device, const Config& config);
+-
+-    /// Override PCI vendor and device IDs reported to the
+-    /// application. This may make apps think they are running
+-    /// on a different GPU than they do and behave differently.
+-    int32_t customVendorId;
+-    int32_t customDeviceId;
+-    std::string customDeviceDesc;
+-
+-    /// Reports Nvidia GPUs running on the proprietary driver as a different
+-    /// vendor (usually AMD)
+-    bool hideNvidiaGpu;
+-
+-    /// Reports Nvidia GPUs running on NVK as a different vendor (usually AMD)
+-    bool hideNvkGpu;
+-
+-    /// Reports AMD GPUs as a different vendor (usually Nvidia)
+-    bool hideAmdGpu;
+-
+-    /// Reports Intel GPUs as a different vendor (usually AMD)
+-    bool hideIntelGpu;
+-
+-    /// Present interval. Overrides the value
+-    /// in D3DPRESENT_PARAMS used in swapchain present.
+-    int32_t presentInterval;
+-
+-    /// Override maximum frame latency if the app specifies
+-    /// a higher value. May help with frame timing issues.
+-    int32_t maxFrameLatency;
+-
+-    /// Limit frame rate
+-    int32_t maxFrameRate;
+-
+-    /// Set the max shader model the device can support in the caps.
+-    uint32_t shaderModel;
+-
+-    /// Whether or not to set the process as DPI aware in Windows when the API interface is created.
+-    bool dpiAware;
+-
+-    /// Whether or not to do a fast path clear if we're close enough to the whole render target.
+-    bool lenientClear;
+-
+-    /// Defer surface creation
+-    bool deferSurfaceCreation;
+-
+-    /// Anisotropic filter override
+-    ///
+-    /// Enforces anisotropic filtering with the
+-    /// given anisotropy value for all samplers.
+-    int32_t samplerAnisotropy;
+-
+-    /// Max available memory override
+-    ///
+-    /// Changes the max initial value used in
+-    /// tracking and GetAvailableTextureMem
+-    uint32_t maxAvailableMemory;
+-
+-    /// D3D9 Floating Point Emulation (anything * 0 = 0)
+-    D3D9FloatEmulation d3d9FloatEmulation;
+-
+-    /// Whether shaders use FP16 for partial precision instructions
+-    bool useFP16;
+-
+-    /// Support depth formats for cube textures
+-    bool supportCubeDepthFormats;
+-
+-    /// Support the DF16 & DF24 texture format
+-    bool supportDFFormats;
+-
+-    /// Support X4R4G4B4
+-    bool supportX4R4G4B4;
+-
+-    /// Use D32f for D24
+-    bool useD32forD24;
+-
+-    /// Disable D3DFMT_A8 for render targets.
+-    /// Specifically to work around a game
+-    /// bug in The Sims 2 that happens on native too!
+-    bool disableA8RT;
+-
+-    /// Whether or not to respect memory tracking for
+-    /// failing resource allocation.
+-    bool memoryTrackTest;
+-
+-    /// Forced aspect ratio, disable other modes
+-    std::string forceAspectRatio;
+-
+-    /// Forced refresh rate, disable other modes
+-    uint32_t forceRefreshRate;
+-
+-    /// Restrict the mode count to ensure a maximum total count of 24
+-    bool modeCountCompatibility;
+-
+-    /// Always use a spec constant to determine sampler type (instead of just in PS 1.x)
+-    /// Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
+-    bool forceSamplerTypeSpecConstants;
+-
+-    /// Forces sample rate shading
+-    bool forceSampleRateShading;
+-
+-    /// Allow D3DLOCK_DISCARD
+-    bool allowDiscard;
+-
+-    /// Enumerate adapters by displays
+-    bool enumerateByDisplays;
+-
+-    /// Cached dynamic buffers: Maps all buffers in cached memory.
+-    bool cachedWriteOnlyBuffers;
+-
+-    /// Use device local memory for constant buffers.
+-    Tristate deviceLocalConstantBuffers;
+-
+-    /// Disable direct buffer mapping
+-    bool allowDirectBufferMapping;
+-
+-    /// Force flushing D3DPOOL_DEFAULT buffers at draw time rather than on unlock
+-    /// Used to work around game bugs in source engine games like CSGO and Insurgency.
+-    /// Those games write to buffers after unlocking them. Uploading on unlock leads to black
+-    /// objects because they never get their proper UVs.
+-    bool forceDrawTimeBufferUpload;
+-
+-    /// Don't use non seamless cube maps
+-    bool seamlessCubes;
+-
+-    /// Mipmap LOD bias
+-    ///
+-    /// Enforces the given LOD bias for all samplers.
+-    float samplerLodBias;
+-
+-    /// Clamps negative LOD bias
+-    bool clampNegativeLodBias;
+-
+-    /// How much virtual memory will be used for textures (in MB).
+-    int32_t textureMemory;
+-
+-    /// Shader dump path
+-    std::string shaderDumpPath;
+-
+-    /// Enable emulation of device loss when a fullscreen app loses focus
+-    bool deviceLossOnFocusLoss;
+-
+-    /// Disable counting losable resources and rejecting calls to Reset() if any are still alive
+-    bool countLosableResources;
+-
+-    /// Ensure that for the same D3D commands the output VK commands
+-    /// don't change between runs. Useful for comparative benchmarking,
+-    /// can negatively affect performance.
+-    bool reproducibleCommandStream;
+-
+-    /// Enable depth texcoord Z (Dref) scaling (D3D8 quirk)
+-    int32_t drefScaling;
+-
+-    /// Add an extra front buffer to make GetFrontBufferData() work correctly when the swapchain only has a single buffer
+-    bool extraFrontbuffer;
+-  };
+-
+-}
++#pragma once
++
++#include "../util/config/config.h"
++#include "../dxvk/dxvk_device.h"
++
++namespace dxvk {
++
++  enum class D3D9FloatEmulation : uint8_t {
++    Disabled = 0,
++    Enabled  = 1,
++    Strict   = 2
++  };
++
++  struct D3D9Options {
++
++    D3D9Options(const Rc<DxvkDevice>& device, const Config& config);
++
++    /// Override PCI vendor and device IDs reported to the
++    /// application. This may make apps think they are running
++    /// on a different GPU than they do and behave differently.
++    int32_t customVendorId;
++    int32_t customDeviceId;
++    std::string customDeviceDesc;
++
++    /// Reports Nvidia GPUs running on the proprietary driver as a different
++    /// vendor (usually AMD)
++    bool hideNvidiaGpu;
++
++    /// Reports Nvidia GPUs running on NVK as a different vendor (usually AMD)
++    bool hideNvkGpu;
++
++    /// Reports AMD GPUs as a different vendor (usually Nvidia)
++    bool hideAmdGpu;
++
++    /// Reports Intel GPUs as a different vendor (usually AMD)
++    bool hideIntelGpu;
++
++    /// Present interval. Overrides the value
++    /// in D3DPRESENT_PARAMS used in swapchain present.
++    int32_t presentInterval;
++
++    /// Override maximum frame latency if the app specifies
++    /// a higher value. May help with frame timing issues.
++    int32_t maxFrameLatency;
++
++    /// NVR (nvr.depthResolve): how an INTZ / RESZ depth resolve takes one depth from a multisampled depth buffer.
++    /// 0 = sample 0 (stock DXVK, 'sample0'); 1 = the nearest sample ('nearest', the default): MIN for normal depth, MAX for
++    /// reversed depth, judged by the value that depth buffer was last cleared to (sample 0 while that is not known).
++    int32_t nvrDepthResolve;
++
++    /// Limit frame rate
++    int32_t maxFrameRate;
++
++    /// Set the max shader model the device can support in the caps.
++    uint32_t shaderModel;
++
++    /// Whether or not to set the process as DPI aware in Windows when the API interface is created.
++    bool dpiAware;
++
++    /// Whether or not to do a fast path clear if we're close enough to the whole render target.
++    bool lenientClear;
++
++    /// Defer surface creation
++    bool deferSurfaceCreation;
++
++    /// Anisotropic filter override
++    ///
++    /// Enforces anisotropic filtering with the
++    /// given anisotropy value for all samplers.
++    int32_t samplerAnisotropy;
++
++    /// Max available memory override
++    ///
++    /// Changes the max initial value used in
++    /// tracking and GetAvailableTextureMem
++    uint32_t maxAvailableMemory;
++
++    /// D3D9 Floating Point Emulation (anything * 0 = 0)
++    D3D9FloatEmulation d3d9FloatEmulation;
++
++    /// Whether shaders use FP16 for partial precision instructions
++    bool useFP16;
++
++    /// Support depth formats for cube textures
++    bool supportCubeDepthFormats;
++
++    /// Support the DF16 & DF24 texture format
++    bool supportDFFormats;
++
++    /// Support X4R4G4B4
++    bool supportX4R4G4B4;
++
++    /// Use D32f for D24
++    bool useD32forD24;
++
++    /// Disable D3DFMT_A8 for render targets.
++    /// Specifically to work around a game
++    /// bug in The Sims 2 that happens on native too!
++    bool disableA8RT;
++
++    /// Whether or not to respect memory tracking for
++    /// failing resource allocation.
++    bool memoryTrackTest;
++
++    /// Forced aspect ratio, disable other modes
++    std::string forceAspectRatio;
++
++    /// Forced refresh rate, disable other modes
++    uint32_t forceRefreshRate;
++
++    /// Restrict the mode count to ensure a maximum total count of 24
++    bool modeCountCompatibility;
++
++    /// Always use a spec constant to determine sampler type (instead of just in PS 1.x)
++    /// Works around a game bug in Halo CE where it gives cube textures to 2d/volume samplers
++    bool forceSamplerTypeSpecConstants;
++
++    /// Forces sample rate shading
++    bool forceSampleRateShading;
++
++    /// Allow D3DLOCK_DISCARD
++    bool allowDiscard;
++
++    /// Enumerate adapters by displays
++    bool enumerateByDisplays;
++
++    /// Cached dynamic buffers: Maps all buffers in cached memory.
++    bool cachedWriteOnlyBuffers;
++
++    /// Use device local memory for constant buffers.
++    Tristate deviceLocalConstantBuffers;
++
++    /// Disable direct buffer mapping
++    bool allowDirectBufferMapping;
++
++    /// Force flushing D3DPOOL_DEFAULT buffers at draw time rather than on unlock
++    /// Used to work around game bugs in source engine games like CSGO and Insurgency.
++    /// Those games write to buffers after unlocking them. Uploading on unlock leads to black
++    /// objects because they never get their proper UVs.
++    bool forceDrawTimeBufferUpload;
++
++    /// Don't use non seamless cube maps
++    bool seamlessCubes;
++
++    /// Mipmap LOD bias
++    ///
++    /// Enforces the given LOD bias for all samplers.
++    float samplerLodBias;
++
++    /// Clamps negative LOD bias
++    bool clampNegativeLodBias;
++
++    /// How much virtual memory will be used for textures (in MB).
++    int32_t textureMemory;
++
++    /// Shader dump path
++    std::string shaderDumpPath;
++
++    /// Enable emulation of device loss when a fullscreen app loses focus
++    bool deviceLossOnFocusLoss;
++
++    /// Disable counting losable resources and rejecting calls to Reset() if any are still alive
++    bool countLosableResources;
++
++    /// Ensure that for the same D3D commands the output VK commands
++    /// don't change between runs. Useful for comparative benchmarking,
++    /// can negatively affect performance.
++    bool reproducibleCommandStream;
++
++    /// Enable depth texcoord Z (Dref) scaling (D3D8 quirk)
++    int32_t drefScaling;
++
++    /// Add an extra front buffer to make GetFrontBufferData() work correctly when the swapchain only has a single buffer
++    bool extraFrontbuffer;
++  };
++
++}
+-- 
+2.40.0.windows.1
+

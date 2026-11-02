@@ -1,0 +1,9 @@
+[_Shaders.SkyDither.Main]
+Strength = 1.0                         # [0.0-4.0] Breaks up the bands in the sky's smooth gradients with a faint, ever-changing noise just before the picture goes to the screen. In steps of the screen's 256 brightness levels: 1 is enough to hide the bands; higher shows as grain.
+AtToneMap = true                       # Also where the game rounds the HDR picture to the screen's 256 levels (the tonemap), over the whole picture: the bands are made there, so the noise at the end alone can't remove them. Invisible on textured surfaces.
+SkyOnly = true                         # Only where the sky shows. Off: the whole picture (invisible on textured surfaces, can help smooth fog and dark gradients).
+Pattern = 0                           # 0 = a new noise pattern every frame (the eye averages it into a smooth gradient). 1 = one fixed pattern: the same 1-step grain at the same pixels every frame, so a still camera shows a perfectly still picture (the anti-aliasing has nothing to flicker on: twinkle 0.0001 % vs 0.12 %); the noise statistics and spectrum are identical, the grain sticks to the screen when the camera moves, at one brightness step. A look change, off by default.
+
+[_Shaders.SkyDither.Status]
+Enabled = true                         # Sky dither: hides the banding in the sky's gradients. Very cheap.
+

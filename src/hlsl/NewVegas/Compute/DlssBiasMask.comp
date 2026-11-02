@@ -1,0 +1,35 @@
+#version 450
+// UNOFFICIAL 2026-11-01 (player report: with DLSS the first-person arms and gun ghost and smear while they animate: sway, bob, firing,
+// reload). DLSS SR's "bias current colour" mask (NGX DLSS.Input.Bias.Current.Color.Mask), made right before the DLSS exchange
+// (core/UpscalerDlss.cpp) from the inputs FSR gets: one thread per render pixel, the render picture in the top-left of every texture.
+//  o_mask: 1 = DLSS trusts this frame's colour there (no history), 0 = DLSS as usual.
+//          The first-person weapon (t_viewmodel > 0, when pc.weapon >= 0): pc.weapon ([Shaders.TAA.DLSS] WeaponMask). Its motion
+//          vectors are 0 (FSRPrep / FSRUpPrep: it is fixed to the camera), which says nothing about its own animation, so DLSS's
+//          history smeared it; FSR gets the same rule through its reactive mask (WeaponReactive).
+//          Everywhere else: the reactive value FSR gets (the g channel of FSR's depth input: ReactiveMask's alpha draws, 0 without).
+// pc.weapon < 0: no weapon test (RenderScale v1: the weapon is drawn after the upscale).
+#extension GL_GOOGLE_include_directive : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_fsrDepth;    // FSR's depth input (r device depth, g reactive)
+layout(set = 1, binding = 1) uniform texture2D t_viewmodel;   // TESR_DepthBufferViewModel (> 0 on the weapon; a placeholder when pc.weapon < 0)
+layout(set = 1, binding = 2, r16f) writeonly uniform image2D o_mask;
+
+layout(push_constant) uniform Push {
+    uint pointIndex;            // 0: POINT, CLAMP (the extension writes the heap index)
+    uint width;                 // the render size
+    uint height;
+    float weapon;               // the weapon's value [0, 1]; < 0: no weapon test
+} pc;
+
+#define POINT_S NVR_SAMPLER(pc.pointIndex)
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
+    float reactive = texelFetch(sampler2D(t_fsrDepth, POINT_S), pixel, 0).y;
+    bool weapon = pc.weapon >= 0.0 && texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x > 0.0;
+    imageStore(o_mask, pixel, vec4(clamp(weapon ? pc.weapon : reactive, 0.0, 1.0), 0.0, 0.0, 0.0));
+}

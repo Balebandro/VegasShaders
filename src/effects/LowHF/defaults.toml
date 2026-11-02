@@ -1,0 +1,11 @@
+[_Shaders.LowHF.Main]
+BlurMultiplier = 0.2
+DarknessMultiplier = 1.0
+FatigueLimit = 0.25
+HealthLimit = 0.5
+LumaMultiplier = 1.0
+VignetteMultiplier = 1.0
+
+[_Shaders.LowHF.Status]
+Enabled = false                       # Screen and sound effects when the player health is low.
+

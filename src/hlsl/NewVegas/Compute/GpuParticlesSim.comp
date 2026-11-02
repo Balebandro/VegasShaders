@@ -1,0 +1,125 @@
+// GPU particles: the simulation (needs NVR DXVK; effects/GpuParticles.cpp). One thread per particle, every frame:
+// the drop falls, and where it meets the world it lands: against the rain's top-down occlusion map (roofs, trees,
+// the ground, also off screen) and against the scene's depth buffer (what the camera sees: walls, poles, the
+// ground). A landed rain drop is a splash for a moment, a landed snow flake settles and stays a while; then it
+// starts again at the top of the box round the camera. The particles live in a storage buffer from frame to
+// frame, which D3D9 cannot do (no compute, no buffers).
+//
+// Build: glslangValidator -V --target-env vulkan1.1 -o GpuParticlesSim.spv GpuParticlesSim.comp
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : enable
+#include "GpuParticles.glsl"
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_depth;   // TESR_DepthBuffer: linear depth / far in x (CombineDepth)
+layout(set = 1, binding = 1) uniform texture2D t_ortho;   // TESR_OrthoMapBuffer: top-down depth (0 = top)
+layout(set = 1, binding = 2, std430) buffer Particles { Particle particles[]; };
+layout(set = 1, binding = 3, std140) uniform Frame { GP_FRAME_BLOCK } f;
+
+// Surface depth the camera sees at a camera-centred clip position; -1 off screen.
+float sceneDepthAt(vec4 c) {
+    if (c.w <= f.camFwd.w || abs(c.x) > c.w || abs(c.y) > c.w) return -1.0;
+    vec2 uv = vec2(c.x / c.w * 0.5 + 0.5, -c.y / c.w * 0.5 + 0.5);
+    ivec2 size = textureSize(t_depth, 0);
+    ivec2 px = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+    return texelFetch(t_depth, px, 0).x * f.origin.w;
+}
+
+// True when the point lies under something in the top-down map (a roof, a tree, the ground). Out of the map: false.
+bool underCover(vec3 p) {
+    vec4 o = f.orthoProj * vec4(p, 1.0);
+    o.xyz /= o.w;
+    if (o.x < -1.0 || o.x > 1.0 || o.y < -1.0 || o.y > 1.0 || o.z < 0.0 || o.z > 1.0) return false;
+    ivec2 size = textureSize(t_ortho, 0);
+    ivec2 px = clamp(ivec2(vec2(o.x * 0.5 + 0.5, -o.y * 0.5 + 0.5) * vec2(size)), ivec2(0), size - 1);
+    return texelFetch(t_ortho, px, 0).r < o.z - 0.0002;
+}
+
+vec3 fallVelocity(float seed, float t) {
+    float speed = f.box.w;
+    if (f.sim.w > 0.5)   // snow: slow, drifting
+        return vec3(sin(t * 1.3 + seed * 40.0) * 18.0, cos(t * 0.9 + seed * 17.0) * 18.0, -speed * (0.7 + 0.6 * seed));
+    return vec3(0.0, 0.0, -speed * (0.85 + 0.3 * seed));
+}
+
+// A new drop: anywhere in the box (start / reset) or at its top (respawn), not under cover.
+void spawn(inout Particle p, inout uint rng, bool anywhere) {
+    float R = f.box.x;
+    float seed = max(gpRand(rng), 1e-4);
+    vec3 pos;
+    for (int k = 0; k < 4; k++) {
+        pos.xy = (vec2(gpRand(rng), gpRand(rng)) * 2.0 - 1.0) * R;
+        pos.z = anywhere ? mix(-f.box.z, f.box.y, gpRand(rng)) : f.box.y - gpRand(rng) * f.box.w * 0.25;
+        if (!gpFlag(f.look.w, GP_ORTHO) || !underCover(pos)) break;
+        pos.z = f.box.y;   // under cover after four tries: start at the top anyway
+    }
+    p.a = vec4(pos, -1.0);
+    p.b = vec4(fallVelocity(seed, f.light.a), seed);
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(f.sim.x)) return;
+
+    Particle p = particles[i];
+    uint rng = gpHash(i * 9781u + uint(f.sim.y) * 6271u + 17u);
+    float dt = f.camDelta.w;
+
+    if (p.b.w <= 0.0 || gpFlag(f.look.w, GP_RESET)) {
+        spawn(p, rng, true);
+        particles[i] = p;
+        return;
+    }
+
+    vec3 pos = p.a.xyz - f.camDelta.xyz;   // the world stays, the camera moved
+    float R = f.box.x;
+
+    if (p.a.w < 0.0) {
+        // falling: wrap round the box sideways (density stays even while the camera moves)
+        pos.xy = mod(pos.xy + R, 2.0 * R) - R;
+        vec3 vel = fallVelocity(p.b.w, f.light.a);
+        vec3 next = pos + vel * dt;
+        bool landed = false;
+
+        // 1. the top-down map: crossing from open sky into cover = landing on that roof / tree / ground
+        if (gpFlag(f.look.w, GP_ORTHO)) {
+            bool coverNow = underCover(next);
+            if (coverNow && !underCover(pos)) landed = true;
+            else if (coverNow) { spawn(p, rng, false); particles[i] = p; return; }   // came in under cover (wrap): start again
+        }
+
+        // 2. the depth buffer: the drop went behind the surface the camera sees, by less than one step + a margin
+        if (!landed) {
+            vec4 c = f.viewProj * vec4(next + f.origin.xyz, 1.0);
+            float d = sceneDepthAt(c);
+            float margin = abs(vel.z) * dt + 30.0;
+            if (d > 60.0 && c.w > d && c.w < d + margin) {
+                next *= d / c.w;   // onto the surface, along the camera's ray
+                landed = true;
+            }
+        }
+
+        if (landed) {
+            if (gpFlag(f.look.w, GP_SPLASHES)) {
+                next -= normalize(next) * 2.0;   // a hair in front of the surface
+                p.a = vec4(next, 0.0);
+                p.b.xyz = vec3(0.0);
+            }
+            else spawn(p, rng, false);
+        }
+        else if (next.z < -f.box.z) spawn(p, rng, false);   // fell through the bottom of the box
+        else {
+            p.a = vec4(next, -1.0);
+            p.b.xyz = vel;
+        }
+    }
+    else {
+        // landed: a splash (rain) or a settled flake (snow) for sim.z seconds, then a new drop at the top
+        float age = p.a.w + dt;
+        if (age > f.sim.z || abs(pos.x) > R * 1.2 || abs(pos.y) > R * 1.2) spawn(p, rng, false);
+        else p.a = vec4(pos, age);
+    }
+    particles[i] = p;
+}

@@ -1,0 +1,65 @@
+[_Shaders.Cloth.Main]
+Enabled = false                      # UNOFFICIAL (2026-10-16): NEEDS A RESTART (Save, then restart the game; changing it in the menu alone does nothing until then). Cloth (capes, dusters, coats, flags, banners, curtains) moves in the wind, and worn coats and dusters follow your movement (2026-10-19: they trail behind when you walk or run, swing when you stop, flare when you turn), done in the vertex shader (no physics). The values below apply immediately
+Keywords = "cape,cloak,duster,coat,flag,banner,curtain,drape,tarp,poncho,robe,scarf,shawl,tent,lucassimms/outfit,mysteriousstranger/outfit,rangerarmor/nv_ranger,rangerpatrol,rileysranger/outfit,oasisdruid/outfit,wastelanddoctor01/outfit,projectpuritydoctor/outfit,bosscribe/outfit,arcadesdoctor,combatranger,riotgear"   # (2026-10-18) Textures whose path holds one of these pieces are cloth: found ANYWHERE in the path (lecloak, leflag, bosbanner count); words of 4 letters or fewer must end a word (flag is not flagstone). A piece with a / (lucassimms/outfit) names a folder and file start: the vanilla dusters have no 'duster' in their texture names
+Exclude = "scape,probe,microbe,wardrobe,drobe,content,intent,extent,patent,potent,latent,flagpole,flagstone,pole,stone"   # (2026-10-18) A texture whose path holds one of these is NOT cloth even when a keyword matches (landscape, flagpole...)
+ExcludeParts = "hat,helmet,head,hair,glove,boot,shoe,mask,goggle,hand,body,beard,mouth,teeth,eyes"   # (2026-10-18) A texture whose FILE NAME has one of these words is NOT cloth (a hat or gloves sharing the garment's folder do not move)
+MaskMode = 2                         # 0: the mesh's vertex colour RED says how loose each part is (1 loose ends, 0 pinned) -- for meshes authored with such a mask; 1: the whole mesh moves; 2: by height, pinned at the top (works with unauthored meshes)
+SkinMask = 1                         # (2026-10-18) Worn clothing: 1 = by height above the feet (HeightTop = pinned, HeightBottom = loosest; the vertex heights are the mesh's own, so it works whatever the pose; boots and legs below LegCut stay still); 2 = by the garment's own height range (top PinFraction stays still); 0 = the old actor-height mask (shoulders moved too)
+PinFraction = 0.4                    # (2026-10-18) SkinMask 2: the top part of a worn garment (0-0.9 of its height) that does not move at all (shoulders, chest)
+SkinSpace = 1                        # (2026-10-18) Worn clothing: the space the skeleton puts vertices in: 1 = camera-relative world (verified in game), 0 = the skin root's own (the old assumption), 2 = world. Leave at 1
+HeightTop = 95.0                     # SkinMask 1 (and 0): units above the actor's feet where worn cloth is pinned (above this nothing moves; ~waist)
+HeightBottom = 25.0                  # SkinMask 1 (and 0): units above the feet where worn cloth is loosest (coat hem)
+LegCut = 14.0                        # (2026-10-18) SkinMask 1: below this height above the feet (boots, ankles) nothing moves; full strength 10 units higher
+HeightFromFeet = true                # SkinMask 0 only: measure those heights from the actor's feet (true) or from the skeleton's root (false)
+UseGameWind = true                   # Take direction and strength from the weather's wind (the values below still scale it). Outdoors only: indoors there is no weather, see Cloth > Interiors
+CalmFactor = 0.6                     # (2026-10-18) With the game's wind: the strength in dead calm as a fraction of WindIntensity (0-1.7; it rises to 1.7 in a gale). It was 0.3: in the calm desert cloth moved 4 cm, which nobody sees
+WindDirX = 1.0                       # Wind direction (world, used when UseGameWind is off; indoors with Cloth > Interiors on, the draught blows this way)
+WindDirY = 0.0
+WindDirZ = 0.0
+WindSpeed = 220.0                    # How fast the billow travels along the wind (units per second)
+WindIntensity = 6.0                  # How far loose cloth moves (units; 6 is about 9 cm)
+Wavelength = 260.0                   # Length of one billow (units)
+FlutterSpeed = 3.0                   # High-frequency flutter (cycles per second)
+FlutterAmount = 0.35                 # Flutter strength (0-1)
+RippleAmount = 0.5                   # Billow out of the cloth's plane (0-1)
+RippleScale = 0.012                  # Size of the small ripples (cycles per unit)
+MotionDrag = 0.1                     # (2026-10-19) Worn coats follow the wearer: how far the hem trails behind per unit/s of speed at a walk (~100 units/s: ~8 units), rising softly to MotionMax (a run: ~20 units, 30 cm). 0 = off
+MotionMax = 30.0                     # (2026-10-19) The most the hem trails behind (units, approached softly)
+MotionSpring = 1.5                   # (2026-10-19) How fast the hem swings back after you stop or turn (swings per second)
+MotionDamping = 0.25                 # (2026-10-19) 0.05 = swings on and on, 1 = settles without swinging past
+StrideSwing = 6.0                    # (2026-10-19) Side-to-side swish of the hem with your steps at a run (units; about half walking, none standing). 0 = off
+StrideLength = 250.0                 # (2026-10-19) Units run per swish (one left and one right step); steps are shorter when walking
+TurnLag = 0.12                       # (2026-10-19) Seconds the hem lags behind a turn, so the coat flares out. 0 = off
+MotionIndoors = true                 # (2026-10-19) Worn coats follow the wearer indoors too (the wind part indoors: Cloth > Interiors)
+UseSkeleton = true                   # (2026-10-19) Worn clothing: only what stands off the legs and arms moves, and only below the hips, found from each garment's own skeleton (no per-armour numbers; legs, trousers, hands and torso stay still). Off = the height mask below (SkinMask)
+LimbGap = 1.0                        # (2026-10-19) UseSkeleton: how far beyond the garment's own leg thickness (measured from its mesh: the trousers under a coat) cloth starts to move, in units. Raise it if trousers move
+LimbFade = 6.0                       # (2026-10-19) UseSkeleton: how many units further off the legs cloth moves fully. Smaller = more of a coat moves but its lining and shell drift apart; larger = calmer
+UseWeights = true                    # (2026-10-19) Worn clothing: each garment's own mesh decides what moves, worked out once per garment (trouser legs and boots found from the mesh and kept still; the coat pinned at the hips, loosest at the hem; its outside and its lining move together). Off = the skeleton mask above (LimbGap, LimbFade). Applies immediately
+WalkSim = true                       # (2026-10-20) Worn coats get a small walking simulation: the coat hangs from the hips instead of riding your legs like trousers, its hem trails behind, the knees push it forward at each step, it swings and settles when you stop. Needs UseWeights. Applies immediately
+WalkHang = 1.0                       # (2026-10-20) WalkSim: how fully the coat hangs from the hips (0 = rides the legs as the mesh was made, 1 = hangs from the hips). It fades out by itself when you sit or crouch
+WalkSpring = 1.4                     # (2026-10-20) WalkSim: how fast the hem swings back (swings per second)
+WalkDamping = 0.2                    # (2026-10-20) WalkSim: 0.02 = swings on and on, 1 = settles without swinging past
+WalkDrag = 1.0                       # (2026-10-20) WalkSim: how much the air holds the hem back while you move (0 = none: it only lags while speeding up)
+WalkLegMargin = 1.5                  # (2026-10-20) WalkSim: how far (units) the hem is kept off your legs
+WalkMaxSwing = 25.0                  # (2026-10-20) WalkSim: the most the hem moves away from where it hangs (units, reached softly)
+WalkMaxAngle = 35.0                  # (2026-10-20) WalkSim: the most the hem swings out from hanging straight down (degrees; it flew out level at a run)
+WalkDragCap = 180.0                  # (2026-10-20) WalkSim: above about this speed (units/s) the air holds the hem back no further (a run trails about as much as a brisk walk)
+WalkHemSmooth = 1.0                  # (2026-10-20) WalkSim: 0..1, how smoothly the hem moves as one piece (less sharp folds when you turn and run fast; 0 = as before). Applies immediately
+StillWeights = true                  # (2026-10-20) Still cloth (tents, flags, banners, curtains): only the thin cloth moves, worked out once per object from its own shape -- poles, ropes, pegs and other solid parts stay still, the cloth is held where it touches them, at the ground and along its top, and moves most at its free edges (a flag's end, a tent's door flap, a banner's hem); two-sided cloth moves as one. Off = as before: the whole object moved and its bottom the most (a tent's poles, its ropes and its edge on the ground swung). Applies immediately
+AutoDetect = false                   # (2026-10-20) Worn clothing that no keyword names moves too when its own mesh hangs free of the legs -- coats, dusters, robes, dresses (Ulysses' duster, Elijah's robes, Colonel Autumn's coat, the gambler dresses...); trousers, power armour and tight suits stay still. Each garment is measured once (in the background, a moment after it first appears) and every verdict goes to the log (LogAuto). Applies immediately
+AutoShare = 2.0                      # (2026-10-20) AutoDetect: [0-50] how much of a garment (%) must hang free for it to move. Higher = only long coats and robes. Applies immediately
+ForceOff = "gore/,meatcap,creatures/" # (2026-10-20) Textures whose path holds one of these NEVER move, whether a keyword or AutoDetect picked them (by default the dismemberment caps and creatures: a brahmin's belly measured as 'hanging free'). Add a piece of an armour's texture path here to keep it still
+LogAuto = true                       # (2026-10-20) AutoDetect: writes each garment's verdict to the log once (moves or still, and why)
+LogMatches = false                   # Diagnostic: writes every worn texture (cloth or not) and every matched texture to the log with its mesh numbers
+TimeOffset = 0.0                     # Test only: seconds the wave pattern is ahead (for pictures at set moments)
+
+[_Shaders.Cloth.Interiors]
+Enabled = false                      # UNOFFICIAL (2026-10-21): cloth indoors (curtains, banners, flags, drapes, tents -- and the wind part on worn coats) sways gently, with the values below instead of the outdoor ones: there is no weather indoors, so the game's wind never changes them, and the draught blows along Cloth > Main WindDirX/Y/Z. Off = cloth stays still indoors, as before (worn coats still follow you there: Cloth > Main MotionIndoors). It replaces Cloth > Main's old Interiors switch, which moved indoor cloth as much as outdoors (a saved 'true' carries over). Needs Cloth > Main Enabled. Applies immediately
+Strength = 1.0                       # [0.0-2.0] (2026-10-21) Indoors: one knob for all of it -- how much indoor cloth moves, as a share of WindIntensity (0 = still, 0.5 = half as far, 2 = twice). Applies immediately
+WindIntensity = 2.0                  # [0.0-12.0] (2026-10-21) Indoors: how far loose cloth moves (units; 2 is about 3 cm -- outdoors it moves 4 to 10 by the weather). Applies immediately
+WindSpeed = 80.0                     # [0-400] (2026-10-21) Indoors: how fast the slow sway travels across the cloth (units per second; outdoors 220). With Wavelength it sets the pace: 80 / 400 = one sway every 5 seconds. Applies immediately
+Wavelength = 400.0                   # [16-1000] (2026-10-21) Indoors: the length of one sway across the cloth (units; outdoors 260). Longer = a curtain sways more as one piece. Applies immediately
+FlutterSpeed = 0.8                   # [0.0-6.0] (2026-10-21) Indoors: the small quiver on top of the sway (cycles per second; outdoors 3). Applies immediately
+FlutterAmount = 0.1                  # [0.0-1.0] (2026-10-21) Indoors: how strong that quiver is (outdoors 0.35). Applies immediately
+RippleAmount = 0.3                   # [0.0-1.0] (2026-10-21) Indoors: how much the cloth billows out of its own plane (outdoors 0.5). Applies immediately
+

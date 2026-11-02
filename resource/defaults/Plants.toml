@@ -1,0 +1,13 @@
+[_Shaders.Plants.Wind]
+Enabled = false                        # UNOFFICIAL (2026-10-20) PLANTS IN THE WIND, a LOOK CHANGE (off): the Mojave's plants move in the same wind as the grass (Grass Wind section): the same direction, strength and gusts, so a gust rolls through the grass and the bushes together. The common SpeedTree bushes' leaves swing harder and flutter as a gust passes (live); the static plants -- Joshua trees, yuccas, banana yucca, creosote, sagebrush (see Keywords) -- bend from the ground up, tall ones stiffer (NEEDS A RESTART: Save, then restart the game). Cacti and stumps stay rigid. Works with the grass wind itself on or off. Off = exactly the game's motion.
+Bend = 6.0                             # [0-100] (2026-10-20) Static plants: how far a passing gust leans a plant's top, in units per 100 units of its height, at a middling wind (it grows and shrinks with the weather's wind, as the grass's sway does). 0 = no lean.
+StiffHeight = 200.0                    # [20-5000] (2026-10-20) Static plants taller than this (in units) bend less: a Joshua tree's crown sways less than a bush's top.
+Flutter = 0.25                         # [0-4] (2026-10-20) Static plants: their own small quiver, as a fraction of the gust lean, so a plant's parts never move in step.
+LeafGust = 1.5                         # [0-10] (2026-10-20) SpeedTree bushes: how much a passing gust strengthens the game's own leaf swing (at the gust's crest the swing is 1 + this times as big).
+LeafFlutter = 0.12                     # [0-1] (2026-10-20) SpeedTree bushes: extra leaf flutter (radians, grows with the wind).
+LeafLean = 0.0                         # [0-50] (2026-10-20) SpeedTree bushes: units a gust leans the leaves downwind (the bushes' branches are the game's and do not follow: keep small). 0 = none.
+LeafHeight = 120.0                     # [1-5000] (2026-10-20) SpeedTree bushes: height in the bush where the lean is full (it rises from 0 at the ground).
+Keywords = "creosote,sagebrush,josh,yucca,mesquite,coyotetobacco,maize"   # (2026-10-20) Static plants: textures whose path holds one of these move. Every part of a plant must match, or its parts come apart: the vanilla Joshua trees AND yuccas use TreeJosh textures (texture packs: joshuatree), so josh covers both.
+Exclude = "cactus,stump,agave,dead"   # (2026-10-20) A texture whose path holds one of these never moves, even when a keyword matches.
+Log = 0                                # (2026-10-20) DIAGNOSTIC: 1 = a log line every 600 frames with the wind, the plant draws per frame and the leaves' values, and every newly matched plant texture.
+

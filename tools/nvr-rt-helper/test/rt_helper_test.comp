@@ -1,0 +1,51 @@
+#version 460
+// NVR ray tracing helper end-to-end test (rt_helper_test.cpp): one ray per grid point against the helper's scene.
+// The helper's fixed layout: binding 0 the scene, binding 1 the pass constants, bindings 2.. the pass's images.
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {
+  uvec4 size;        // x: grid size
+  vec4  area;        // x0, y0, x1, y1 of the grid
+  vec4  origin;      // z of the ray origins, tMax in w
+  vec4  direction;   // xyz
+} p;
+layout(set = 0, binding = 2, rg32f) uniform writeonly image2D results;   // x: instance id (-1 miss), y: distance
+layout(set = 0, binding = 3, rg32f) uniform writeonly image2D fetched;   // x: the record's geometry id, y: the hit triangle's first vertex z (object space)
+struct Record { vec4 albedo; uint flags; uint geometryId; uint vertexOffset; uint indexOffset; };
+layout(set = 0, binding = 10, std430) readonly buffer Records { Record records[]; };
+layout(set = 0, binding = 11, std430) readonly buffer Geometry { uint words[]; };
+layout(set = 0, binding = 4, r32f) uniform readonly image2D screen;    // a screen-size image the test filled with x + 4096 y
+layout(set = 0, binding = 5, rg32f) uniform writeonly image2D probe;   // what the helper reads there, at (79 x, 45 y) of the grid
+
+void main() {
+  uvec2 id = gl_GlobalInvocationID.xy;
+  if (id.x >= p.size.x || id.y >= p.size.x)
+    return;
+
+  vec2 f = (vec2(id) + 0.5) / float(p.size.x);
+  vec3 o = vec3(mix(p.area.xy, p.area.zw, f), p.origin.z);
+
+  rayQueryEXT q;
+  rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, o, 0.0, p.direction.xyz, p.origin.w);
+  while (rayQueryProceedEXT(q)) { }
+
+  vec2 r = vec2(-1.0, -1.0), g = vec2(-1.0, -1.0);
+  if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+    r = vec2(float(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true)), rayQueryGetIntersectionTEXT(q, true));
+    Record rec = records[rayQueryGetIntersectionInstanceIdEXT(q, true)];
+    uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
+    float z = -2.0;
+    if (rec.indexOffset != 0xFFFFFFFFu) {
+      uint i0 = words[rec.indexOffset + 3u * prim];
+      z = uintBitsToFloat(words[rec.vertexOffset + 3u * i0 + 2u]);
+    }
+    g = vec2(float(rec.geometryId), z);
+  }
+  imageStore(results, ivec2(id), vec4(r, 0.0, 0.0));
+  imageStore(fetched, ivec2(id), vec4(g, 0.0, 0.0));
+  ivec2 at = ivec2(int(id.x) * 79, int(id.y) * 45);
+  imageStore(probe, ivec2(id), vec4(imageLoad(screen, at).r, 0.0, 0.0, 0.0));
+}

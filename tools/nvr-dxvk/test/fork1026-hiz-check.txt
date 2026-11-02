@@ -1,0 +1,84 @@
+# fork1026-hiz check (2026-10-26, deep/fork-hiz): og-desert or lucky22. Shot 1: HiZ with HiZCheck 60 (log lines 'Hi-Z check':
+# the pyramid read back and compared with the depth buffer; those frames stall, no timing from that shot). Then F10 timing ABC x3:
+# old trace / HiZ as shipped / HiZ + HiZSafeCells ('  Reflections trace (half)', '  Hi-Z pyramid', 'Reflections (SSR)').
+# HiZInteriorsTest is set in every shot (no effect outdoors). 600 frames per shot.
+frames 600
+profile
+shot hizcsettle
+wait 900
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+shot hizchk-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZCheck 60
+shot hizcold-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+shot hizcship-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main HiZ true
+shot hizcfix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+shot hizcold-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+shot hizcship-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main HiZ true
+shot hizcfix-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+shot hizcold-3
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+shot hizcship-3
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main HiZ true
+shot hizcfix-3
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true

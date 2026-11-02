@@ -1,0 +1,50 @@
+nvr-sm6 1
+source PointShadows.fx.hlsl technique MergedPointShadows pass 0 entry Shadow(false) vs FrameVS
+defines NVR_SM6=1
+hash a0d6a5d0d4a768c3 Effects/PointShadows.fx.hlsl
+hash b5d8f72865a0fb69 Effects/Includes/Helpers.hlsl
+hash aef31de36f7957da Effects/Includes/Depth.hlsl
+hash 949e22a95c815740 Effects/Includes/Normals.hlsl
+hash 5d9da31dec872999 Effects/Includes/Shadows.hlsl
+const TESR_ShadowLightPosition 0 192 float4[12]
+const TESR_LightPosition 192 192 float4[12]
+const TESR_LightColor 384 384 float4[24]
+const TESR_ExtraLights 768 256 float4[16]
+const TESR_ShadowFade 1024 16 float4
+const TESR_PointShadowNear 1040 16 float4
+const TESR_SpotLightPosition 1056 16 float4
+const TESR_SpotLightDirection 1072 16 float4
+const TESR_SpotLightColor 1088 16 float4
+const TESR_LampContact 1104 16 float4
+const TESR_LampContactFade 1120 16 float4
+const TESR_LampContactBias 1136 16 float4
+const TESR_LampContactNoise 1152 16 float4
+const TESR_ReciprocalResolution 1168 16 float4
+const TESR_ProjectionTransform 1184 64 float4x4
+const TESR_InvProjectionTransform 1248 64 float4x4
+const TESR_ViewTransform 1312 64 float4x4
+const TESR_InvViewTransform 1376 64 float4x4
+const TESR_DepthConstants 1440 16 float4
+const TESR_CameraData 1456 16 float4
+const TESR_CameraPosition 1472 16 float4
+ubo 2 0 1488
+texture TESR_DepthBuffer 0 2D 0 used
+texture TESR_NormalsBuffer 1 2D 1 used
+texture TESR_ShadowCubeMapBuffer0 2 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer1 3 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer2 4 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer3 5 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer4 6 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer5 7 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer6 8 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer7 9 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer8 10 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer9 11 CUBE 0 used
+texture TESR_ShadowCubeMapBuffer10 12 CUBE 0 used
+texture NVR_LampMaskHalf 13 2D 1 unused
+sampler 0 LINEAR_MIPMAPS CLAMP
+sampler 1 NEAREST CLAMP
+vs FrameVS
+states 0
+push 8
+targets 1

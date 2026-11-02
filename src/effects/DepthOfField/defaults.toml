@@ -1,0 +1,49 @@
+[_Shaders.DepthOfField.Bokeh]
+Bokeh = false                          # UNOFFICIAL (2026-10-26), needs the DXVK fork (the fork's d3d9.dll); does nothing on native D3D9 or stock DXVK. With the autofocus depth of field on (Enabled in a view), bright out-of-focus lights become real bokeh: each highlight is scattered by a compute pass as a disc or polygon of light with a hard edge, as a camera lens draws it, instead of the soft smudge the blur gives. Near and far fields follow the same focus and autofocus; a far light is hidden by an in-focus object in front of it. Off = exactly the old depth of field.
+BokehShape = 6                         # UNOFFICIAL, with Bokeh: the aperture's shape: 0 = disc, 5 to 8 = a polygon with that many sides (6 = hexagon).
+BokehThreshold = 0.75                  # UNOFFICIAL, with Bokeh: brightness (0-1, of the displayed colour) above which a highlight that stands out of its surroundings becomes a bokeh sprite.
+BokehIntensity = 1.0                   # UNOFFICIAL, with Bokeh: brightness of the bokeh sprites.
+BokehSize = 12.0                       # UNOFFICIAL, with Bokeh: radius in pixels (at 1080p, scaled with the screen height) of a fully out-of-focus light's bokeh.
+BokehRotation = 0.0                    # UNOFFICIAL, with Bokeh: rotation of the polygon shape, in degrees.
+BokehMaxSprites = 4096                 # UNOFFICIAL, with Bokeh: most highlights scattered per frame (256-16384); the cost grows with the number of lights in view and their size.
+
+[_Shaders.DepthOfField.FirstPersonView]
+BaseBlurRadius = 1.0                   # Strength of the blurriness caused by depth of Field.
+BlurFallOff = 1.5                      # Hyperfocal distance (x1000). Before this distance, near and far field are blurred. After, only the near field is.
+DiameterRange = 0.8                    # Bokeh treshold. Areas with brightness above this value will bloom in a bokeh like effect.
+DistantBlur = true                     # Activate a constant blurriness in the far distance to hide LOD.
+DistantBlurEndRange = 150000           # Far end of the area blurred in the distance (fully blurry).
+DistantBlurStartRange = 30000          # Start of the area blurred in the distance (not yet blurry).
+Enabled = false                        # Wether to activate the DOF effect in first person.
+Mode = 0                               # Chose when the DOF is activated: 0: always, 1: not during dialog, 2: only in dialog.
+NearBlurCutOff = 100                   # Close up range that doesn't get blurred to avoid blurry gun/player character.
+Radius = 1.5                           # Radius for the bokeh blur.
+
+[_Shaders.DepthOfField.Status]
+Enabled = true                         # Depth of Field blurriness with animated autofocus. Simulates a real camera autofocus with a focus on playability.
+JitterFix = true                       # UNOFFICIAL (2026-11-01), BUG FIX, applies immediately: with TAA, FSR or DLSS at native size the blur read the depth a fraction of a pixel off the picture (the depth keeps the frame's jitter), so blocks flickered along roofs and the skyline. On: the depth is read where the picture is. Off: as before.
+
+[_Shaders.DepthOfField.ThirdPersonView]
+BaseBlurRadius = 2.0                   # Strength of the blurriness caused by depth of Field.
+BlurFallOff = 1.5                      # Hyperfocal distance (x1000). Before this distance, near and far field are blurred. After, only the near field is.
+DiameterRange = 0.8                    # Bokeh treshold. Areas with brightness above this value will bloom in a bokeh like effect.
+DistantBlur = true                     # Activate a constant blurriness in the far distance to hide LOD.
+DistantBlurEndRange = 150000           # Far end of the area blurred in the distance (fully blurry).
+DistantBlurStartRange = 30000          # Start of the area blurred in the distance (not yet blurry).
+Enabled = false                        # Wether to activate the DOF effect in third person.
+Mode = 0                               # Chose when the DOF is activated: 0: always, 1: not during dialog, 2: only in dialog.
+NearBlurCutOff = 200                   # Close up range that doesn't get blurred to avoid blurry gun/player character.
+Radius = 1.5                           # Radius for the bokeh blur.
+
+[_Shaders.DepthOfField.VanityView]
+BaseBlurRadius = 2.0                   # Strength of the blurriness caused by depth of Field.
+BlurFallOff = 1.5                      # Hyperfocal distance (x1000). Before this distance, near and far field are blurred. After, only the near field is.
+DiameterRange = 0.8                    # Bokeh treshold. Areas with brightness above this value will bloom in a bokeh like effect.
+DistantBlur = true                     # Activate a constant blurriness in the far distance to hide LOD.
+DistantBlurEndRange = 150000           # Far end of the area blurred in the distance (fully blurry).
+DistantBlurStartRange = 30000          # Start of the area blurred in the distance (not yet blurry).
+Enabled = false                        # Wether to activate the DOF effect in vanity camera (free rotation camera).
+Mode = 0                               # Chose when the DOF is activated: 0: always, 1: not during dialog, 2: only in dialog.
+NearBlurCutOff = 0                     # Close up range that doesn't get blurred to avoid blurry gun/player character.
+Radius = 1.5                           # Radius for the bokeh blur.
+

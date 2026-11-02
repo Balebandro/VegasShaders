@@ -1,0 +1,17 @@
+[_Shaders.HandBlood.Main]
+PerHit = 0.35                          # UNOFFICIAL [0-1]: blood on your weapon and gloves from each fresh blood splat near you (more the nearer). The idea is mrfury97's HUD raindrops.
+Reach = 220.0                          # [10-1000] Game units: fresh blood this close to the camera counts (point blank, melee).
+DryTime = 90.0                         # [1-3600] Seconds until it has dried dark and matte.
+FadeTime = 600.0                       # [0-36000] Seconds it takes to wear off (most of it in about twice this). 0: stays. Water washes it off.
+CellSize = 1.5                         # [0.2-20] Size of the spatter's droplets, in game units (bigger = coarser spatter).
+ColorR = 0.11                          # [0-1] Blood colour (texture sRGB) until a blood decal has been seen; after that the game's own blood colour is used.
+ColorG = 0.012
+ColorB = 0.012
+Brightness = 1.0                       # [0.05-2] Brightness of the blood against your blood decals' colour (below 1 darker: thick blood on the gun).
+Run = 1.0                              # [0-2] How far drops run down the surface after a hit (0: they stay round). Upright surfaces run most, level ones not at all.
+RunTime = 4.0                          # [0.1-60] Seconds the drops take to run (most of the way in about twice this).
+DebugView = 0                          # 1: always fully bloodied (to see it without a fight).
+
+[_Shaders.HandBlood.Status]
+Enabled = false                        # Blood on the first-person weapon and gloves. Read at startup (compiled into the object shaders; off = the shaders exactly as before; on costs about 3-5% of lit-object shading).
+

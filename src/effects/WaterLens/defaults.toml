@@ -1,0 +1,10 @@
+[_Shaders.WaterLens.Main]
+Amount = 0.1
+Time = 180.0
+TimeMultA = 0.1
+TimeMultB = 0.2
+Viscosity = 0.05
+
+[_Shaders.WaterLens.Status]
+Enabled = true                      # Short refraction water drop animation on the lens when exiting water.
+

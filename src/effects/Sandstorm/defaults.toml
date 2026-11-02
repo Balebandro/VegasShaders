@@ -1,0 +1,34 @@
+[_Shaders.Sandstorm.Main]
+Keyword = "sandstorm,duststorm"        # A weather whose editor ID holds one of these words (separated by commas), in any case (SandStorm, NVWastelandSandstorm, the game's own HVDustStorm in Hidden Valley...), is a sandstorm. The storm builds and settles with the weather's own transition. (Ported from Physically-Based-Reloaded, Balebandro.)
+Visibility = 2200.0                    # [200-30000] How far one sees through the full storm, in game units (a cell is 4096): about 95% of what lies this far is hidden.
+HeightFalloff = 2500.0                 # [200-50000] The dust thins with height above the camera over about this many units, so looking up shows a little more sky than looking ahead.
+Billowing = 0.7                        # [0.0-1.0] How much the dust gathers into rolling clouds: 0 an even haze, 1 thick clouds with clearer gaps between them.
+NoiseScale = 900.0                     # [100-10000] Size of the dust clouds, in game units.
+WindSpeed = 2000.0                     # [0-5000] The dust's speed at the weather's full wind, in units per second. It blows the way the weather's wind does.
+MinWindSpeed = 700.0                   # [0-5000] The dust's speed when the weather has no wind.
+StreakStrength = 1.0                   # [0.0-4.0] Thin streaks of sand blown past the camera. 0 off.
+DustColorR = 0.86                      # [0.0-1.0] The dust's colour (red), lit by the weather's fog colour, its ambient light and the sun.
+DustColorG = 0.68                      # [0.0-1.0] The dust's colour (green).
+DustColorB = 0.48                      # [0.0-1.0] The dust's colour (blue).
+SunScattering = 1.5                    # [0.0-10.0] How much brighter the dust glows looking toward the sun, as fine dust scatters light forward.
+Brightness = 1.0                       # [0.0-10.0] Overall light on the dust.
+FadeSpeed = 0.25                       # [0.01-10.0] How fast the storm builds and settles, as a share per second (0.25: about four seconds), on top of the weather's own transition.
+GrassWind = 3.0                        # [1.0-10.0] How much harder the grass sways at the storm's height: it also leans downwind in gusts that sweep across the field, and flutters. Builds and settles with the storm; 1 leaves the grass as the weather moves it.
+TreeWind = 2.5                         # [1.0-10.0] How much harder tree leaves swing at the storm's height, with a fast flutter. 1 leaves them as the weather moves them.
+LightScattering = 1.0                  # [0.0-20.0] How strongly lamps, fires, signs and other nearby lights glow through the dust, the way the sun does: a halo around each, dimmed by the dust between you and it, stopping at walls. 0 off.
+EmissiveThreshold = 3.0                # [0.0-50.0] Fire, sparks and other glowing effects are drawn without depth, so the storm would bury them as deep as whatever is behind them. A pixel this many times brighter than lit dust counts as glowing in front of it and only gets EmissiveDistance of dust. Lower catches dimmer effects (too low and bright sunlit walls pierce the storm too); 0 off.
+EmissiveDistance = 400.0               # [0-5000] How much dust, in game units, such a glowing pixel is still seen through.
+ThroughBlended = 1                     # [0-1] While the storm blows, glass and other see-through blended surfaces write no depth, so the world behind a window gets its own dust. Cut-outs (fences, wire, torn sheets) and water keep their depth. 0: the world behind a window stays clear.
+CharactersKeepDepth = 1                # [0-1] With ThroughBlended: people and creatures keep their depth (hair, blended clothing and armour, hats, helmets, goggles), so they never get the dust of the world behind them and look see-through. 0: as before (a trooper's helmet could look see-through in the storm). From Physically-Based-Reloaded.
+ForceStorm = 0                         # [0-1] Debugging: 1 shows the full storm outdoors in any weather.
+Steps = 12                             # [4-12] Speed (FastPath 0 only): how many steps the dust is marched in near you (the main cost). Fewer is faster and grainier.
+Octaves = 3                            # [1-3] Speed: detail layers in the dust clouds. Fewer is faster and smoother.
+SoftEdges = 1                          # [0-1] Speed: 1 blends the dust at the edges of hair, foliage and fences over a few pixels (9 depth reads per pixel); 0 reads one (faster, a darker rim can show).
+FineShelter = 1                        # [0-1] Speed: 1 tests 8 points upwind for each sand streak (walls and rocks stop them); 0 tests 4 (faster, coarser).
+FastPath = 1                           # [0-1] Speed: 1 works the dust out on a coarse 3D grid of the air (one ray per 16 x 16 pixels, 64 slices deep) and the sand streaks and lamp glow at half resolution: the same storm for about a tenth of the cost (measured at 2560x1440 on a GTX 1070: 17.6 ms -> 1.5 ms in the desert by day and at dusk, 11.1 -> 2.2 ms on the neon-lit Strip at night), without the march's grain. Steps is then not used. 0: every pixel marched at full resolution (the original, very heavy).
+FixedTime = -1.0                       # [-1.0-3600.0] Testing: 0 or more holds the dust still at that many seconds of its clock (to compare pictures); -1 lets it blow.
+
+[_Shaders.Sandstorm.Status]
+Enabled = false                        # Sandstorm: while the weather is a sandstorm (its editor ID holds Keyword), wind-driven dust fills the air: rolling clouds of it near you, a haze that swallows the distance and the sky, sand streaking past, lamps glowing through it, grass and trees whipped by the wind. Lit by the sun and the weather's own colours. Off by default (a look change).
+
+

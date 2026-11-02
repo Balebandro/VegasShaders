@@ -1,0 +1,178 @@
+// DepthOfField bokeh sprites (needs NVR DXVK; fork-only, [Shaders.DepthOfField.Bokeh] Bokeh, off by default).
+//
+// D3D9's DoF can only gather (each pixel averages its neighbours), so a bright light out of focus becomes a soft smudge.
+// Here every bright, out-of-focus highlight is SCATTERED as a sprite of the lens aperture's shape (a disc or a polygon):
+// the light is spread evenly over that shape, with a hard edge, as a real lens draws it. Two compute phases at half
+// resolution, then DepthOfFieldCombineBokeh.frag adds the result in Combine (effects/DepthOfField.cpp ExtRender):
+//   phase 0 (detect): one thread per half-resolution pixel. Its colour (the sharp image before the effect) and blur
+//            amounts (the DoF pass's .r near / .g far, the same focus and autofocus as the gather passes) are read;
+//            a pixel becomes a sprite when it is brighter than BokehThreshold AND brighter than its surroundings (two rings of taps)
+//            (an isolated highlight, not the middle of the sky) and its blur radius is at least a pixel. Sprites are
+//            appended to a buffer with an atomic counter (at most maxSprites; the rest are dropped).
+//   phase 1 (splat): one 256-thread group per sprite slot (the CPU does not know the count: groups past it return at
+//            once). The group covers the sprite's square, weights each pixel by the shape's coverage (anti-aliased
+//            edge) divided by the shape's area (energy kept), and adds the colour into a fixed-point RGB buffer with
+//            atomicAdd. A far-field sprite (behind the focus) is hidden by a nearer pixel that is in focus (the
+//            in-focus object stands in front of the out-of-focus light); a near-field sprite covers everything.
+// The buffers (cleared by NVR every frame before phase 0): Sprites (count + array), Accum (3 uints per half-res pixel,
+// value * 65536).
+//
+// Build: glslangValidator -V --target-env vulkan1.1 -o DepthOfFieldBokehScatter.spv DepthOfFieldBokehScatter.comp
+
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : enable
+#include "Common.glsl"
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_source;   // TESR_SourceBuffer: the image before the effect (sharp)
+layout(set = 1, binding = 1) uniform texture2D t_blur;     // the DoF pass's output: .r near blur, .g far blur (0..1)
+layout(set = 1, binding = 2) uniform texture2D t_depth;    // TESR_DepthBuffer (linear depth / farZ)
+
+struct Sprite {
+    vec2  pos;          // half-resolution pixel centre
+    float radius;       // half-resolution pixels
+    float depth;        // linear depth / farZ
+    vec3  energy;       // linear colour to spread over the shape
+    float nearField;    // 1 near field, 0 far field
+};
+
+layout(set = 1, binding = 3, std430) buffer Sprites {
+    uint   spriteCount;
+    uint   spritePad[3];
+    Sprite sprites[];
+};
+
+layout(set = 1, binding = 4, std430) buffer Accum {
+    uint accum[];       // (r, g, b) * 65536 per half-resolution pixel
+};
+
+layout(push_constant) uniform Push {
+    uint  halfW;        // 0
+    uint  halfH;        // 4
+    uint  fullW;        // 8
+    uint  fullH;        // 12
+    uint  phase;        // 16
+    uint  maxSprites;   // 20
+    uint  shape;        // 24: 0 disc, 5..8 sides of a polygon
+    uint  samplerIndex; // 28: LINEAR, CLAMP
+    float threshold;    // 32: BokehThreshold (luma of the displayed colour)
+    float intensity;    // 36: BokehIntensity
+    float maxRadius;    // 40: the sprite radius at full blur, half-resolution pixels (BokehSize scaled to the screen)
+    float rotation;     // 44: the polygon's rotation, radians
+} pc;                   // 48 bytes
+
+const float FIXED = 65536.0;
+
+float lumaAt(ivec2 h) {
+    h = clamp(h, ivec2(0), ivec2(pc.halfW - 1u, pc.halfH - 1u));
+    vec2 uv = (vec2(h) * 2.0 + 1.0) / vec2(pc.fullW, pc.fullH);     // the corner of the 2x2 block: the bilinear tap is its average
+    return luma(textureLod(sampler2D(t_source, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb);
+}
+
+// The aperture: 0 inside the centre, 1 on the edge (p in units of the radius).
+float shapeDistance(vec2 p) {
+    float r = length(p);
+    if (pc.shape < 3u) return r;
+    float n = float(pc.shape);
+    float sector = 6.28318530718 / n;
+    float a = atan(p.y, p.x) + pc.rotation;
+    a = mod(a, sector) - 0.5 * sector;
+    return r * cos(a) / cos(0.5 * sector);
+}
+
+float shapeArea(float radius) {
+    if (pc.shape < 3u) return 3.14159265359 * radius * radius;
+    float n = float(pc.shape);
+    return 0.5 * n * sin(6.28318530718 / n) * radius * radius;   // a regular polygon of circumradius `radius`
+}
+
+void detect() {
+    ivec2 h = ivec2(gl_GlobalInvocationID.xy);
+    if (h.x >= int(pc.halfW) || h.y >= int(pc.halfH)) return;
+    float center = lumaAt(h);
+    if (center <= pc.threshold) return;
+
+    // the surroundings: 16 taps on two rings (6 and 12 half-res px at 1080p). A lamp smaller than the rings stands out over its
+    // whole face (a disc of sprites, not a ring of its edge); the middle of a bright sky or wall does not.
+    float ringScale = float(pc.fullH) / 1080.0;
+    float neighbours = 0.0;
+    for (int k = 0; k < 8; k++) {
+        float a = float(k) * 0.785398163 + 0.3927;
+        vec2 dir = vec2(cos(a), sin(a));
+        neighbours += lumaAt(h + ivec2(round(dir * 6.0 * ringScale)));
+        neighbours += lumaAt(h + ivec2(round(dir * 12.0 * ringScale)));
+    }
+    neighbours /= 16.0;
+
+    vec2 uv = (vec2(h) * 2.0 + 1.0) / vec2(pc.fullW, pc.fullH);
+    vec2 blur = textureLod(sampler2D(t_blur, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rg;
+    float coc = max(blur.r, blur.g);
+    float radius = coc * pc.maxRadius;
+    if (radius < 1.0) return;    // (nearly) in focus: the gather passes keep it sharp
+
+    // how far above the threshold, times how much it stands out of its neighbourhood (0 in the middle of a bright area)
+    float bright = saturate((center - pc.threshold) / max(1.0 - pc.threshold, 0.01));
+    float standOut = saturate((center - neighbours) / max(0.25 * center, 0.001));
+    float weight = bright * standOut * saturate(radius - 1.0);
+    if (weight < 0.02) return;
+
+    vec3 colour = linearize(textureLod(sampler2D(t_source, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb);
+    // the displayed image is tonemapped (LDR): undo a Reinhard curve on the highlight so a clipped light carries the
+    // energy a real one would (a white pixel ~ 20x, a mid-grey one ~ 1.3x)
+    float boost = 1.0 / (1.0 - min(luma(colour), 0.95));
+
+    uint index = atomicAdd(spriteCount, 1u);
+    if (index >= pc.maxSprites) return;
+    Sprite s;
+    s.pos = vec2(h) + 0.5;
+    s.radius = radius;
+    s.depth = texelFetch(t_depth, ivec2(h * 2), 0).x;
+    s.energy = colour * boost * weight * pc.intensity;
+    s.nearField = blur.r > blur.g ? 1.0 : 0.0;
+    sprites[index] = s;
+}
+
+void splat() {
+    uint slot = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    uint count = min(spriteCount, pc.maxSprites);
+    if (slot >= count) return;
+    uint t = gl_LocalInvocationIndex;
+
+    Sprite s = sprites[slot];
+    float r = s.radius;
+    int ir = int(ceil(r + 0.5));
+    int side = 2 * ir + 1;
+    float inverseArea = 1.0 / max(shapeArea(r), 1.0);
+    ivec2 origin = ivec2(floor(s.pos)) - ir;
+    vec2 fullScale = vec2(pc.fullW, pc.fullH) / vec2(pc.halfW, pc.halfH);
+    for (int i = int(t); i < side * side; i += 256) {
+        ivec2 q = origin + ivec2(i % side, i / side);
+        if (q.x < 0 || q.y < 0 || q.x >= int(pc.halfW) || q.y >= int(pc.halfH)) continue;
+        vec2 offset = (vec2(q) + 0.5 - s.pos) / r;
+        float d = shapeDistance(offset);
+        float coverage = saturate((1.0 - d) * r + 0.5);
+        if (coverage <= 0.0) continue;
+        if (s.nearField < 0.5) {
+            // far field: a nearer pixel in focus stands in front of the light
+            ivec2 full = ivec2(vec2(q) * fullScale);
+            float destDepth = texelFetch(t_depth, full, 0).x;
+            if (destDepth < s.depth * 0.9) {
+                vec2 destBlur = texelFetch(t_blur, full, 0).rg;
+                coverage *= saturate(max(destBlur.r, destBlur.g) * 2.0);
+                if (coverage <= 0.0) continue;
+            }
+        }
+        vec3 add = min(s.energy * (coverage * inverseArea), vec3(4.0));
+        uint base = (uint(q.y) * pc.halfW + uint(q.x)) * 3u;
+        atomicAdd(accum[base + 0u], uint(add.r * FIXED + 0.5));
+        atomicAdd(accum[base + 1u], uint(add.g * FIXED + 0.5));
+        atomicAdd(accum[base + 2u], uint(add.b * FIXED + 0.5));
+    }
+}
+
+void main() {
+    if (pc.phase == 0u) detect();
+    else splat();
+}

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NvrRtHelper.exe: the 64-bit ray tracing helper for New Vegas Reloaded (README.md). Built on its own, never part of VegasShaders.dll.
+
+  msbuild tools\nvr-rt-helper\NvrRtHelper.vcxproj /p:Configuration=Release /p:Platform=x64 [/p:PlatformToolset=v143]
+  Needs only the Vulkan SDK headers + vulkan-1.lib (%VULKAN_SDK%, else C:\VulkanSDK\1.3.296.0).
+-->
+<Project DefaultTargets="Build" ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <ProjectGuid>{4E8B6C21-9D3A-4F57-B1E2-7A0C5D9F3B64}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>NvrRtHelper</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <VulkanSdkDir Condition="'$(VulkanSdkDir)'==''">$(VULKAN_SDK)</VulkanSdkDir>
+    <VulkanSdkDir Condition="'$(VulkanSdkDir)'==''">C:\VulkanSDK\1.3.296.0</VulkanSdkDir>
+    <TargetName>NvrRtHelper</TargetName>
+    <OutDir Condition="'$(OutDir)'=='' Or '$(OutDir)'=='$(SolutionDir)$(Platform)\$(Configuration)\'">$(MSBuildProjectDirectory)\bin\</OutDir>
+    <IntDir Condition="'$(IntDir)'=='' Or '$(IntDir)'=='$(Platform)\$(Configuration)\'">$(MSBuildProjectDirectory)\obj\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(VulkanSdkDir)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(VulkanSdkDir)\Lib\vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="NvrRtHelper.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="NvrRtProtocol.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

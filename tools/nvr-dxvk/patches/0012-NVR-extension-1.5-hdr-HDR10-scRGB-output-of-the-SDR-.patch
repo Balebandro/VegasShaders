@@ -1,0 +1,1139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Mon, 26 Oct 2026 09:13:52 -0400
+Subject: [PATCH] NVR extension 1.5-hdr: HDR10 / scRGB output of the SDR back
+ buffer with NVR's highlight gain (ID3D9NvrExtHdr)
+
+---
+ src/d3d9/d3d9_device.cpp                     |   6 +
+ src/d3d9/d3d9_device.h                       |   3 +
+ src/d3d9/d3d9_nvr_ext_api.h                  |  79 +++++
+ src/d3d9/d3d9_nvr_hdr.cpp                    | 318 +++++++++++++++++++
+ src/d3d9/d3d9_nvr_hdr.h                      |  87 +++++
+ src/d3d9/d3d9_swapchain.cpp                  | 134 +++++++-
+ src/d3d9/d3d9_swapchain.h                    |   3 +
+ src/d3d9/meson.build                         |   1 +
+ src/dxvk/dxvk_swapchain_blitter.cpp          |  49 ++-
+ src/dxvk/dxvk_swapchain_blitter.h            |  48 ++-
+ src/dxvk/shaders/dxvk_present_common.glsl    |  59 ++++
+ src/dxvk/shaders/dxvk_present_frag.frag      |   2 +-
+ src/dxvk/shaders/dxvk_present_frag_blit.frag |   8 +-
+ 13 files changed, 786 insertions(+), 11 deletions(-)
+ create mode 100755 src/d3d9/d3d9_nvr_hdr.cpp
+ create mode 100755 src/d3d9/d3d9_nvr_hdr.h
+
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index b6ae281..a77bd66 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -61,6 +61,7 @@ namespace dxvk {
+     , m_flushTracker       ( GetMaxFlushType() )
+     , m_d3d9Interop        ( this )
+     , m_nvrExt             ( this )
++    , m_nvrExtHdr          ( this )
+     , m_d3d9On12Args       ( pAdapter->Get9On12Args() )
+     , m_d3d9On12           ( this )
+     , m_d3d8Bridge         ( this ) {
+@@ -205,6 +206,11 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    if (riid == __uuidof(ID3D9NvrExtHdr)) {
++      *ppvObject = ref(&m_nvrExtHdr);
++      return S_OK;
++    }
++
+     if (riid == __uuidof(IDirect3DDevice9On12)) {
+       if (m_d3d9On12Args.Enable9On12) {
+         *ppvObject = ref(&m_d3d9On12);
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index dfe4c75..b33224e 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -22,6 +22,7 @@
+ 
+ #include "d3d9_interop.h"
+ #include "d3d9_nvr_ext.h"
++#include "d3d9_nvr_hdr.h"
+ #include "d3d9_on_12.h"
+ 
+ #include <cstdint>
+@@ -230,6 +231,7 @@ namespace dxvk {
+     friend class DxvkD3D8Bridge;
+     friend D3D9VkInteropDevice;
+     friend D3D9NvrExt;
++    friend D3D9NvrExtHdr;
+ 
+     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
+   public:
+@@ -1698,6 +1700,7 @@ namespace dxvk {
+ 
+     D3D9VkInteropDevice             m_d3d9Interop;
+     D3D9NvrExt                      m_nvrExt;
++    D3D9NvrExtHdr                   m_nvrExtHdr;
+     D3D9ON12_ARGS                   m_d3d9On12Args = { };
+     D3D9On12                        m_d3d9On12;
+     DxvkD3D8Bridge                  m_d3d8Bridge;
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 8748f7f..0aab58c 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -475,7 +475,86 @@ ID3D9NvrExt : public IUnknown {
+           FLOAT                           ShiftY) = 0;
+ };
+ 
++/*
++ * HDR output (extension 1.5-hdr; its own interface, so the main vtable is untouched).
++ *
++ * Query ID3D9NvrExtHdr from the IDirect3DDevice9 (E_NOINTERFACE on native D3D9, stock DXVK
++ * and older forks). With a mode set, DXVK creates the Vulkan swap chain in HDR10 (ST.2084,
++ * 10-bit) or scRGB (FP16 linear) and sends HDR metadata; the game's D3D9 back buffer stays
++ * as it is (8-bit, SDR). At present the SDR back buffer is decoded (sRGB curve or 2.2), put
++ * at PaperWhiteNits and, wherever it still equals the picture NVR marked with MarkHdrScene
++ * (so the HUD and menus drawn after NVR are left at paper white), multiplied by NVR's
++ * per-pixel highlight gain (>= 1, clamped to PeakNits / PaperWhiteNits).
++ * Frames without a MarkHdrScene call (menus, loading screens) are shown at paper white.
++ */
++enum NVR_EXT_HDR_MODE {
++  NVR_EXT_HDR_OFF   = 0,
++  NVR_EXT_HDR_HDR10 = 1,  // A2B10G10R10 + VK_COLOR_SPACE_HDR10_ST2084_EXT
++  NVR_EXT_HDR_SCRGB = 2,  // R16G16B16A16_SFLOAT + VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT
++};
++
++enum NVR_EXT_HDR_FLAGS {
++  NVR_EXT_HDR_FLAG_SHOW_HUD_MASK = 0x1,  // debug: tint the pixels taken as HUD/menu (shown without gain)
++  NVR_EXT_HDR_FLAG_GAMMA22       = 0x2,  // decode the SDR picture with a pure 2.2 power instead of the sRGB curve
++};
++
++struct NVR_EXT_HDR_INFO {
++  BOOL  SupportsHdr10;          // the window's surface offers HDR10 (some drivers list it with Windows HDR off too)
++  BOOL  SupportsScRgb;
++  FLOAT DisplayMinNits;         // from the monitor's EDID (0 when unknown)
++  FLOAT DisplayMaxNits;
++  FLOAT DisplayMaxFullFrameNits;
++  UINT  ActiveMode;             // NVR_EXT_HDR_MODE in force
++};
++
++struct NVR_EXT_HDR_OUTPUT {
++  UINT  Mode;                   // NVR_EXT_HDR_MODE
++  FLOAT PaperWhiteNits;         // where SDR white (back buffer 1.0) lands, e.g. 200
++  FLOAT PeakNits;               // gain ceiling (PeakNits / PaperWhiteNits) and HDR metadata max luminance / MaxCLL
++  FLOAT MaxFrameAverageNits;    // HDR metadata MaxFALL (0 = PaperWhiteNits)
++  FLOAT HudThreshold;           // per channel, 0..1: a back buffer pixel further than this from the marked picture is HUD
++  UINT  Flags;                  // NVR_EXT_HDR_FLAGS
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d310")
++ID3D9NvrExtHdr : public IUnknown {
++  virtual HRESULT STDMETHODCALLTYPE GetHdrInfo(
++          NVR_EXT_HDR_INFO*               pInfo) = 0;
++
++  /**
++   * Sets the output mode and its parameters (call again to change them; Mode OFF goes back
++   * to DXVK's SDR swap chain). D3DERR_NOTAVAILABLE when the surface does not offer the colour
++   * space: the output stays SDR. The swap chain is re-created at the next present.
++   */
++  virtual HRESULT STDMETHODCALLTYPE SetHdrOutput(
++    const NVR_EXT_HDR_OUTPUT*             pOutput) = 0;
++
++  /**
++   * Marks this frame's finished picture before the HUD: pScene (a surface or texture of the
++   * back buffer's size and format; usually the back buffer itself) is copied now, pGain (a
++   * R16F/R32F/A16B16G16R16F texture or surface of the same size, red channel) is copied now.
++   * Valid until the next present.
++   */
++  virtual HRESULT STDMETHODCALLTYPE MarkHdrScene(
++          IUnknown*                       pScene,
++          IUnknown*                       pGain) = 0;
++
++  /** TEST ONLY: the next present also writes its HDR output, as scRGB, into a readback buffer. */
++  virtual HRESULT STDMETHODCALLTYPE RequestHdrCapture() = 0;
++
++  /**
++   * TEST ONLY: waits for the GPU and copies the last capture (RGBA16F scRGB, 1.0 = 80 nits,
++   * rows top to bottom, Width * 8 bytes each). pData null = sizes only. S_FALSE: no capture yet.
++   */
++  virtual HRESULT STDMETHODCALLTYPE ReadHdrCapture(
++          UINT*                           pWidth,
++          UINT*                           pHeight,
++          void*                           pData,
++          UINT                            Size) = 0;
++};
++
+ #ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtHdr,      0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x10);
+ __CRT_UUID_DECL(ID3D9NvrExt,         0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x00);
+ __CRT_UUID_DECL(ID3D9NvrExtPipeline, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x01);
+ __CRT_UUID_DECL(ID3D9NvrExtBuffer,   0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x02);
+diff --git a/src/d3d9/d3d9_nvr_hdr.cpp b/src/d3d9/d3d9_nvr_hdr.cpp
+new file mode 100755
+index 0000000..d0e5482
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_hdr.cpp
+@@ -0,0 +1,318 @@
++#include "d3d9_nvr_hdr.h"
++#include "d3d9_device.h"
++#include "d3d9_swapchain.h"
++#include "d3d9_common_texture.h"
++#include "d3d9_surface.h"
++#include "d3d9_texture.h"
++
++#include "../dxvk/dxvk_context.h"
++
++#include <algorithm>
++#include <cstring>
++
++namespace dxvk {
++
++  static const char* NvrHdrModeName(uint32_t mode) {
++    switch (mode) {
++      case NVR_EXT_HDR_HDR10: return "HDR10 (ST.2084, 10-bit)";
++      case NVR_EXT_HDR_SCRGB: return "scRGB (FP16 linear)";
++      default:                return "SDR";
++    }
++  }
++
++
++  D3D9NvrExtHdr::D3D9NvrExtHdr(D3D9DeviceEx* pDevice)
++  : m_device(pDevice) {
++
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrExtHdr::AddRef() {
++    return m_device->AddRef();
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrExtHdr::Release() {
++    return m_device->Release();
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtHdr::QueryInterface(REFIID riid, void** ppvObject) {
++    return m_device->QueryInterface(riid, ppvObject);
++  }
++
++
++  D3D9SwapChainEx* D3D9NvrExtHdr::GetSwapChain() const {
++    D3D9SwapChainEx* swapchain = m_device->m_implicitSwapchain.ptr();
++    return (swapchain && swapchain->m_wctx && swapchain->m_wctx->presenter != nullptr) ? swapchain : nullptr;
++  }
++
++
++  Rc<DxvkImage> D3D9NvrExtHdr::ResolveImage(IUnknown* pResource, VkImageSubresourceLayers& layers) {
++    layers = { };
++    layers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    layers.layerCount = 1u;
++
++    if (pResource == nullptr)
++      return nullptr;
++
++    Com<IDirect3DResource9> resource;
++    if (FAILED(pResource->QueryInterface(__uuidof(IDirect3DResource9), reinterpret_cast<void**>(&resource))))
++      return nullptr;
++
++    D3D9CommonTexture* texture = nullptr;
++
++    switch (resource->GetType()) {
++      case D3DRTYPE_SURFACE: {
++        D3D9Surface* s = static_cast<D3D9Surface*>(static_cast<IDirect3DSurface9*>(resource.ptr()));
++        texture = s->GetCommonTexture();
++        layers.mipLevel = s->GetMipLevel();
++        layers.baseArrayLayer = s->GetFace();
++      } break;
++
++      case D3DRTYPE_TEXTURE:
++        texture = GetCommonTexture(static_cast<IDirect3DBaseTexture9*>(resource.ptr()));
++        break;
++
++      default:
++        return nullptr;
++    }
++
++    return texture ? texture->GetImage() : nullptr;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtHdr::GetHdrInfo(NVR_EXT_HDR_INFO* pInfo) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pInfo == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    *pInfo = NVR_EXT_HDR_INFO();
++
++    D3D9SwapChainEx* swapchain = GetSwapChain();
++    if (unlikely(swapchain == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    const Rc<Presenter>& presenter = swapchain->m_wctx->presenter;
++    pInfo->SupportsHdr10 = presenter->supportsColorSpace(VK_COLOR_SPACE_HDR10_ST2084_EXT);
++    pInfo->SupportsScRgb = presenter->supportsColorSpace(VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT);
++
++    D3D9VkExtOutputMetadata desc = { };
++    if (SUCCEEDED(swapchain->m_swapchainExt.GetCurrentOutputDesc(&desc))) {
++      pInfo->DisplayMinNits          = desc.MinLuminance;
++      pInfo->DisplayMaxNits          = desc.MaxLuminance;
++      pInfo->DisplayMaxFullFrameNits = desc.MaxFullFrameLuminance;
++    }
++
++    pInfo->ActiveMode = swapchain->m_nvrHdr.mode;
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtHdr::SetHdrOutput(const NVR_EXT_HDR_OUTPUT* pOutput) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pOutput == nullptr || pOutput->Mode > NVR_EXT_HDR_SCRGB))
++      return D3DERR_INVALIDCALL;
++
++    D3D9SwapChainEx* swapchain = GetSwapChain();
++    if (unlikely(swapchain == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    const float paperWhite = std::clamp(float(pOutput->PaperWhiteNits), 10.0f, 10000.0f);
++    const float peak = std::clamp(float(pOutput->PeakNits), paperWhite, 10000.0f);
++    const float maxFall = pOutput->MaxFrameAverageNits > 0.0f
++      ? std::clamp(float(pOutput->MaxFrameAverageNits), 1.0f, peak) : paperWhite;
++
++    VkColorSpaceKHR colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++    if (pOutput->Mode == NVR_EXT_HDR_HDR10) colorSpace = VK_COLOR_SPACE_HDR10_ST2084_EXT;
++    if (pOutput->Mode == NVR_EXT_HDR_SCRGB) colorSpace = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
++
++    const Rc<Presenter>& presenter = swapchain->m_wctx->presenter;
++
++    if (pOutput->Mode != NVR_EXT_HDR_OFF && !presenter->supportsColorSpace(colorSpace)) {
++      Logger::warn(str::format("NVR ext: HDR: the surface does not offer ", NvrHdrModeName(pOutput->Mode), "; output stays SDR"));
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    D3D9NvrHdrState& state = swapchain->m_nvrHdr;
++    const bool changed = state.mode != pOutput->Mode || state.paperWhiteNits != paperWhite || state.peakNits != peak;
++
++    state.mode           = pOutput->Mode;
++    state.paperWhiteNits = paperWhite;
++    state.peakNits       = peak;
++    state.hudThreshold   = std::clamp(float(pOutput->HudThreshold), 0.0f, 1.0f);
++    state.flags          = pOutput->Flags;
++
++    if (state.mode != NVR_EXT_HDR_OFF) {
++      // Rec.2020 primaries + D65 for HDR10, Rec.709 for scRGB (what the content uses)
++      VkHdrMetadataEXT metadata = { VK_STRUCTURE_TYPE_HDR_METADATA_EXT };
++      if (state.mode == NVR_EXT_HDR_HDR10) {
++        metadata.displayPrimaryRed   = { 0.708f, 0.292f };
++        metadata.displayPrimaryGreen = { 0.170f, 0.797f };
++        metadata.displayPrimaryBlue  = { 0.131f, 0.046f };
++      } else {
++        metadata.displayPrimaryRed   = { 0.640f, 0.330f };
++        metadata.displayPrimaryGreen = { 0.300f, 0.600f };
++        metadata.displayPrimaryBlue  = { 0.150f, 0.060f };
++      }
++      metadata.whitePoint                = { 0.3127f, 0.3290f };
++      metadata.maxLuminance              = peak;
++      metadata.minLuminance              = 0.0f;
++      metadata.maxContentLightLevel      = peak;
++      metadata.maxFrameAverageLightLevel = maxFall;
++
++      swapchain->m_hdrMetadata = metadata;
++      presenter->setHdrMetadata(metadata);
++    } else {
++      swapchain->m_hdrMetadata = std::nullopt;
++      presenter->setHdrMetadata(VkHdrMetadataEXT());   // no sType: clears it
++      state.ref = nullptr;
++      state.gain = nullptr;
++      state.marked = false;
++    }
++
++    if (swapchain->m_colorspace != colorSpace) {
++      swapchain->m_colorspace = colorSpace;
++      presenter->setSurfaceFormat(swapchain->GetSurfaceFormat());
++    }
++
++    if (changed) {
++      Logger::info(str::format("NVR ext: HDR output ", NvrHdrModeName(state.mode),
++        state.mode != NVR_EXT_HDR_OFF ? str::format(": paper white ", paperWhite, " nits, peak ", peak, " nits, MaxFALL ", maxFall) : std::string()));
++    }
++
++    return D3D_OK;
++  }
++
++
++  static Rc<DxvkImage> NvrHdrCopyImage(const Rc<DxvkDevice>& device, VkFormat format, VkExtent3D extent, const char* name) {
++    DxvkImageCreateInfo info = { };
++    info.type        = VK_IMAGE_TYPE_2D;
++    info.format      = format;
++    info.sampleCount = VK_SAMPLE_COUNT_1_BIT;
++    info.extent      = { extent.width, extent.height, 1u };
++    info.numLayers   = 1u;
++    info.mipLevels   = 1u;
++    info.usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
++    info.stages      = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++    info.access      = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
++    info.tiling      = VK_IMAGE_TILING_OPTIMAL;
++    info.layout      = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++    info.colorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
++    info.debugName   = name;
++    return device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtHdr::MarkHdrScene(IUnknown* pScene, IUnknown* pGain) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    D3D9SwapChainEx* swapchain = GetSwapChain();
++    if (unlikely(swapchain == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    D3D9NvrHdrState& state = swapchain->m_nvrHdr;
++    if (state.mode == NVR_EXT_HDR_OFF)
++      return S_FALSE;
++
++    VkImageSubresourceLayers sceneLayers, gainLayers;
++    Rc<DxvkImage> scene = ResolveImage(pScene, sceneLayers);
++    Rc<DxvkImage> gain  = ResolveImage(pGain, gainLayers);
++
++    if (unlikely(scene == nullptr || gain == nullptr)) {
++      if (!std::exchange(state.warnedMark, true))
++        Logger::err("NVR ext: HDR: MarkHdrScene: not a D3D9 surface or 2D texture");
++      return D3DERR_INVALIDCALL;
++    }
++
++    VkExtent3D sceneExtent = scene->mipLevelExtent(sceneLayers.mipLevel);
++    VkExtent3D gainExtent  = gain->mipLevelExtent(gainLayers.mipLevel);
++
++    if (unlikely(sceneExtent.width != gainExtent.width || sceneExtent.height != gainExtent.height
++      || scene->info().sampleCount != VK_SAMPLE_COUNT_1_BIT || gain->info().sampleCount != VK_SAMPLE_COUNT_1_BIT
++      || !(scene->info().usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(gain->info().usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT))) {
++      if (!std::exchange(state.warnedMark, true))
++        Logger::err(str::format("NVR ext: HDR: MarkHdrScene: picture ", sceneExtent.width, "x", sceneExtent.height,
++          " and gain ", gainExtent.width, "x", gainExtent.height, " must be single-sampled, copyable and the same size"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    const Rc<DxvkDevice>& device = m_device->GetDXVKDevice();
++    sceneExtent.depth = 1u;
++
++    if (state.ref == nullptr || state.ref->info().format != scene->info().format || state.ref->info().extent != sceneExtent)
++      state.ref = NvrHdrCopyImage(device, scene->info().format, sceneExtent, "NVR HDR reference");
++
++    if (state.gain == nullptr || state.gain->info().format != gain->info().format || state.gain->info().extent != sceneExtent)
++      state.gain = NvrHdrCopyImage(device, gain->info().format, sceneExtent, "NVR HDR gain");
++
++    VkImageSubresourceLayers dstLayers = { };
++    dstLayers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    dstLayers.layerCount = 1u;
++
++    m_device->EmitCs([
++      cRef         = state.ref,
++      cGainCopy    = state.gain,
++      cScene       = std::move(scene),
++      cGain        = std::move(gain),
++      cSceneLayers = sceneLayers,
++      cGainLayers  = gainLayers,
++      cDstLayers   = dstLayers,
++      cExtent      = sceneExtent
++    ] (DxvkContext* ctx) {
++      ctx->copyImage(cRef, cDstLayers, VkOffset3D { 0, 0, 0 }, cScene, cSceneLayers, VkOffset3D { 0, 0, 0 }, cExtent);
++      ctx->copyImage(cGainCopy, cDstLayers, VkOffset3D { 0, 0, 0 }, cGain, cGainLayers, VkOffset3D { 0, 0, 0 }, cExtent);
++    });
++
++    state.marked = true;
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtHdr::RequestHdrCapture() {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    D3D9SwapChainEx* swapchain = GetSwapChain();
++    if (unlikely(swapchain == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    swapchain->m_nvrHdr.captureRequested = true;
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtHdr::ReadHdrCapture(UINT* pWidth, UINT* pHeight, void* pData, UINT Size) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    D3D9SwapChainEx* swapchain = GetSwapChain();
++    if (unlikely(swapchain == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    D3D9NvrHdrState& state = swapchain->m_nvrHdr;
++    if (!state.captureRecorded || state.captureBuffer == nullptr)
++      return S_FALSE;
++
++    if (pWidth)  *pWidth  = state.captureExtent.width;
++    if (pHeight) *pHeight = state.captureExtent.height;
++
++    if (pData == nullptr)
++      return D3D_OK;
++
++    const size_t bytes = size_t(state.captureExtent.width) * state.captureExtent.height * 8u;
++    if (unlikely(Size < bytes))
++      return D3DERR_INVALIDCALL;
++
++    // Flushes, waits for the CS thread and then for the GPU (test use only)
++    m_device->WaitForResource(*state.captureBuffer, DxvkCsThread::SynchronizeAll, D3DLOCK_READONLY);
++
++    const void* mapped = state.captureBuffer->mapPtr(0u);
++    if (unlikely(mapped == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    std::memcpy(pData, mapped, bytes);
++    return D3D_OK;
++  }
++
++}
+diff --git a/src/d3d9/d3d9_nvr_hdr.h b/src/d3d9/d3d9_nvr_hdr.h
+new file mode 100755
+index 0000000..a03dfe6
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_hdr.h
+@@ -0,0 +1,87 @@
++#pragma once
++
++/*
++ * NVR extension 1.5-hdr: HDR output (ID3D9NvrExtHdr, see d3d9_nvr_ext_api.h).
++ *
++ * The game's back buffer stays 8-bit SDR. The swap chain is switched to HDR10 or scRGB
++ * (the colour space machinery DXVK's ID3D9VkExtSwapchain already has), and the present
++ * blit (DxvkSwapchainBlitter, DxvkNvrHdrBlit) turns the SDR back buffer into HDR: decoded,
++ * at NVR's paper white, times NVR's per-pixel highlight gain where no HUD drew over NVR's
++ * picture (compared with a copy NVR marks before the HUD).
++ */
++
++#include "d3d9_nvr_ext_api.h"
++#include "d3d9_include.h"
++
++#include "../dxvk/dxvk_buffer.h"
++#include "../dxvk/dxvk_image.h"
++
++namespace dxvk {
++
++  class D3D9DeviceEx;
++  class D3D9SwapChainEx;
++
++  /** Per swap chain HDR state (owned by D3D9SwapChainEx, set through D3D9NvrExtHdr). */
++  struct D3D9NvrHdrState {
++    uint32_t          mode            = NVR_EXT_HDR_OFF;
++    float             paperWhiteNits  = 200.0f;
++    float             peakNits        = 1000.0f;
++    float             hudThreshold    = 1.5f / 255.0f;
++    uint32_t          flags           = 0u;
++
++    Rc<DxvkImage>     ref;            // copy of NVR's picture before the HUD
++    Rc<DxvkImage>     gain;           // copy of NVR's gain
++    bool              marked          = false;   // ref/gain hold this frame's data
++    bool              warnedMark      = false;
++
++    bool              captureRequested = false;
++    bool              captureRecorded  = false;
++    Rc<DxvkImage>     captureImage;
++    Rc<DxvkBuffer>    captureBuffer;
++    VkExtent2D        captureExtent   = { 0u, 0u };
++  };
++
++  /**
++   * \brief The HDR interface, owned by the D3D9 device (its reference count is the device's)
++   */
++  class D3D9NvrExtHdr final : public ID3D9NvrExtHdr {
++
++  public:
++
++    explicit D3D9NvrExtHdr(D3D9DeviceEx* pDevice);
++
++    ULONG STDMETHODCALLTYPE AddRef();
++
++    ULONG STDMETHODCALLTYPE Release();
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    HRESULT STDMETHODCALLTYPE GetHdrInfo(
++            NVR_EXT_HDR_INFO*               pInfo);
++
++    HRESULT STDMETHODCALLTYPE SetHdrOutput(
++      const NVR_EXT_HDR_OUTPUT*             pOutput);
++
++    HRESULT STDMETHODCALLTYPE MarkHdrScene(
++            IUnknown*                       pScene,
++            IUnknown*                       pGain);
++
++    HRESULT STDMETHODCALLTYPE RequestHdrCapture();
++
++    HRESULT STDMETHODCALLTYPE ReadHdrCapture(
++            UINT*                           pWidth,
++            UINT*                           pHeight,
++            void*                           pData,
++            UINT                            Size);
++
++  private:
++
++    D3D9SwapChainEx* GetSwapChain() const;
++
++    static Rc<DxvkImage> ResolveImage(IUnknown* pResource, VkImageSubresourceLayers& layers);
++
++    D3D9DeviceEx* m_device;
++
++  };
++
++}
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index fe34af8..353c69b 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -877,10 +877,89 @@ namespace dxvk {
+       viewInfo.layerIndex = 0u;
+       viewInfo.layerCount = 1u;
+ 
++      // NVR extension 1.5-hdr: the SDR back buffer goes to the HDR swap chain through NVR's
++      // gain (DxvkNvrHdrBlit); a frame NVR did not mark is shown at paper white.
++      DxvkNvrHdrBlit nvrHdr;
++      Rc<DxvkImage>  nvrCaptureImage;
++      Rc<DxvkBuffer> nvrCaptureBuffer;
++
++      if (m_nvrHdr.mode != NVR_EXT_HDR_OFF) {
++        nvrHdr.enabled      = true;
++        nvrHdr.paperWhite   = m_nvrHdr.paperWhiteNits / 80.0f;
++        nvrHdr.maxGain      = std::max(1.0f, m_nvrHdr.peakNits / m_nvrHdr.paperWhiteNits);
++        nvrHdr.hudThreshold = m_nvrHdr.hudThreshold;
++        nvrHdr.flags        = ((m_nvrHdr.flags & NVR_EXT_HDR_FLAG_SHOW_HUD_MASK) ? uint32_t(DxvkNvrHdrShowHud) : 0u)
++                            | ((m_nvrHdr.flags & NVR_EXT_HDR_FLAG_GAMMA22) ? uint32_t(DxvkNvrHdrGamma22) : 0u);
++
++        VkExtent3D bbExtent = swapImage->info().extent;
++
++        if (m_nvrHdr.marked && m_nvrHdr.ref != nullptr && m_nvrHdr.gain != nullptr
++         && m_nvrHdr.ref->info().extent == bbExtent && m_nvrHdr.gain->info().extent == bbExtent) {
++          DxvkImageViewKey key = { };
++          key.viewType   = VK_IMAGE_VIEW_TYPE_2D;
++          key.usage      = VK_IMAGE_USAGE_SAMPLED_BIT;
++          key.aspects    = VK_IMAGE_ASPECT_COLOR_BIT;
++          key.mipIndex   = 0u;
++          key.mipCount   = 1u;
++          key.layerIndex = 0u;
++          key.layerCount = 1u;
++
++          key.format = m_nvrHdr.ref->info().format;
++          nvrHdr.ref = m_nvrHdr.ref->createView(key);
++          key.format = m_nvrHdr.gain->info().format;
++          nvrHdr.gain = m_nvrHdr.gain->createView(key);
++          nvrHdr.flags |= DxvkNvrHdrGainValid;
++        }
++      }
++
++      m_nvrHdr.marked = false;
++
++      if (std::exchange(m_nvrHdr.captureRequested, false)) {
++        VkExtent2D extent = srcRect.extent;
++
++        if (!extent.width || !extent.height)
++          extent = { swapImage->info().extent.width, swapImage->info().extent.height };
++
++        if (m_nvrHdr.captureImage == nullptr || m_nvrHdr.captureExtent != extent) {
++          DxvkImageCreateInfo imageInfo = { };
++          imageInfo.type        = VK_IMAGE_TYPE_2D;
++          imageInfo.format      = VK_FORMAT_R16G16B16A16_SFLOAT;
++          imageInfo.sampleCount = VK_SAMPLE_COUNT_1_BIT;
++          imageInfo.extent      = { extent.width, extent.height, 1u };
++          imageInfo.numLayers   = 1u;
++          imageInfo.mipLevels   = 1u;
++          imageInfo.usage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
++          imageInfo.stages      = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
++          imageInfo.access      = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
++          imageInfo.tiling      = VK_IMAGE_TILING_OPTIMAL;
++          imageInfo.layout      = VK_IMAGE_LAYOUT_GENERAL;
++          imageInfo.colorSpace  = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
++          imageInfo.debugName   = "NVR HDR capture";
++          m_nvrHdr.captureImage = m_device->createImage(imageInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++
++          DxvkBufferCreateInfo bufferInfo = { };
++          bufferInfo.size   = VkDeviceSize(extent.width) * extent.height * 8u;
++          bufferInfo.usage  = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++          bufferInfo.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
++          bufferInfo.access = VK_ACCESS_TRANSFER_WRITE_BIT;
++          bufferInfo.debugName = "NVR HDR capture readback";
++          m_nvrHdr.captureBuffer = m_device->createBuffer(bufferInfo,
++            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++          m_nvrHdr.captureExtent = extent;
++        }
++
++        nvrCaptureImage  = m_nvrHdr.captureImage;
++        nvrCaptureBuffer = m_nvrHdr.captureBuffer;
++        m_nvrHdr.captureRecorded = true;
++      }
++
+       m_parent->EmitCs([
+         cDevice         = m_device,
+         cPresenter      = m_wctx->presenter,
+         cBlitter        = m_blitter,
++        cNvrHdr         = std::move(nvrHdr),
++        cCaptureImage   = std::move(nvrCaptureImage),
++        cCaptureBuffer  = std::move(nvrCaptureBuffer),
+         cColorSpace     = m_colorspace,
+         cSrcView        = swapImageView,
+         cSrcRect        = srcRect,
+@@ -890,8 +969,8 @@ namespace dxvk {
+         cFrameId        = m_wctx->frameId,
+         cLatency        = m_latencyTracker
+       ] (DxvkContext* ctx) {
+-        // Update back buffer color space as necessary
+-        if (cSrcView->image()->info().colorSpace != cColorSpace) {
++        // Update back buffer color space as necessary (not with NVR HDR: the back buffer stays SDR)
++        if (!cNvrHdr.enabled && cSrcView->image()->info().colorSpace != cColorSpace) {
+           DxvkImageUsageInfo usage = { };
+           usage.colorSpace = cColorSpace;
+ 
+@@ -901,9 +980,60 @@ namespace dxvk {
+         // Blit back buffer onto Vulkan swap chain
+         auto contextObjects = ctx->beginExternalRendering();
+ 
++        cBlitter->setNvrHdr(cNvrHdr);
++
+         cBlitter->present(contextObjects,
+           cDstView, cDstRect, cSrcView, cSrcRect);
+ 
++        if (cCaptureImage != nullptr) {
++          // NVR HDR test capture: the same blit into an scRGB image, copied to a readback buffer
++          DxvkImageViewKey captureKey = { };
++          captureKey.viewType   = VK_IMAGE_VIEW_TYPE_2D;
++          captureKey.usage      = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
++          captureKey.format     = cCaptureImage->info().format;
++          captureKey.aspects    = VK_IMAGE_ASPECT_COLOR_BIT;
++          captureKey.mipIndex   = 0u;
++          captureKey.mipCount   = 1u;
++          captureKey.layerIndex = 0u;
++          captureKey.layerCount = 1u;
++
++          VkExtent3D captureExtent = cCaptureImage->info().extent;
++          VkRect2D captureRect = { { 0, 0 }, { captureExtent.width, captureExtent.height } };
++
++          cBlitter->present(contextObjects,
++            cCaptureImage->createView(captureKey), captureRect, cSrcView, cSrcRect);
++
++          DxvkResourceBufferInfo slice = cCaptureBuffer->getSliceInfo();
++
++          VkBufferImageCopy2 region = { VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2 };
++          region.bufferOffset = slice.offset;
++          region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u };
++          region.imageExtent = { captureExtent.width, captureExtent.height, 1u };
++
++          VkCopyImageToBufferInfo2 copy = { VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2 };
++          copy.srcImage = cCaptureImage->handle();
++          copy.srcImageLayout = cCaptureImage->info().layout;
++          copy.dstBuffer = slice.buffer;
++          copy.regionCount = 1u;
++          copy.pRegions = &region;
++
++          contextObjects->cmdCopyImageToBuffer(DxvkCmdBuffer::ExecBuffer, &copy);
++
++          VkMemoryBarrier2 barrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
++          barrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
++          barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
++          barrier.dstStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT;
++          barrier.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
++
++          VkDependencyInfo depInfo = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
++          depInfo.memoryBarrierCount = 1u;
++          depInfo.pMemoryBarriers = &barrier;
++          contextObjects->cmdPipelineBarrier(DxvkCmdBuffer::ExecBuffer, &depInfo);
++
++          contextObjects->track(cCaptureImage, DxvkAccess::Write);
++          contextObjects->track(cCaptureBuffer, DxvkAccess::Write);
++        }
++
+         // Submit command list and present
+         ctx->synchronizeWsi(cSync);
+         ctx->flushCommandList(nullptr, nullptr);
+diff --git a/src/d3d9/d3d9_swapchain.h b/src/d3d9/d3d9_swapchain.h
+index 811124d..5248313 100644
+--- a/src/d3d9/d3d9_swapchain.h
++++ b/src/d3d9/d3d9_swapchain.h
+@@ -64,6 +64,7 @@ namespace dxvk {
+     static constexpr uint32_t NumControlPoints = 256;
+ 
+     friend class D3D9VkExtSwapchain;
++    friend class D3D9NvrExtHdr;
+   public:
+ 
+     D3D9SwapChainEx(
+@@ -188,6 +189,8 @@ namespace dxvk {
+ 
+     D3D9VkExtSwapchain m_swapchainExt;
+ 
++    D3D9NvrHdrState    m_nvrHdr;   // NVR extension 1.5-hdr
++
+     void PresentImage(UINT PresentInterval);
+ 
+     Rc<Presenter> CreatePresenter(
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 7ca397c..b49f95a 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -50,6 +50,7 @@ d3d9_src = [
+   'd3d9_window.cpp',
+   'd3d9_interop.cpp',
+   'd3d9_nvr_ext.cpp',
++  'd3d9_nvr_hdr.cpp',
+   'd3d9_on_12.cpp',
+   'd3d9_bridge.cpp',
+   'd3d9_shader_analysis.cpp',
+diff --git a/src/dxvk/dxvk_swapchain_blitter.cpp b/src/dxvk/dxvk_swapchain_blitter.cpp
+index 644b76e..9fcf40b 100644
+--- a/src/dxvk/dxvk_swapchain_blitter.cpp
++++ b/src/dxvk/dxvk_swapchain_blitter.cpp
+@@ -240,6 +240,13 @@ namespace dxvk {
+   }
+ 
+ 
++  void DxvkSwapchainBlitter::setNvrHdr(
++    const DxvkNvrHdrBlit&     info) {
++    std::unique_lock lock(m_mutex);
++    m_nvrHdr = info;
++  }
++
++
+   void DxvkSwapchainBlitter::performDraw(
+     const Rc<DxvkCommandList>&ctx,
+     const Rc<DxvkImageView>&  dstView,
+@@ -299,10 +306,20 @@ namespace dxvk {
+     key.compositeHud = composite && m_hudSrv;
+     key.compositeCursor = composite && m_cursorView;
+ 
++    // NVR HDR (1.5-hdr): the back buffer is SDR; the shader turns it into scRGB itself
++    // (decode, NVR's gain, paper white), so the generic input conversion is skipped.
++    const bool nvrHdr = m_nvrHdr.enabled && key.srcSamples == VK_SAMPLE_COUNT_1_BIT;
++    const bool nvrGain = nvrHdr && (m_nvrHdr.flags & DxvkNvrHdrGainValid) && m_nvrHdr.ref != nullptr && m_nvrHdr.gain != nullptr;
++
++    if (nvrHdr) {
++      key.srcSpace = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
++      key.nvrHdr = VK_TRUE;
++    }
++
+     VkPipeline pipeline = getBlitPipeline(key);
+ 
+     // Set up resource bindings
+-    std::array<DxvkDescriptorWrite, 4> descriptors = { };
++    std::array<DxvkDescriptorWrite, 6> descriptors = { };
+ 
+     auto& imageDescriptor = descriptors[0u];
+     imageDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+@@ -335,6 +352,17 @@ namespace dxvk {
+       cursorDescriptor.descriptor = m_cursorView->getDescriptor();
+     }
+ 
++    auto& nvrRefDescriptor = descriptors[4u];
++    nvrRefDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++
++    auto& nvrGainDescriptor = descriptors[5u];
++    nvrGainDescriptor.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++
++    if (nvrGain) {
++      nvrRefDescriptor.descriptor = m_nvrHdr.ref->getDescriptor();
++      nvrGainDescriptor.descriptor = m_nvrHdr.gain->getDescriptor();
++    }
++
+     PushConstants args = { };
+     args.srcOffset = srcRect.offset;
+     args.srcExtent = srcRect.extent;
+@@ -343,6 +371,10 @@ namespace dxvk {
+     args.cursorExtent = m_cursorRect.extent;
+     args.samplerGamma = m_samplerGamma->getDescriptor().samplerIndex;
+     args.samplerCursor = cursorSampler;
++    args.nvrPaperWhite = m_nvrHdr.paperWhite;
++    args.nvrMaxGain = std::max(m_nvrHdr.maxGain, 1.0f);
++    args.nvrHudThreshold = m_nvrHdr.hudThreshold;
++    args.nvrFlags = nvrHdr ? (m_nvrHdr.flags & ~uint32_t(nvrGain ? 0u : DxvkNvrHdrGainValid)) : 0u;
+ 
+     ctx->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer,
+       VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+@@ -369,6 +401,11 @@ namespace dxvk {
+     if (m_cursorImage)
+       ctx->track(m_cursorImage, DxvkAccess::Read);
+ 
++    if (nvrGain) {
++      ctx->track(m_nvrHdr.ref->image(), DxvkAccess::Read);
++      ctx->track(m_nvrHdr.gain->image(), DxvkAccess::Read);
++    }
++
+     ctx->track(m_samplerGamma);
+     ctx->track(m_samplerCursorLinear);
+     ctx->track(m_samplerCursorNearest);
+@@ -688,11 +725,13 @@ namespace dxvk {
+ 
+ 
+   const DxvkPipelineLayout* DxvkSwapchainBlitter::createBlitPipelineLayout() {
+-    static const std::array<DxvkDescriptorSetLayoutBinding, 4> bindings = {{
++    static const std::array<DxvkDescriptorSetLayoutBinding, 6> bindings = {{
+       { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
+       { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
+       { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
+       { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },
++      { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },   // NVR HDR: reference picture
++      { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT },   // NVR HDR: gain
+     }};
+ 
+     return m_device->createBuiltInPipelineLayout(DxvkPipelineLayoutFlag::UsesSamplerHeap,
+@@ -715,7 +754,7 @@ namespace dxvk {
+     const DxvkSwapchainPipelineKey&   key) {
+     auto vk = m_device->vkd();
+ 
+-    static const std::array<VkSpecializationMapEntry, 8> specMap = {{
++    static const std::array<VkSpecializationMapEntry, 10> specMap = {{
+       { 0, offsetof(SpecConstants, sampleCount),    sizeof(VkSampleCountFlagBits) },
+       { 1, offsetof(SpecConstants, gammaBound),     sizeof(VkBool32) },
+       { 2, offsetof(SpecConstants, srcSpace),       sizeof(VkColorSpaceKHR) },
+@@ -724,6 +763,8 @@ namespace dxvk {
+       { 5, offsetof(SpecConstants, dstIsSrgb),      sizeof(VkBool32) },
+       { 6, offsetof(SpecConstants, compositeHud),   sizeof(VkBool32) },
+       { 7, offsetof(SpecConstants, compositeCursor),sizeof(VkBool32) },
++      { 8, offsetof(SpecConstants, nvrHdr),         sizeof(VkBool32) },
++      { 9, offsetof(SpecConstants, nvrGamma),       sizeof(VkBool32) },
+     }};
+ 
+     SpecConstants specConstants = { };
+@@ -735,6 +776,8 @@ namespace dxvk {
+     specConstants.dstIsSrgb = lookupFormatInfo(key.dstFormat)->flags.test(DxvkFormatFlag::ColorSpaceSrgb);
+     specConstants.compositeCursor = key.compositeCursor;
+     specConstants.compositeHud = key.compositeHud;
++    specConstants.nvrHdr = key.nvrHdr;
++    specConstants.nvrGamma = key.nvrHdr && key.needsGamma;
+ 
+     // Avoid redundant color space conversions if color spaces
+     // and images properties match and we don't do a resolve
+diff --git a/src/dxvk/dxvk_swapchain_blitter.h b/src/dxvk/dxvk_swapchain_blitter.h
+index b210303..2771831 100644
+--- a/src/dxvk/dxvk_swapchain_blitter.h
++++ b/src/dxvk/dxvk_swapchain_blitter.h
+@@ -49,6 +49,9 @@ namespace dxvk {
+     VkBool32 compositeHud = VK_FALSE;
+     /// Bit indicating whether the software cursor needs to be composited
+     VkBool32 compositeCursor = VK_FALSE;
++    /// NVR HDR (1.5-hdr): the source is the SDR back buffer, scaled per pixel by
++    /// NVR's highlight gain and shown at NVR's paper white (DxvkNvrHdrBlit)
++    VkBool32 nvrHdr = VK_FALSE;
+ 
+     size_t hash() const {
+       DxvkHashState hash;
+@@ -61,6 +64,7 @@ namespace dxvk {
+       hash.add(uint32_t(needsGamma));
+       hash.add(uint32_t(compositeHud));
+       hash.add(uint32_t(compositeCursor));
++      hash.add(uint32_t(nvrHdr));
+       return hash;
+     }
+ 
+@@ -73,11 +77,37 @@ namespace dxvk {
+           && needsBlit == other.needsBlit
+           && needsGamma == other.needsGamma
+           && compositeHud == other.compositeHud
+-          && compositeCursor == other.compositeCursor;
++          && compositeCursor == other.compositeCursor
++          && nvrHdr == other.nvrHdr;
+     }
+   };
+ 
+ 
++  /**
++   * \brief NVR HDR output parameters for one present (NVR extension 1.5-hdr)
++   *
++   * The back buffer holds the finished SDR picture (sRGB-encoded, HUD drawn on it).
++   * Each pixel is decoded to linear light, multiplied by NVR's gain (gain image, >= 1,
++   * only where the back buffer still equals NVR's own picture, i.e. no HUD/menu drew
++   * there; ref image) and shown at paperWhite (scRGB units, 1.0 = 80 nits).
++   */
++  struct DxvkNvrHdrBlit {
++    bool              enabled       = false;
++    Rc<DxvkImageView> ref;            // NVR's picture before the HUD (same size and format as the back buffer)
++    Rc<DxvkImageView> gain;           // R16F/R32F gain, same size
++    float             paperWhite    = 203.0f / 80.0f;
++    float             maxGain       = 1.0f;
++    float             hudThreshold  = 0.0f;
++    uint32_t          flags         = 0u;   // DxvkNvrHdrFlag
++  };
++
++  enum DxvkNvrHdrFlag : uint32_t {
++    DxvkNvrHdrGainValid = 0x1u,   // ref + gain belong to this frame
++    DxvkNvrHdrShowHud   = 0x2u,   // debug: tint the pixels judged as HUD
++    DxvkNvrHdrGamma22   = 0x4u,   // decode the SDR picture with a pure 2.2 power instead of the sRGB curve
++  };
++
++
+   /**
+    * \brief Swap chain cursor pipeline key
+    */
+@@ -174,6 +204,14 @@ namespace dxvk {
+     void setCursorPos(
+             VkRect2D            rect);
+ 
++    /**
++     * \brief Sets NVR's HDR output parameters for the next presents (1.5-hdr)
++     *
++     * Disabled by default; the blit is DXVK's own then.
++     */
++    void setNvrHdr(
++      const DxvkNvrHdrBlit&     info);
++
+   private:
+ 
+     struct SpecConstants {
+@@ -185,6 +223,8 @@ namespace dxvk {
+       VkBool32 dstIsSrgb;
+       VkBool32 compositeHud;
+       VkBool32 compositeCursor;
++      VkBool32 nvrHdr;
++      VkBool32 nvrGamma;
+     };
+ 
+     struct PushConstants {
+@@ -195,6 +235,10 @@ namespace dxvk {
+       VkExtent2D cursorExtent;
+       uint32_t   samplerGamma;
+       uint32_t   samplerCursor;
++      float      nvrPaperWhite;
++      float      nvrMaxGain;
++      float      nvrHudThreshold;
++      uint32_t   nvrFlags;
+     };
+ 
+     struct CursorSpecConstants {
+@@ -223,6 +267,8 @@ namespace dxvk {
+     Rc<DxvkImageView>   m_cursorView;
+     VkRect2D            m_cursorRect = { };
+ 
++    DxvkNvrHdrBlit      m_nvrHdr;
++
+     Rc<DxvkSampler>     m_samplerGamma;
+     Rc<DxvkSampler>     m_samplerCursorLinear;
+     Rc<DxvkSampler>     m_samplerCursorNearest;
+diff --git a/src/dxvk/shaders/dxvk_present_common.glsl b/src/dxvk/shaders/dxvk_present_common.glsl
+index 5836e44..77c36e8 100644
+--- a/src/dxvk/shaders/dxvk_present_common.glsl
++++ b/src/dxvk/shaders/dxvk_present_common.glsl
+@@ -12,6 +12,9 @@ layout(constant_id = 4) const uint c_dst_color_space = VK_COLOR_SPACE_SRGB_NONLI
+ layout(constant_id = 5) const bool c_dst_is_srgb = true;
+ layout(constant_id = 6) const bool c_composite_hud = false;
+ layout(constant_id = 7) const bool c_composite_cursor = false;
++// NVR extension 1.5-hdr: HDR output of NVR's SDR back buffer (see nvr_hdr_input)
++layout(constant_id = 8) const bool c_nvr_hdr = false;
++layout(constant_id = 9) const bool c_nvr_gamma = false;
+ 
+ layout(set = 0, binding = 0) uniform sampler s_samplers[];
+ 
+@@ -20,6 +23,8 @@ layout(set = 1, binding = 0) uniform texture2DMS s_image_ms;
+ layout(set = 1, binding = 1) uniform texture1D s_gamma;
+ layout(set = 1, binding = 2) uniform texture2D s_hud;
+ layout(set = 1, binding = 3) uniform texture2D s_cursor;
++layout(set = 1, binding = 4) uniform texture2D s_nvr_ref;
++layout(set = 1, binding = 5) uniform texture2D s_nvr_gain;
+ 
+ layout(push_constant)
+ uniform present_info_t {
+@@ -30,8 +35,16 @@ uniform present_info_t {
+   ivec2 cursor_extent;
+   uint sampler_gamma;
+   uint sampler_cursor;
++  float nvr_paper_white;    // scRGB (1.0 = 80 nits)
++  float nvr_max_gain;
++  float nvr_hud_threshold;
++  uint nvr_flags;
+ };
+ 
++#define NVR_HDR_GAIN_VALID (1u)
++#define NVR_HDR_SHOW_HUD   (2u)
++#define NVR_HDR_GAMMA22    (4u)
++
+ 
+ vec4 blend_sc_rgb(vec4 dst, vec4 src) {
+   return mix(dst, vec4(src.rgb, 1.0f), src.aaaa);
+@@ -89,6 +102,52 @@ vec4 input_to_sc_rgb(vec4 color) {
+ }
+ 
+ 
++// NVR HDR: the back buffer holds NVR's finished SDR picture with the game's HUD drawn over it.
++// Where it still equals NVR's own picture (s_nvr_ref, copied before the HUD), the pixel is
++// scaled by NVR's highlight gain (s_nvr_gain, 1 = SDR level); elsewhere (HUD, menus, frames
++// NVR did not mark) the gain is 1. SDR white lands on NVR's paper white either way.
++vec4 nvr_hdr_input(vec4 color, ivec2 coord) {
++  vec3 enc = c_src_is_srgb ? linear_to_srgb(color.rgb) : color.rgb;
++  float gain = 1.0f;
++  bool hud = false;
++
++  if ((nvr_flags & NVR_HDR_GAIN_VALID) != 0u) {
++    vec3 ref = texelFetch(s_nvr_ref, coord, 0).rgb;
++    vec3 d = abs(enc - ref);
++    hud = max(d.r, max(d.g, d.b)) > nvr_hud_threshold;
++
++    if (!hud)
++      gain = clamp(texelFetch(s_nvr_gain, coord, 0).r, 1.0f, nvr_max_gain);
++  }
++
++  if (c_nvr_gamma) {
++    // The game's gamma ramp works on the SDR picture, exactly as without HDR
++    enc = vec3(
++      texture(sampler1D(s_gamma, s_samplers[sampler_gamma]), enc.r).r,
++      texture(sampler1D(s_gamma, s_samplers[sampler_gamma]), enc.g).g,
++      texture(sampler1D(s_gamma, s_samplers[sampler_gamma]), enc.b).b);
++  }
++
++  enc = clamp(enc, vec3(0.0f), vec3(1.0f));
++  vec3 lin = (nvr_flags & NVR_HDR_GAMMA22) != 0u
++    ? pow(enc, vec3(2.2f))
++    : srgb_to_linear(enc);
++
++  lin *= gain * nvr_paper_white;
++
++  if (hud && (nvr_flags & NVR_HDR_SHOW_HUD) != 0u)
++    lin = mix(lin, vec3(0.0f, nvr_paper_white, 0.0f), 0.5f);
++
++  return vec4(lin, color.a);
++}
++
++
++vec4 load_input(ivec2 coord) {
++  vec4 color = texelFetch(s_image, coord, 0);
++  return c_nvr_hdr ? nvr_hdr_input(color, coord) : input_to_sc_rgb(color);
++}
++
++
+ vec4 sc_rgb_to_output(vec4 color) {
+   if (c_gamma) {
+     // If we need to apply a gamma curve, convert to sRGB, perform
+diff --git a/src/dxvk/shaders/dxvk_present_frag.frag b/src/dxvk/shaders/dxvk_present_frag.frag
+index f934e91..a084621 100644
+--- a/src/dxvk/shaders/dxvk_present_frag.frag
++++ b/src/dxvk/shaders/dxvk_present_frag.frag
+@@ -9,7 +9,7 @@ layout(location = 0) out vec4 o_color;
+ void main() {
+   ivec2 coord = ivec2(gl_FragCoord.xy) + src_offset - dst_offset;
+ 
+-  o_color = input_to_sc_rgb(texelFetch(s_image, coord, 0));
++  o_color = load_input(coord);
+   o_color = composite_image(o_color);
+   o_color = sc_rgb_to_output(o_color);
+ }
+diff --git a/src/dxvk/shaders/dxvk_present_frag_blit.frag b/src/dxvk/shaders/dxvk_present_frag_blit.frag
+index ac07d05..0df8390 100644
+--- a/src/dxvk/shaders/dxvk_present_frag_blit.frag
++++ b/src/dxvk/shaders/dxvk_present_frag_blit.frag
+@@ -26,10 +26,10 @@ void main() {
+   }
+ 
+   // Manually interpolate in the correct color space
+-  o_color = mix(mix(input_to_sc_rgb(texelFetch(s_image, i_coord + ivec2(0, 0), 0)),
+-                    input_to_sc_rgb(texelFetch(s_image, i_coord + ivec2(1, 0), 0)), f_coord.x),
+-                mix(input_to_sc_rgb(texelFetch(s_image, i_coord + ivec2(0, 1), 0)),
+-                    input_to_sc_rgb(texelFetch(s_image, i_coord + ivec2(1, 1), 0)), f_coord.x),
++  o_color = mix(mix(load_input(i_coord + ivec2(0, 0)),
++                    load_input(i_coord + ivec2(1, 0)), f_coord.x),
++                mix(load_input(i_coord + ivec2(0, 1)),
++                    load_input(i_coord + ivec2(1, 1)), f_coord.x),
+                 f_coord.y);
+ 
+   o_color = composite_image(o_color);
+-- 
+2.40.0.windows.1
+

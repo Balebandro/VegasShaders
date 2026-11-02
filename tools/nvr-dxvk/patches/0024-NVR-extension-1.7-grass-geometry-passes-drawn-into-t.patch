@@ -1,0 +1,332 @@
+From 32b36af208b1eab4f2deda6ab1e0febfa24623a2 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 23:14:25 -0400
+Subject: [PATCH] NVR extension 1.7-grass: geometry passes drawn into the scene
+ (depth test, multisampled targets, culling, indirect counts)
+
+A new interface ID3D9NvrExtGeometryScene (own GUID ...d324, queried from ID3D9NvrExt) with DrawGeometryScene: a geometry pipeline's draw with a depth-stencil attachment and real depth (the vertex shader's, viewport range 0-1, the tests of NVR_EXT_DEPTH_STENCIL), multisampled targets at their own sample count, face culling, and the counts read from an indirect buffer a compute shader wrote (new buffer flag NVR_EXT_BUFFER_INDIRECT). Zero depth bias and bounds 0-1 for the pass; the device state is put back as for Draw. First user: NVR's GPU grass (blades placed and culled in a compute shader, drawn into the game's scene with its depth buffer).
+---
+ src/d3d9/d3d9_nvr_ext.cpp   | 119 ++++++++++++++++++++++++++++++++----
+ src/d3d9/d3d9_nvr_ext.h     |   9 ++-
+ src/d3d9/d3d9_nvr_ext_api.h |  47 ++++++++++++++
+ 3 files changed, 160 insertions(+), 15 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index a7fd4cf..6974c5d 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -163,6 +163,12 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    // 1.7-grass: geometry passes into the scene (depth, multisampling, culling, indirect counts)
++    if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtGeometryScene)) {
++      *ppvObject = ref(static_cast<ID3D9NvrExtGeometryScene*>(this));
++      return S_OK;
++    }
++
+     return m_device->QueryInterface(riid, ppvObject);
+   }
+ 
+@@ -571,6 +577,13 @@ namespace dxvk {
+       info.access |= VK_ACCESS_TRANSFER_WRITE_BIT;
+     }
+ 
++    // 1.7-grass: indirect draw arguments (DrawGeometryScene)
++    if (pDesc->Flags & NVR_EXT_BUFFER_INDIRECT) {
++      info.usage  |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
++      info.stages |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
++      info.access |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
++    }
++
+     try {
+       Rc<DxvkBuffer> buffer = m_device->GetDXVKDevice()->createBuffer(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+       *ppBuffer = ref(new D3D9NvrExtBuffer(std::move(buffer), pDesc->Size));
+@@ -1064,7 +1077,24 @@ namespace dxvk {
+   }
+ 
+ 
+-  HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY, const NVR_EXT_DEPTH_STENCIL* pDepthStencil, uint32_t VertexCount, uint32_t InstanceCount) {
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::DrawGeometryScene(const NVR_EXT_GEOMETRY_SCENE_DESC* pDesc) {
++    if (unlikely(pDesc == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(uint32_t(pDesc->CullMode) > uint32_t(NVR_EXT_CULL_FRONT))) {
++      Logger::err("NVR ext: DrawGeometryScene: unknown cull mode");
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (!pDesc->pIndirectArgs && (!pDesc->Geometry.VertexCount || !pDesc->Geometry.InstanceCount))
++      return D3D_OK;
++
++    return DrawImpl(&pDesc->Geometry.Draw, 0.0f, 0.0f, pDesc->pDepthStencil,
++      pDesc->Geometry.VertexCount, pDesc->Geometry.InstanceCount, pDesc);
++  }
++
++
++  HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY, const NVR_EXT_DEPTH_STENCIL* pDepthStencil, uint32_t VertexCount, uint32_t InstanceCount, const NVR_EXT_GEOMETRY_SCENE_DESC* pScene) {
+     D3D9DeviceLock lock = m_device->LockDevice();
+ 
+     if (unlikely(pDesc == nullptr || pDesc->pPipeline == nullptr))
+@@ -1096,6 +1126,9 @@ namespace dxvk {
+ 
+     std::array<Target, NVR_EXT_MAX_TARGETS> targets = { };
+     VkExtent3D extent = { 0u, 0u, 0u };
++    // 1.7-grass: DrawGeometryScene with Multisample may draw into multisampled targets (all of one sample count)
++    const bool allowMultisample = pScene != nullptr && pScene->Multisample;
++    VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
+ 
+     for (uint32_t i = 0; i < pDesc->TargetCount; i++) {
+       const auto& t = pDesc->Targets[i];
+@@ -1107,18 +1140,30 @@ namespace dxvk {
+       }
+ 
+       Rc<DxvkImage> image = ref.texture->GetImage();
+-      const Rc<DxvkImageView>& sampleView = ref.texture->GetSampleView(t.Srgb != FALSE);
++      Rc<DxvkImageView> sampleView = ref.texture->GetSampleView(t.Srgb != FALSE);
++
++      // 1.7-grass: a scene pass may draw into an attachment-only render target (a D3D9 CreateRenderTarget surface, such as a
++      // multisampled scene target): it has no sample view, so the view's format and aspects come from a render-target view
++      if (sampleView == nullptr && pScene != nullptr && image != nullptr && (image->info().usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
++        sampleView = ref.texture->CreateView(ref.layer, ref.mipLevel, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, t.Srgb != FALSE);
+ 
+       if (unlikely(image == nullptr || sampleView == nullptr || !(image->info().usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))) {
+         Logger::err(str::format("NVR ext: Draw: target ", i, ": not a render target (D3DUSAGE_RENDERTARGET)"));
+         return D3DERR_INVALIDCALL;
+       }
+ 
+-      if (unlikely(image->info().sampleCount != VK_SAMPLE_COUNT_1_BIT)) {
++      if (unlikely(image->info().sampleCount != VK_SAMPLE_COUNT_1_BIT && !allowMultisample)) {
+         Logger::err(str::format("NVR ext: Draw: target ", i, " is multisampled; passes draw into single-sample targets only"));
+         return D3DERR_INVALIDCALL;
+       }
+ 
++      if (i == 0) {
++        sampleCount = image->info().sampleCount;
++      } else if (unlikely(image->info().sampleCount != sampleCount)) {
++        Logger::err(str::format("NVR ext: Draw: target ", i, " has another sample count than target 0"));
++        return D3DERR_INVALIDCALL;
++      }
++
+       VkExtent3D mipExtent = image->mipLevelExtent(ref.mipLevel);
+ 
+       if (i == 0) {
+@@ -1169,7 +1214,7 @@ namespace dxvk {
+       const auto& d = *pDepthStencil;
+ 
+       if (unlikely(uint32_t(d.DepthCompare) > 7u || uint32_t(d.StencilCompare) > 7u || uint32_t(d.StencilPassOp) > 7u
+-                || uint32_t(d.StencilFailOp) > 7u || uint32_t(d.StencilDepthFailOp) > 7u || !(d.Depth >= 0.0f && d.Depth <= 1.0f))) {
++                || uint32_t(d.StencilFailOp) > 7u || uint32_t(d.StencilDepthFailOp) > 7u || (!pScene && !(d.Depth >= 0.0f && d.Depth <= 1.0f)))) {
+         Logger::err("NVR ext: DrawDepthStencil: a compare function, stencil operation or depth out of range");
+         return D3DERR_INVALIDCALL;
+       }
+@@ -1189,8 +1234,13 @@ namespace dxvk {
+ 
+       VkExtent3D dsExtent = image->mipLevelExtent(ref.mipLevel);
+ 
+-      if (unlikely(image->info().sampleCount != VK_SAMPLE_COUNT_1_BIT
+-                || dsExtent.width != extent.width || dsExtent.height != extent.height)) {
++      // 1.7-grass: a scene pass takes a depth-stencil surface at least as large as the targets (D3D9 allows a bigger one; DXVK's
++      // framebuffer then renders the smaller size), the other passes one of exactly their size
++      const bool dsSizeOk = pScene
++        ? dsExtent.width >= extent.width && dsExtent.height >= extent.height
++        : dsExtent.width == extent.width && dsExtent.height == extent.height;
++
++      if (unlikely(image->info().sampleCount != sampleCount || !dsSizeOk)) {
+         Logger::err("NVR ext: DrawDepthStencil: the depth-stencil surface is multisampled or has another size than the targets");
+         return D3DERR_INVALIDCALL;
+       }
+@@ -1224,10 +1274,36 @@ namespace dxvk {
+       dsState.setStencilOpFront(op);
+       dsState.setStencilOpBack(op);
+ 
+-      depthMin = depthMax = d.Depth;
++      // 1.7-grass: a scene geometry pass keeps its vertex shader's depth (viewport range 0-1)
++      if (!pScene)
++        depthMin = depthMax = d.Depth;
+       stencilRef = d.StencilReference & 0xFFu;
+     }
+ 
++    // 1.7-grass: indirect counts and culling of DrawGeometryScene
++    Rc<DxvkBuffer> indirectArgs;
++    VkDeviceSize indirectOffset = 0u;
++    VkCullModeFlags cullMode = VK_CULL_MODE_NONE;
++
++    if (pScene) {
++      cullMode = pScene->CullMode == NVR_EXT_CULL_BACK ? VkCullModeFlags(VK_CULL_MODE_BACK_BIT)
++               : pScene->CullMode == NVR_EXT_CULL_FRONT ? VkCullModeFlags(VK_CULL_MODE_FRONT_BIT)
++               : VkCullModeFlags(VK_CULL_MODE_NONE);
++
++      if (pScene->pIndirectArgs) {
++        auto* args = static_cast<D3D9NvrExtBuffer*>(pScene->pIndirectArgs);
++
++        if (unlikely(args->IsReadback() || !(args->GetBuffer()->info().usage & VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
++                  || (pScene->IndirectOffset & 3u) || uint64_t(pScene->IndirectOffset) + sizeof(VkDrawIndirectCommand) > args->GetSize())) {
++          Logger::err("NVR ext: DrawGeometryScene: the indirect buffer was not made with NVR_EXT_BUFFER_INDIRECT, or the offset is outside it");
++          return D3DERR_INVALIDCALL;
++        }
++
++        indirectArgs = args->GetBuffer();
++        indirectOffset = pScene->IndirectOffset;
++      }
++    }
++
+     small_vector<D3D9NvrExtBound, 8> bound;
+ 
+     HRESULT hr = ResolveBindings(pipeline, pDesc->BindingCount, pDesc->pBindings, bound);
+@@ -1258,6 +1334,11 @@ namespace dxvk {
+       cPushSize    = pipeline->GetPushSize(),
+       cVertexCount = VertexCount,
+       cInstances   = InstanceCount,
++      cScene       = pScene != nullptr,
++      cSamples     = sampleCount,
++      cCullMode    = cullMode,
++      cArgs        = std::move(indirectArgs),
++      cArgsOffset  = indirectOffset,
+       cResStages   = pipeline->HasVertexResources()
+         ? VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
+         : VkShaderStageFlags(VK_SHADER_STAGE_FRAGMENT_BIT)
+@@ -1292,12 +1373,18 @@ namespace dxvk {
+ 
+       DxvkRasterizerState rs = { };
+       rs.setPolygonMode(VK_POLYGON_MODE_FILL);
+-      rs.setCullMode(VK_CULL_MODE_NONE);
++      rs.setCullMode(cCullMode);
+       rs.setFrontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE);
+       rs.setDepthClip(true);
+-      rs.setSampleCount(VK_SAMPLE_COUNT_1_BIT);
++      rs.setSampleCount(cSamples);
+       ctx->setRasterizerState(rs);
+ 
++      // 1.7-grass: a scene geometry pass takes none of the D3D9 depth bias / depth bounds
++      if (cScene) {
++        ctx->setDepthBias(DxvkDepthBias { 0.0f, 0.0f, 0.0f });
++        ctx->setDepthBounds(DxvkDepthBounds { 0.0f, 1.0f });
++      }
++
+       DxvkMultisampleState ms = { };
+       ms.setSampleMask(0xFFFFu);
+       ms.setAlphaToCoverage(false);
+@@ -1327,10 +1414,16 @@ namespace dxvk {
+       if (cPushSize)
+         ctx->pushData(Stage, 0u, cPushSize, cPush.data());
+ 
+-      VkDrawIndirectCommand draw = { };
+-      draw.vertexCount = cVertexCount;
+-      draw.instanceCount = cInstances;
+-      ctx->draw(1u, &draw);
++      if (cArgs != nullptr) {
++        // 1.7-grass: the counts a compute shader wrote (DXVK orders that write before this read)
++        ctx->bindDrawBuffers(DxvkBufferSlice(cArgs, cArgsOffset, sizeof(VkDrawIndirectCommand)), DxvkBufferSlice());
++        ctx->drawIndirect(0u, 1u, sizeof(VkDrawIndirectCommand), false);
++      } else {
++        VkDrawIndirectCommand draw = { };
++        draw.vertexCount = cVertexCount;
++        draw.instanceCount = cInstances;
++        ctx->draw(1u, &draw);
++      }
+ 
+       NvrUnbindResources(ctx, cResStages, cBound);
+       ctx->nvrSetState(std::move(savedState));
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index 3bd1ec8..0df885b 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -140,7 +140,7 @@ namespace dxvk {
+    *
+    * Like D3D9VkInteropDevice: its reference count is the device's.
+    */
+-  class D3D9NvrExt final : public ID3D9NvrExt, public ID3D9NvrExtGeometry, public ID3D9NvrExtReadback {
++  class D3D9NvrExt final : public ID3D9NvrExt, public ID3D9NvrExtGeometry, public ID3D9NvrExtReadback, public ID3D9NvrExtGeometryScene {
+ 
+   public:
+ 
+@@ -262,6 +262,10 @@ namespace dxvk {
+     HRESULT STDMETHODCALLTYPE DrawGeometry(
+       const NVR_EXT_GEOMETRY_DRAW_DESC*     pDesc);
+ 
++    // 1.7-grass: ID3D9NvrExtGeometryScene
++    HRESULT STDMETHODCALLTYPE DrawGeometryScene(
++      const NVR_EXT_GEOMETRY_SCENE_DESC*    pDesc);
++
+     // 1.5-debug: ID3D9NvrExtReadback
+     HRESULT STDMETHODCALLTYPE CreateReadbackBuffer(
+             UINT                            Size,
+@@ -311,7 +315,8 @@ namespace dxvk {
+             float                           ShiftY,
+       const NVR_EXT_DEPTH_STENCIL*          pDepthStencil,
+             uint32_t                        VertexCount = 3u,
+-            uint32_t                        InstanceCount = 1u);
++            uint32_t                        InstanceCount = 1u,
++      const NVR_EXT_GEOMETRY_SCENE_DESC*    pScene = nullptr);
+ 
+     /** Validates a binding list and resolves it for the CS thread (shared by Dispatch and Draw). */
+     HRESULT ResolveBindings(
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 470ef21..f6f14eb 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -73,6 +73,7 @@ enum NVR_EXT_BUFFER_FLAGS {
+   NVR_EXT_BUFFER_UNIFORM      = 0x2,
+   NVR_EXT_BUFFER_TRANSFER_SRC = 0x4,  // CopyBufferToTexture source, CopyBuffer source, ReadBuffer source
+   NVR_EXT_BUFFER_TRANSFER_DST = 0x8,  // UpdateBuffer, ClearBuffer, CopyTextureToBuffer, CopyBuffer destination
++  NVR_EXT_BUFFER_INDIRECT     = 0x10, // (1.7-grass) indirect draw arguments for DrawGeometryScene (a compute shader may write them as a storage buffer)
+ };
+ 
+ enum NVR_EXT_FILTER {
+@@ -517,6 +518,52 @@ ID3D9NvrExtGeometry : public IUnknown {
+ __CRT_UUID_DECL(ID3D9NvrExtGeometry, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x09);
+ #endif
+ 
++/*
++ * 1.7-grass: geometry passes drawn INTO the scene (GPU grass: blades a compute shader placed and culled).
++ *
++ * A separate interface, queried from ID3D9NvrExt (QueryInterface with its GUID), so a d3d9.dll without it
++ * returns E_NOINTERFACE and every other method table is untouched. The pipeline is a geometry pipeline
++ * (ID3D9NvrExtGeometry::CreateGeometryPipeline). Over DrawGeometry this adds:
++ *  - a depth-stencil attachment with real depth: the tests of NVR_EXT_DEPTH_STENCIL (its Depth member is
++ *    ignored; the vertex shader's depth over the viewport range 0-1), e.g. the game's own depth buffer
++ *    with its compare function and depth writes, so the geometry hides and is hidden like the game's own;
++ *  - multisampled targets (Multisample): the pass rasterizes at the targets' sample count (the
++ *    depth-stencil surface must have the same one), as the game's own draws into them;
++ *  - face culling (CullMode; the front face is counter-clockwise in framebuffer coordinates);
++ *  - indirect counts: pIndirectArgs holds a VkDrawIndirectCommand { vertexCount, instanceCount,
++ *    firstVertex, firstInstance } (16 bytes at IndirectOffset; a buffer made with NVR_EXT_BUFFER_INDIRECT,
++ *    usually also NVR_EXT_BUFFER_STORAGE so a compute shader counts the instances into it). DXVK orders
++ *    the compute writes before the draw reads them. VertexCount / InstanceCount are then ignored.
++ * The depth bias and depth bounds of the D3D9 state are not applied (zero bias, bounds 0-1). Everything
++ * the device had set up is put back afterwards, as for Draw. The targets may be the device's current
++ * render target and depth-stencil surface (the pass writes them; it must not also sample them), also
++ * attachment-only surfaces (CreateRenderTarget / CreateDepthStencilSurface, e.g. a multisampled scene).
++ */
++enum NVR_EXT_CULL {
++  NVR_EXT_CULL_NONE  = 0,
++  NVR_EXT_CULL_BACK  = 1,
++  NVR_EXT_CULL_FRONT = 2,
++};
++
++struct NVR_EXT_GEOMETRY_SCENE_DESC {
++  NVR_EXT_GEOMETRY_DRAW_DESC   Geometry;        // the pass (targets, viewport, bindings, push data); the counts unless pIndirectArgs
++  const NVR_EXT_DEPTH_STENCIL* pDepthStencil;   // optional; at least the targets' size, their sample count
++  NVR_EXT_CULL                 CullMode;
++  BOOL                         Multisample;     // allow multisampled targets (and depth-stencil surface): rasterize at their sample count
++  ID3D9NvrExtBuffer*           pIndirectArgs;   // optional: the draw's counts, read on the GPU
++  UINT                         IndirectOffset;  // bytes, 4-aligned
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d324")
++ID3D9NvrExtGeometryScene : public IUnknown {
++  virtual HRESULT STDMETHODCALLTYPE DrawGeometryScene(
++    const NVR_EXT_GEOMETRY_SCENE_DESC*    pDesc) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtGeometryScene, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x24);
++#endif
++
+ /*
+  * HDR output (extension 1.5-hdr; its own interface, so the main vtable is untouched).
+  *
+-- 
+2.40.0.windows.1
+

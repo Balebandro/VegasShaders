@@ -1,0 +1,43 @@
+From 078fbac851be7fee9df4e839f03e2fa1cb527656 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Sun, 25 Oct 2026 20:41:19 -0400
+Subject: [PATCH] NVR extension: no pipeline library for a stage whose push
+ data exceeds its independent-layout slot
+
+The extension's full-screen passes declare fragment push blocks of up to 240 bytes. In an
+independent (graphics pipeline library) layout DXVK gives the fragment stage a fixed 48-byte
+slot at offset 192, so the pass's constants and sampler heap indices were written past the
+end of DxvkPushDataState (into DxvkXfbState: crash in nvrSetState when HeatHaze or Bodycam
+drew through the fast-linked pipeline). Such shaders now always get a complete pipeline.
+---
+ src/dxvk/dxvk_shader.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
+index 8f6261b..7b061ef 100644
+--- a/src/dxvk/dxvk_shader.cpp
++++ b/src/dxvk/dxvk_shader.cpp
+@@ -746,6 +746,20 @@ namespace dxvk {
+     if (metadata.flags.test(DxvkShaderFlag::HasTransformFeedback))
+       return false;
+ 
++    // NVR extension: a stage whose own push data block is larger than that stage's fixed slot
++    // in an independent (pipeline library) layout (48 bytes for fragment shaders) would have its
++    // data and push-data resource indices placed past the end of the context's push data arrays
++    // there. The extension's full-screen passes declare up to 240 bytes: use a complete pipeline.
++    DxvkPipelineLayoutBuilder layout = shader.getLayout();
++
++    for (auto i : bit::BitMask(layout.getPushDataMask())) {
++      DxvkPushDataBlock block = layout.getPushDataBlock(i);
++      VkShaderStageFlags stages = block.getStageMask();
++
++      if (!(stages & (stages - 1u)) && block.getSize() > DxvkPushDataBlock::computeBlockSizeForStage(stages))
++        return false;
++    }
++
+     // Pre-raster pipelines must export vertex position to be useful. This
+     // stops us from compiling vertex shader libraries that are only used
+     // as input for tessellation or geometry shaers.
+-- 
+2.43.0
+

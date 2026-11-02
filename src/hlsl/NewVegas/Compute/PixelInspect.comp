@@ -1,0 +1,38 @@
+// UNOFFICIAL 2026-10-26 (debugging tool, needs NVR DXVK 1.5-debug): the pixel inspector's copy step (core/PixelInspector.cpp,
+// [Main.Develop.PixelInspector]). One 3x3 workgroup copies the 3x3 texels round the inspected pixel of one texture (a stage of the
+// frame: the scene before NVR, the picture after an effect, the depth buffer, the normals, a shadow buffer ...) into record `stage`
+// of a storage buffer. The buffer is read back a few frames later through the non-waiting readback (ID3D9NvrExtReadback), so
+// nothing here ever stalls the game. The texture may be smaller than the screen (a half-resolution buffer): the pixel is mapped by
+// its uv, as a full-screen pass reading it would.
+//
+// Record layout (10 vec4 per stage): [0..8] the 3x3 texels row by row (centre = [4]), exactly as stored (no filtering, no
+// sRGB decode); [9] = (texture width, height, the centre texel x, y).
+//
+// Build: glslangValidator -V --target-env vulkan1.1 -o PixelInspect.spv PixelInspect.comp  (tools/nvr-dxvk/compile-debug.sh)
+
+#version 450
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 3, local_size_y = 3, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_src;
+
+layout(set = 2, binding = 0, std430) buffer Records {
+    vec4 v[];
+} o;
+
+layout(push_constant) uniform Push {
+    vec2 uv;        // the inspected pixel's centre over the screen size ((x + 0.5) / width, (y + 0.5) / height)
+    uint stage;     // record index
+    uint pad;
+} pc;
+
+void main() {
+    ivec2 size = textureSize(t_src, 0);
+    ivec2 centre = clamp(ivec2(floor(pc.uv * vec2(size))), ivec2(0), size - 1);
+    ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+    ivec2 p = clamp(centre + lid - 1, ivec2(0), size - 1);
+    uint base = pc.stage * 10u;
+    o.v[base + uint(lid.y * 3 + lid.x)] = texelFetch(t_src, p, 0);
+    if (lid.x == 0 && lid.y == 0) o.v[base + 9u] = vec4(vec2(size), vec2(centre));
+}

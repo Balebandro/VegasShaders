@@ -1,0 +1,7 @@
+#version 460
+// UNOFFICIAL 2026-10-29 RT reflections: the helper's pass with the core's alpha-tested casters (foliage, fences, wires as cut-outs;
+// [Main.Main.RayTracing] AlphaTested): ReflectionsRTBody.glsl with RT_ALPHA (the alpha atlas on binding 6, Rt/RtAlpha.glsl).
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#define RT_ALPHA 1
+#include "ReflectionsRTBody.glsl"

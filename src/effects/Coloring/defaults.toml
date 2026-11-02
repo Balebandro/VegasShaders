@@ -1,0 +1,21 @@
+[_Shaders.Coloring.Default]
+BaseGamma = 1.6
+Bleach = 0.1
+BleachLuma = 0.2
+ColorCurve = 1.2
+ColorCurveB = 1.0
+ColorCurveG = 1.0
+ColorCurveR = 0.9
+Contrast = 0.8
+EffectGamma = 0.9
+EffectGammaB = 1.0
+EffectGammaG = 1.0
+EffectGammaR = 1.0
+Fade = 0.0
+Linearization = 1.1
+Saturation = -0.1
+Strength = 0.5
+
+[_Shaders.Coloring.Status]
+Enabled = false                        #
+

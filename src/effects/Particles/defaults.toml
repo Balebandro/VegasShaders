@@ -1,0 +1,8 @@
+[_Shaders.Particles.Main]
+Strength = 1.0                       # UNOFFICIAL, optional: how much blood, smoke, dust and debris particles follow the lighting (0 = as the game draws them, unlit; 1 = fully lit).
+Brightness = 1.0                     # Overall brightness of lit particles. Raise if they look too dark next to the scene, lower if too bright.
+SunShare = 0.6                       # How much of the sun a particle catches outdoors (they are thin and see the sun from all sides). Shaded particles get only the ambient and lamps.
+
+[_Shaders.Particles.Status]
+Enabled = false                      # UNOFFICIAL, optional: lights blood, smoke, dust and debris particles and the blood decals on characters by the ambient, the sun (through the sun shadows) and nearby lamps, so they no longer glow in the shade, at night or indoors. Muzzle flashes, fire, sparks and glows stay as the game draws them. Off = exactly the game's own particle shaders.
+

@@ -1,0 +1,28 @@
+// FSR 3.1 upscaler (AMD FidelityFX SDK 1.1.4, MIT; see LICENSE-FidelityFX-SDK.txt) pass for NVR DXVK: AMD's
+// ffx_fsr3upscaler_luma_instability_pass.glsl with NVR's callbacks header (fsr3upscaler/ffx_fsr3upscaler_callbacks_nvr.h). AMD's binding numbers are
+// kept; the ones NVR has no resource for (exposure, transparency mask) declare nothing there.
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+#define FSR3UPSCALER_BIND_SRV_INPUT_EXPOSURE                    0   // NVR: none (1)
+#define FSR3UPSCALER_BIND_SRV_DILATED_REACTIVE_MASKS            1
+#define FSR3UPSCALER_BIND_SRV_DILATED_MOTION_VECTORS            2
+#define FSR3UPSCALER_BIND_SRV_FRAME_INFO                        3
+#define FSR3UPSCALER_BIND_SRV_LUMA_HISTORY                      4
+#define FSR3UPSCALER_BIND_SRV_FARTHEST_DEPTH_MIP1               5
+#define FSR3UPSCALER_BIND_SRV_CURRENT_LUMA                      6
+#define FSR3UPSCALER_BIND_UAV_LUMA_HISTORY                      7
+#define FSR3UPSCALER_BIND_UAV_LUMA_INSTABILITY                  8
+#define FSR3UPSCALER_BIND_CB_FSR3UPSCALER                       9
+
+#include "fsr3upscaler/ffx_fsr3upscaler_callbacks_nvr.h"
+#include "fsr3upscaler/ffx_fsr3upscaler_common.h"
+#include "fsr3upscaler/ffx_fsr3upscaler_luma_instability.h"
+
+layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+void main()
+{
+    LumaInstability(FfxInt32x2(gl_GlobalInvocationID.xy));
+}

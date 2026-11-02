@@ -1,0 +1,254 @@
+#version 460
+// UNOFFICIAL 2026-10-31 RT lamp shadows, ManyLights ([Shaders.ShadowsInteriors.RT] ManyLights; core\RtLampShadows.h;
+// docs\next\RT-MANY-LIGHTS.md). Runs in the 64-bit RT helper like RtLampTrace.comp, whose position, ranking and ray code it shares.
+// Every lamp that lit a drawn object last frame is in the table (ids 0-62 the cube-slot lamps, 64-254 the others). Per pixel:
+//   - its two strongest lamps traced exactly (Rays rays over the lamp's disc), as RtLampTrace.comp;
+//   - all its other lamps together: R = sum(w V) / sum(w) (w the light a lamp brings unshadowed, V its visibility), estimated by
+//     weighted reservoir sampling (ManyLightsRays reservoirs over the other lamps, one ray to each chosen lamp), reused over the
+//     8 x 8 group's neighbours (shared memory) and over frames (history image pair, the point reprojected into the previous trace).
+//     The lamp shaders give R to each lamp of a draw that is not one of the two entries (the ratio estimator).
+// Output RG32F, exact integers below 2^24:
+//   an entry = lamp id (0-254; 255 = none) + 256 x visibility in 16 steps: 12 bits
+//   r = entry 0 + 4096 x entry 1,  g = R (0-4095; 4095 when no other lamp lights the pixel) + 4096 x the depth code (as RtLampTrace)
+// 2026-10-31 cost pass (v1 ran 3-6x RtLampTrace's time on the iGPU): one pass over the table (a lamp leaves the top two into the
+// reservoirs, so every other lamp is offered exactly once), no dynamically indexed arrays (scratch memory on AMD), one ray call
+// site for all rays, and ManyLightsRestStride 2: the rest ray on one pixel of each 2 x 2 a frame, in turn (the spatial and
+// temporal reuse fill the others).
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampTraceMany.spv RtLampTraceMany.comp
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 size;          // as RtLampTrace.comp
+	vec4 forward;
+	vec4 right;
+	vec4 up;
+	vec4 origin;
+	vec4 params;        // x rays per exact lamp (1-8), y StartOffset, z LampStop, w noise offset (0..1)
+	vec4 params2;       // x LampModelDistance, y far cull mask, z near cull mask, w lamps in the table (ids 0 .. w-1)
+	vec4 flags;         // x OneSided (diagnostic)
+	vec4 mask;          // z RankBy, w StartOffsetPerUnit
+	vec4 many;          // x reservoirs (rest rays, 1-4), y history frames (1-64), z spatial radius (0-2), w 1 = the history is valid
+	vec4 reproject[4];  // rows: scene-space point -> the previous trace's clip space (x, y, -, w = view z), PointShadowForward's matrix
+	vec4 many2;         // x frame number (random seed), y history depth tolerance (relative), z rest stride (1 every pixel, 2 one of each 2 x 2 in turn)
+} p;
+layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;
+layout(set = 0, binding = 4, rg32f) uniform writeonly image2D resultImage;
+layout(set = 0, binding = 5, rg32f) uniform readonly image2D lampTable;
+layout(set = 0, binding = 6, rgba16f) uniform readonly image2D historyIn;    // x R, y frames averaged, z view z (the previous trace's pixels)
+layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D historyOut;
+
+const int MaxLamps = 255;
+shared vec4 lampA[MaxLamps];    // x y z (scene space), reach
+shared vec4 lampB[MaxLamps];    // intensity, the game's radius, stop, disc radius
+shared float groupR[64], groupHas[64], groupZ[64];
+shared vec3 groupN[64];
+
+float hash12(vec2 q) {
+	vec3 h = fract(vec3(q.xyx) * 0.1031);
+	h += dot(h, h.yzx + 33.33);
+	return fract((h.x + h.y) * h.z);
+}
+uint state;
+float random01() {
+	state = state * 747796405u + 2891336453u;
+	uint w = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return float((w >> 22u) ^ w) * (1.0 / 4294967296.0);
+}
+
+bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
+	if (!(tMax > tMin)) return false;
+	rayQueryEXT q;
+	bool oneSided = p.flags.x > 0.5;
+	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | gl_RayFlagsOpaqueEXT, mask, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q)) { }
+	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
+	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
+}
+
+// One ray from the point to a point of lamp s's disc (radius r, angle ang): true when it reaches the lamp. As RtLampTrace.comp: two
+// segments (far mask, then the near mask over the last LampModelDistance), stopping short of the lamp.
+bool reaches(vec3 origin, float offset, int s, float rr, float ang) {
+	vec3 toLamp = lampA[s].xyz - origin;
+	float dist = length(toLamp);
+	float stop = max(p.params.z, lampB[s].z);
+	if (!(dist > stop + offset)) return true;
+	vec3 dir = toLamp / dist;
+	vec3 t = normalize(cross(dir, abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
+	vec3 bt = cross(dir, t);
+	vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
+	float invLen = inversesqrt(dot(segment, segment));
+	float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
+	float tMin = min(offset * invLen, tEnd);
+	float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
+	return !blocked(origin, segment, tMin, tSplit, uint(p.params2.y)) && !blocked(origin, segment, tSplit, tEnd, uint(p.params2.z));
+}
+
+// The light lamp s brings the point unshadowed (RtLampTrace.comp's ranking weight), 0 when none
+float lampWeight(int s, vec3 origin, vec3 normal) {
+	vec4 a = lampA[s];
+	if (!(a.w > 0.0)) return 0.0;
+	vec3 toLamp = a.xyz - origin;
+	float d2 = dot(toLamp, toLamp);
+	if (d2 >= a.w * a.w) return 0.0;
+	float ndl = dot(toLamp, normal);
+	if (ndl <= 0.0) return 0.0;
+	float falloff = clamp(1.0 - d2 / max(lampB[s].y * lampB[s].y, 1.0), 0.0, 1.0);
+	if (p.mask.z > 0.5) return falloff > 0.0 ? falloff + 1e-3 : 0.0;
+	return lampB[s].x * max(falloff, 0.02) * ndl * inversesqrt(d2);
+}
+
+void main() {
+	// The table into shared memory (every thread of the group helps; no early return before the barriers below)
+	int count = min(int(p.params2.w), MaxLamps);
+	uint local = gl_LocalInvocationIndex;
+	for (int s = int(local); s < count; s += 64) {
+		vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0));
+		vec4 c = imageLoad(lampTable, ivec2(4 * s + 2, 0)), e = imageLoad(lampTable, ivec2(4 * s + 3, 0));
+		lampA[s] = vec4(a.xy, b.x, b.y);
+		lampB[s] = vec4(c.x, c.y, e.x, e.y);
+	}
+	barrier();
+
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	bool inside = pixel.x < int(p.size.x) && pixel.y < int(p.size.y);
+	float linear01 = inside ? imageLoad(depthImage, pixel).r : 0.0;
+	float viewZ = linear01 * p.forward.w;
+	bool valid = inside && linear01 > 0.0 && linear01 < 0.9999 && viewZ >= 1.0;
+
+	vec3 position = vec3(0.0), normal = vec3(0.0, 0.0, 1.0), origin = vec3(0.0);
+	float offset = 0.0;
+	if (valid) {
+		vec2 uv = (vec2(pixel) + 0.5) * p.size.zw;
+		position = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * viewZ;
+		vec3 n = imageLoad(normalImage, pixel).xyz * 2.0 - 1.0;
+		normal = normalize(normalize(p.right.xyz) * n.x + normalize(p.up.xyz) * n.y + normalize(p.forward.xyz) * n.z);
+		offset = p.params.y + p.mask.w * viewZ;
+		origin = position + normal * offset;
+	}
+
+	// One pass over the table: the two strongest lamps, and weighted reservoirs over all the others (a lamp is offered to the
+	// reservoirs when it fails to enter the top two or is pushed out of it; the final two never are). Reservoirs are plain
+	// variables, not an array (a dynamically indexed array lives in scratch memory on AMD).
+	int stride = clamp(int(p.many2.z + 0.5), 1, 2);
+	int turn = int(p.many2.x) & 3;
+	bool traceRest = valid && (stride == 1 || (pixel.x & 1) + 2 * (pixel.y & 1) == turn);
+	state = uint(hash12(vec2(pixel)) * 16777216.0) ^ (uint(p.many2.x) * 2654435761u);
+	int reservoirs = clamp(int(p.many.x), 1, 4);
+	int best0 = -1, best1 = -1, chosen0 = -1, chosen1 = -1, chosen2 = -1, chosen3 = -1;
+	float weight0 = 0.0, weight1 = 0.0, restSum = 0.0;
+	if (valid) {
+		for (int s = 0; s < count; s++) {
+			float w = lampWeight(s, origin, normal);
+			if (!(w > 0.0)) continue;
+			int pushed = s;
+			float outWeight = w;
+			if (w > weight1) {
+				pushed = best1; outWeight = weight1;
+				if (w > weight0) { best1 = best0; weight1 = weight0; best0 = s; weight0 = w; }
+				else { best1 = s; weight1 = w; }
+			}
+			if (pushed < 0) continue;
+			restSum += outWeight;
+			if (!traceRest) continue;
+			float keep = outWeight / restSum;
+			if (random01() < keep) chosen0 = pushed;
+			if (reservoirs > 1 && random01() < keep) chosen1 = pushed;
+			if (reservoirs > 2 && random01() < keep) chosen2 = pushed;
+			if (reservoirs > 3 && random01() < keep) chosen3 = pushed;
+		}
+	}
+	bool hasRest = valid && restSum > 0.0;
+	bool restTraced = traceRest && hasRest;
+
+	// All rays through one call site: Rays to each of the two strongest (spread over the disc), then one to each chosen lamp
+	uint rays = uint(clamp(p.params.x, 1.0, 8.0));
+	float spin = 6.2831853 * fract(hash12(vec2(pixel)) + p.params.w);
+	int exact0 = best0 >= 0 ? int(rays) : 0, exact1 = best1 >= 0 ? int(rays) : 0;
+	int jobs = valid ? exact0 + exact1 + (restTraced ? reservoirs : 0) : 0;
+	uint lit0 = 0u, lit1 = 0u;
+	float litRest = 0.0;
+	for (int j = 0; j < jobs; j++) {
+		int s;
+		float rr, ang;
+		if (j < exact0 + exact1) {
+			int i = j < exact0 ? j : j - exact0;
+			s = j < exact0 ? best0 : best1;
+			rr = lampB[s].w * sqrt((float(i) + 0.5) / float(rays));
+			ang = float(i) * 2.3999632 + spin;
+		} else {
+			int k = j - exact0 - exact1;
+			s = k == 0 ? chosen0 : k == 1 ? chosen1 : k == 2 ? chosen2 : chosen3;
+			rr = lampB[s].w * sqrt(random01());
+			ang = 6.2831853 * random01();
+		}
+		bool ok = reaches(origin, offset, s, rr, ang);
+		if (j < exact0) lit0 += ok ? 1u : 0u;
+		else if (j < exact0 + exact1) lit1 += ok ? 1u : 0u;
+		else litRest += ok ? 1.0 : 0.0;
+	}
+	float restSample = restTraced ? litRest / float(reservoirs) : 1.0;
+
+	// Spatial reuse inside the group: the neighbours that traced their rest this frame, on the same surface (depth within 5 %,
+	// normals within ~30 degrees)
+	groupR[local] = restSample;
+	groupHas[local] = restTraced ? 1.0 : 0.0;
+	groupZ[local] = viewZ;
+	groupN[local] = normal;
+	barrier();
+	float restNow = restSample;
+	bool haveNow = restTraced;
+	int radius = clamp(int(p.many.z), 0, 2);
+	if (hasRest && radius > 0) {
+		ivec2 at = ivec2(gl_LocalInvocationID.xy);
+		float sum = 0.0, total = 0.0;
+		for (int dy = -radius; dy <= radius; dy++)
+			for (int dx = -radius; dx <= radius; dx++) {
+				ivec2 q = at + ivec2(dx, dy);
+				if (q.x < 0 || q.y < 0 || q.x > 7 || q.y > 7) continue;
+				int i = q.y * 8 + q.x;
+				if (groupHas[i] < 0.5 || abs(groupZ[i] - viewZ) > 0.05 * viewZ) continue;
+				float nw = max(dot(groupN[i], normal), 0.0);
+				nw *= nw; nw *= nw;
+				sum += groupR[i] * nw;
+				total += nw;
+			}
+		if (total > 0.0) { restNow = sum / total; haveNow = true; }
+	}
+
+	// Temporal reuse: the running mean at the point's place in the previous trace, where that trace saw the same depth; a pixel
+	// with no sample this frame keeps that mean
+	float frames = haveNow ? 1.0 : 0.0, restMean = haveNow ? restNow : 1.0;
+	if (hasRest && p.many.w > 0.5) {
+		vec4 clip = p.reproject[0] * position.x + p.reproject[1] * position.y + p.reproject[2] * position.z + p.reproject[3];
+		if (clip.w > 1.0) {
+			vec2 prevUv = clip.xy / clip.w * vec2(0.5, -0.5) + 0.5;
+			ivec2 prev = ivec2(floor(prevUv * p.size.xy));
+			if (all(greaterThanEqual(prev, ivec2(0))) && prev.x < int(p.size.x) && prev.y < int(p.size.y)) {
+				vec4 h = imageLoad(historyIn, prev);
+				if (h.y > 0.5 && abs(h.z - clip.w) <= p.many2.y * clip.w) {
+					if (haveNow) {
+						frames = min(h.y + 1.0, max(p.many.y, 1.0));
+						restMean = mix(h.x, restNow, 1.0 / frames);
+					} else { frames = h.y; restMean = h.x; }
+				}
+			}
+		}
+	}
+	if (inside) imageStore(historyOut, pixel, hasRest && frames > 0.5 ? vec4(restMean, frames, viewZ, 0.0) : vec4(1.0, 0.0, 0.0, 0.0));
+
+	if (!inside) return;
+	const float none = 4095.0;                // id 255, visibility 15
+	if (!valid) {
+		imageStore(resultImage, pixel, vec4(none + 4096.0 * none, none, 0.0, 0.0));   // depth code 0 never matches
+		return;
+	}
+	float entry0 = best0 >= 0 ? float(best0) + 256.0 * floor(15.0 * float(lit0) / float(rays) + 0.5) : none;
+	float entry1 = best1 >= 0 ? float(best1) + 256.0 * floor(15.0 * float(lit1) / float(rays) + 0.5) : none;
+	float restCode = hasRest ? clamp(floor(restMean * 4095.0 + 0.5), 0.0, 4095.0) : 4095.0;
+	float depthCode = clamp(floor(log2(viewZ) * p.origin.w + 0.5), 1.0, 4095.0);
+	imageStore(resultImage, pixel, vec4(entry0 + 4096.0 * entry1, restCode + 4096.0 * depthCode, 0.0, 0.0));
+}

@@ -1,0 +1,48 @@
+From b9750a52ebd566e3aca3492d786f65032a599737 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 21:37:44 -0400
+Subject: [PATCH] NVR extension: upload managed textures (and pending mip
+ generation) before a pass samples them
+
+A D3DPOOL_MANAGED texture reaches the GPU only when a D3D9 draw binds it
+(UploadManagedTextures at draw time); the extension sampled the GPU image as
+it was, so a file texture that only NVR passes read stayed empty
+(AmbientLight's blue noise read 0: a whole-screen flicker). ResolveBindings
+now uploads what is pending and generates pending AUTOGENMIPMAP mips, as a
+draw would. NVR also calls PreLoad itself (works with older builds).
+---
+ src/d3d9/d3d9_nvr_ext.cpp | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 8a485c7..14a537a 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -632,6 +632,24 @@ namespace dxvk {
+             return D3DERR_INVALIDCALL;
+           }
+ 
++          // A D3DPOOL_MANAGED texture reaches the GPU only when a D3D9 draw binds it
++          // (UploadManagedTextures at draw time): one that only NVR passes read stayed
++          // empty (AmbientLight's blue noise read 0). Upload what is pending here, as a
++          // draw would, and generate pending AUTOGENMIPMAP mips the same way.
++          if (b.Type == NVR_EXT_BIND_SAMPLED_IMAGE) {
++            if (ref.texture->IsManaged() && ref.texture->NeedsAnyUpload()) {
++              m_device->UploadManagedTexture(ref.texture);
++              m_device->MarkTextureUploaded(ref.texture);
++            }
++
++            if (ref.texture->NeedsMipGen()) {
++              m_device->EmitGenerateMips(ref.texture);
++
++              if (!m_device->IsTextureBoundAsAttachment(ref.texture))
++                ref.texture->SetNeedsMipGen(false);
++            }
++          }
++
+           res.image = ref.texture->GetImage();
+ 
+           const Rc<DxvkImageView>& sampleView = ref.texture->GetSampleView(b.Srgb != FALSE);
+-- 
+2.40.0.windows.1
+

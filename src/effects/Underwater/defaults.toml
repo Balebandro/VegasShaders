@@ -1,0 +1,3 @@
+[_Shaders.Underwater.Status]
+Enabled = true                      # Post Process underwater fog/godrays/caustics effect.
+

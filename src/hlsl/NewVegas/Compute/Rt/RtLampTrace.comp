@@ -1,0 +1,211 @@
+#version 460
+// UNOFFICIAL 2026-10-28 RT lamp shadows, the trace pass ([Shaders.ShadowsInteriors.RT], core\RtLampShadows.h;
+// docs\next\FORK-RT-LAMPS.md). Runs in the 64-bit RT helper (NvrRtHelper.exe; its binding layout: FORK-RT-CORE.md), not in the game.
+// 2026-10-29 v4, per-pixel lamp selection: the lamp table (binding 5) holds EVERY shadowed lamp NVR published this frame (up to 63,
+// by cube slot); each pixel ranks them by the light they would bring it unshadowed (intensity x the game's falloff x N.L) and traces
+// only its LampsPerPixel (1-3) strongest, so every lamp is traced where it matters and the cost is 3 lamps a pixel, not all of them.
+// Output RG32F, exact integers below 2^24:
+//   an entry = cube slot (0-62; 63 = none) + 64 x visibility in 16 steps (0 blocked .. 15 lit): 10 bits
+//   r = entry 0 + 1024 x entry 1,  g = entry 2 + 1024 x the view depth's 12-bit log code (round(log2(z) / log2(far) x 4095); 0 = sky)
+// The lamp shaders of the next frame (PointShadowForward.hlsl, POINT_SHADOW_RT) reproject into this frame and, where the depth matches,
+// look their lamp's cube slot up among the three entries; a lamp not there (or no match) takes its cube map.
+// Each traced lamp: Rays rays aimed over a disc of the lamp's radius facing the point (golden-angle spiral turned per pixel and frame),
+// each in two segments: the whole ray with the far mask, the last LampModelDistance next to the lamp with the near mask (lamp models
+// skipped too), stopping max(LampStop, the lamp's own stop) short of the lamp, starting off the surface along its normal.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampTrace.spv RtLampTrace.comp
+// 2026-10-29 Denoise: the variant RtLampTraceSplit.spv (-DSPLIT) also writes ranks 0 and 1 apart for the shared denoiser (bindings 6-9:
+// visibility 0..1 and the cube slot, 63 = none): glslangValidator -V --target-env vulkan1.2 -DSPLIT -o RtLampTraceSplit.spv RtLampTrace.comp
+// 2026-10-29 Exteriors: RtLampTraceExterior.spv (-DEXTERIOR) writes the screen-space lamp mask instead (binding 6, R32F): what
+// PointShadows.fx Shadow() sums (each lamp's amount x its weight, edge-windowed, saturated), with each pixel's strongest lamps'
+// amounts times their traced visibility instead of the cube maps; the rest count unshadowed, as that pass's tracked lamps do.
+// The ranking then uses that amount. glslangValidator -V --target-env vulkan1.2 -DEXTERIOR -o RtLampTraceExterior.spv RtLampTrace.comp
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 size;          // x width, y height, z 1 / width, w 1 / height
+	vec4 forward;       // xyz camera forward (scene space), w farZ (the depth buffer holds view z / farZ)
+	vec4 right;         // xyz camera right / projection[0][0]
+	vec4 up;            // xyz camera up / projection[1][1]
+	vec4 origin;        // xyz the view origin in scene space (RtCore::Eye, 0), w 4095 / log2(farZ)
+	vec4 params;        // x rays per lamp (1-8), y StartOffset (units), z LampStop (units), w noise offset (0..1)
+	vec4 params2;       // x LampModelDistance (0 = one segment), y far cull mask, z near cull mask, w lamps in the table (0-63)
+	vec4 flags;         // x: 1 = OneSided (diagnostic): only the closest surface counts, and only if it faces the lamp, as the cube
+	                    //    maps draw casters (one-sided, seen from the lamp); 0 = every surface both ways (the scene's own)
+	                    // y: lamps a pixel traces (1-3)
+	                    // z: Interleave (1, 2 or 4): a pixel is traced every z-th frame; w: this frame's phase (0 .. z-1)
+	vec4 mask;          // EXTERIOR: x EdgeFade (TESR_PointShadowNear.y), y LampReachMask (.z: > 0 reach from it, < 0 no angle term),
+	                    // z ExteriorDebug (diagnostic: 1 = the mask 0 everywhere, 2 = 1 everywhere); the other variants: RankBy
+	                    //   (0 the light a lamp brings, 1 the game's own falloff: as the game picks a draw's lamps by distance),
+	                    // w StartOffsetPerUnit (all variants): the start offset grows by this x the view depth
+} p;
+layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // TESR_DepthBuffer's red: view z / farZ
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;  // TESR_NormalsBuffer: view-space normal * 0.5 + 0.5
+layout(set = 0, binding = 4, rg32f) uniform writeonly image2D resultImage;
+// The lamp table, 4 texels a lamp, lamp = cube slot s at x = 4s: (x, y), (z, reach), (intensity, the game's radius), (stop, disc radius)
+// (scene space; reach 0 = no lamp in that slot)
+layout(set = 0, binding = 5, rg32f) uniform readonly image2D lampTable;
+#ifdef SPLIT
+layout(set = 0, binding = 6, r32f) uniform writeonly image2D vis0Image;
+layout(set = 0, binding = 7, r32f) uniform writeonly image2D vis1Image;
+layout(set = 0, binding = 8, r32f) uniform writeonly image2D id0Image;
+layout(set = 0, binding = 9, r32f) uniform writeonly image2D id1Image;
+void storeSplit(ivec2 pixel, float e0, float e1) {
+	float v0 = floor(e0 / 64.0), v1 = floor(e1 / 64.0);
+	imageStore(vis0Image, pixel, vec4(v0 / 15.0));
+	imageStore(vis1Image, pixel, vec4(v1 / 15.0));
+	imageStore(id0Image, pixel, vec4(e0 - 64.0 * v0));
+	imageStore(id1Image, pixel, vec4(e1 - 64.0 * v1));
+}
+#else
+void storeSplit(ivec2 pixel, float e0, float e1) { }
+#endif
+#ifdef EXTERIOR
+layout(set = 0, binding = 6, r32f) uniform writeonly image2D maskImage;
+// PointShadows.fx: LampAmount (GetPointLightAtten / LampReach) x EdgeWindow, per lamp, for a distance normalised by the lamp's reach
+float lampAmount(vec3 toLamp, float distance, vec3 normal, float weight) {
+	if (!(distance < 1.0) || weight <= 0.0) return 0.0;
+	float amount;
+	if (p.mask.y > 0.0) amount = 1.0 - smoothstep(p.mask.y, 1.0, distance);
+	else {
+		float s = clamp(distance * distance, 0.0, 1.0);
+		float atten = clamp((1.0 - s) * (1.0 - s) / (1.0 + 5.0 * s), 0.0, 1.0);
+		float diffuse = p.mask.y < 0.0 ? 1.0 : mix(1.0, dot(normalize(toLamp), normal), smoothstep(0.0, 0.2, distance));
+		amount = clamp(diffuse * atten, 0.0, 1.0);
+	}
+	float edge = p.mask.x > 0.0 ? 1.0 - smoothstep(1.0 - p.mask.x, 1.0, distance) : 1.0;
+	return clamp(amount * weight, 0.0, 1.0) * edge;
+}
+#endif
+
+float hash12(vec2 q) {
+	vec3 h = fract(vec3(q.xyx) * 0.1031);
+	h += dot(h, h.yzx + 33.33);
+	return fract((h.x + h.y) * h.z);
+}
+
+bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
+	if (!(tMax > tMin)) return false;
+	rayQueryEXT q;
+	bool oneSided = p.flags.x > 0.5;
+	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | gl_RayFlagsOpaqueEXT, mask, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q)) { }
+	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
+	// OneSided: the ray runs from the surface toward the lamp, so a caster facing the lamp is hit on its BACK face
+	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
+}
+
+void main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y))
+		return;
+	// Interleave: the other pixels keep the answer of the frame that traced them (the result image persists); the lamp shaders'
+	// depth check sends a pixel whose surface moved since to its cube map
+	int interleave = int(p.flags.z + 0.5);
+	if (interleave >= 2) {
+		int cell = interleave >= 4 ? (pixel.x & 1) + 2 * (pixel.y & 1) : (pixel.x + pixel.y) & 1;
+		if (cell != int(p.flags.w + 0.5)) return;
+	}
+
+	const float none = 1023.0;                // slot 63, visibility 15
+	float linear01 = imageLoad(depthImage, pixel).r;
+	float viewZ = linear01 * p.forward.w;
+	if (!(linear01 > 0.0) || linear01 >= 0.9999 || viewZ < 1.0) {
+		imageStore(resultImage, pixel, vec4(none + 1024.0 * none, none, 0.0, 0.0));   // sky / nothing: depth code 0 never matches
+		storeSplit(pixel, none, none);
+#ifdef EXTERIOR
+		imageStore(maskImage, pixel, vec4(0.0));
+#endif
+		return;
+	}
+
+	// The position and normal as RtSunShadow.comp (SunShadows.glsl's toWorld())
+	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw;
+	vec3 position = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * viewZ;
+	vec3 n = imageLoad(normalImage, pixel).xyz * 2.0 - 1.0;
+	vec3 normal = normalize(normalize(p.right.xyz) * n.x + normalize(p.up.xyz) * n.y + normalize(p.forward.xyz) * n.z);
+	// the start offset grows with the distance: the position rebuilt from the depth is off by more far away (outdoors: 1000s of units)
+	float offset = p.params.y + p.mask.w * viewZ;
+	vec3 origin = position + normal * offset;
+
+	// The pixel's strongest lamps (unshadowed): intensity x the game's falloff (1 - (d / radius)^2) x N.L, within the shadow's reach
+	int best[3] = int[3](-1, -1, -1);
+	float weight[3] = float[3](0.0, 0.0, 0.0);
+	int count = min(int(p.params2.w), 63);
+	float total = 0.0;   // EXTERIOR: the mask's sum, unshadowed
+	for (int s = 0; s < count; s++) {
+		vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0)), c = imageLoad(lampTable, ivec2(4 * s + 2, 0));
+		if (!(b.y > 0.0)) continue;
+		vec3 toLamp = vec3(a.xy, b.x) - origin;
+		float d2 = dot(toLamp, toLamp);
+		if (d2 >= b.y * b.y) continue;
+#ifdef EXTERIOR
+		// the mask's amount for this lamp (reach = the mask's radius, intensity = its weight); it ranks the lamps too
+		float w = lampAmount(toLamp, sqrt(d2) / b.y, normal, c.x);
+		total += w;
+		if (!(w > 0.0)) continue;
+#else
+		float ndl = dot(toLamp, normal);
+		if (ndl <= 0.0) continue;
+		float falloff = clamp(1.0 - d2 / max(c.y * c.y, 1.0), 0.0, 1.0);
+		float w = c.x * max(falloff, 0.02) * ndl * inversesqrt(d2);   // a floor, so lamps past their game radius still rank by intensity
+		// RankBy 1 (2026-10-30): the lamps the game would give the draw here: its own falloff over its radius, brightness left out
+		// (Novac, rtlamp-31: by light brought, each pixel's two strongest were not the draw's own lamps)
+		if (p.mask.z > 0.5) w = falloff > 0.0 ? falloff + 1e-3 : 0.0;
+		if (!(w > 0.0)) continue;
+#endif
+		if (w > weight[2]) {
+			if (w > weight[1]) {
+				weight[2] = weight[1]; best[2] = best[1];
+				if (w > weight[0]) { weight[1] = weight[0]; best[1] = best[0]; weight[0] = w; best[0] = s; }
+				else { weight[1] = w; best[1] = s; }
+			} else { weight[2] = w; best[2] = s; }
+		}
+	}
+
+	uint rays = uint(clamp(p.params.x, 1.0, 8.0));
+	float spin = 6.2831853 * fract(hash12(vec2(pixel)) + p.params.w);
+	uint farMask = uint(p.params2.y), nearMask = uint(p.params2.z);
+	int perPixel = clamp(int(p.flags.y), 1, 3);
+	float entry[3] = float[3](none, none, none);
+	for (int k = 0; k < perPixel; k++) {
+		int s = best[k];
+		if (s < 0) break;
+		vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0)), e = imageLoad(lampTable, ivec2(4 * s + 3, 0));
+		vec3 toLamp = vec3(a.xy, b.x) - origin;
+		float dist = length(toLamp);
+		float stop = max(p.params.z, e.x);
+		float steps = 15.0;                                   // lit: at the lamp (within its stop)
+		if (dist > stop + offset) {
+			vec3 dir = toLamp / dist;
+			vec3 t = normalize(cross(dir, abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
+			vec3 bt = cross(dir, t);
+			uint lit = 0u;
+			for (uint i = 0u; i < rays; i++) {
+				float rr = e.y * sqrt((float(i) + 0.5) / float(rays));
+				float ang = float(i) * 2.3999632 + spin;
+				vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
+				float invLen = inversesqrt(dot(segment, segment));
+				float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
+				float tMin = min(offset * invLen, tEnd);
+				float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
+				if (!blocked(origin, segment, tMin, tSplit, farMask) && !blocked(origin, segment, tSplit, tEnd, nearMask))
+					lit++;
+			}
+			steps = floor(15.0 * float(lit) / float(rays) + 0.5);
+		}
+		entry[k] = float(s) + 64.0 * steps;
+#ifdef EXTERIOR
+		total -= weight[k] * (1.0 - steps / 15.0);   // this lamp's share, shadowed
+#endif
+	}
+#ifdef EXTERIOR
+	float m = p.mask.z > 1.5 ? 1.0 : p.mask.z > 0.5 ? 0.0 : clamp(total, 0.0, 1.0);
+	imageStore(maskImage, pixel, vec4(m));
+#endif
+	float depthCode = clamp(floor(log2(viewZ) * p.origin.w + 0.5), 1.0, 4095.0);
+	imageStore(resultImage, pixel, vec4(entry[0] + 1024.0 * entry[1], entry[2] + 1024.0 * depthCode, 0.0, 0.0));
+	storeSplit(pixel, entry[0], entry[1]);
+}

@@ -1,0 +1,23 @@
+// FSR 3.1 upscaler (AMD FidelityFX SDK 1.1.4, MIT; see LICENSE-FidelityFX-SDK.txt) pass for NVR DXVK: AMD's
+// ffx_fsr3upscaler_rcas_pass.glsl with NVR's callbacks header (fsr3upscaler/ffx_fsr3upscaler_callbacks_nvr.h). AMD's binding numbers are
+// kept; the ones NVR has no resource for (exposure, transparency mask) declare nothing there.
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+#define FSR3UPSCALER_BIND_SRV_INPUT_EXPOSURE                    0   // NVR: none (1)
+#define FSR3UPSCALER_BIND_SRV_RCAS_INPUT                        1
+#define FSR3UPSCALER_BIND_UAV_UPSCALED_OUTPUT                   2
+#define FSR3UPSCALER_BIND_CB_FSR3UPSCALER                       3
+#define FSR3UPSCALER_BIND_CB_RCAS                               4   // NVR: in the push block
+
+#include "fsr3upscaler/ffx_fsr3upscaler_callbacks_nvr.h"
+#include "fsr3upscaler/ffx_fsr3upscaler_common.h"
+#include "fsr3upscaler/ffx_fsr3upscaler_rcas.h"
+
+layout (local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+void main()
+{
+    RCAS(gl_LocalInvocationID.xyz, gl_WorkGroupID.xyz, gl_GlobalInvocationID.xyz);
+}

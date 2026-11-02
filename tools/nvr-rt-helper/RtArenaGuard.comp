@@ -1,0 +1,34 @@
+// UNOFFICIAL 2026-10-30 NvrRtHelper's arena guard (embedded in the helper as RtArenaGuard.h; rebuild that after a change:
+//   glslangValidator -V --target-env vulkan1.2 --vn kRtArenaGuardSpv -o RtArenaGuard.h RtArenaGuard.comp
+// Runs once per new geometry before its build, on the staging copy of the arena: a triangle list index at or past the geometry's
+// vertex count is set to 0 (an out-of-range index in a build is undefined: a GPU fault on some drivers), and when the frame's
+// sequence texel (fork 1.8-rt-seq) is not the frame's number, the arena holds an earlier flush's data: every index is set to 0
+// (degenerate triangles: nothing to hit, nothing read out of range). result[0] counts stale indices, result[1] out-of-range ones.
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words { uint w[]; };
+layout(push_constant) uniform Push {
+    uvec2 staging;     // the staging buffer's address
+    uvec2 result;      // 2 uints, host visible
+    uint first;        // the geometry's first index (words)
+    uint count;        // indices (3 x triangles)
+    uint vertices;
+    uint check;        // 1: the sequence texel is checked
+    uint seqTexel;
+    uint seq;
+} pc;
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    Words s = Words(pc.staging);
+    const bool stale = pc.check != 0u && s.w[pc.seqTexel] != pc.seq;
+    const uint v = s.w[pc.first + i];
+    if (stale || v >= pc.vertices) {
+        s.w[pc.first + i] = 0u;
+        Words r = Words(pc.result);
+        atomicAdd(r.w[stale ? 0 : 1], 1u);
+    }
+}

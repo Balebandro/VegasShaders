@@ -1,0 +1,524 @@
+From d36cc2dbcf8bcbf82ab99bf36214fc9304ab6c36 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 00:48:45 +0000
+Subject: [PATCH 3/3] NVR extension 1.2: pixel shader replacements
+
+RegisterShaderReplacement: a SPIR-V fragment shader bound in place of DXVK's
+conversion of a given D3D9 pixel shader (matched by bytecode hash in
+CreateShaderModule), with the game's textures, samplers, float constants and
+shared push data still flowing, plus NVR's own resources in set 4
+(SetReplacementResources). The original's analysis stays in use.
+---
+ src/d3d9/d3d9_device.cpp        |   7 +
+ src/d3d9/d3d9_nvr_ext.cpp       | 267 +++++++++++++++++++++++++++++++-
+ src/d3d9/d3d9_nvr_ext.h         |  39 +++++
+ src/d3d9/d3d9_nvr_ext_api.h     |  53 ++++++-
+ src/d3d9/d3d9_shader.h          |   6 +
+ src/d3d9/d3d9_shader_analysis.h |   5 +
+ 6 files changed, 375 insertions(+), 2 deletions(-)
+
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index a6ddb53..1b669e6 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -8018,6 +8018,13 @@ namespace dxvk {
+     // Initialize the actual shader
+     D3D9CommonShader commonShader = { };
+ 
++    // NVR extension: a registered SPIR-V replacement for this bytecode takes the place of the converted shader
++    if (Rc<DxvkShader> replacement = m_nvrExt.BuildReplacementShader(ShaderType, pShaderBytecode, bytecodeLength, analysis)) {
++      *pShaderModule   = D3D9CommonShader(std::move(analysis), std::move(replacement));
++      *pBytecodeLength = bytecodeLength;
++      return D3D_OK;
++    }
++
+     D3D9ShaderCreateInfo moduleInfo;
+     moduleInfo.irCreateInfo                   = {};
+     moduleInfo.irCreateInfo.options           = m_dxvkShaderOptions;
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 81657dd..1cbfbd7 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -3,6 +3,11 @@
+ #include "d3d9_common_texture.h"
+ #include "d3d9_surface.h"
+ #include "d3d9_texture.h"
++#include "d3d9_shader.h"
++#include "d3d9_shader_analysis.h"
++#include "d3d9_constant_copy.h"
++
++#include <util/util_md5.h>
+ 
+ #include "../dxvk/dxvk_context.h"
+ #include "../dxvk/dxvk_shader_spirv.h"
+@@ -596,13 +601,21 @@ namespace dxvk {
+ 
+     for (uint32_t i = 0; i < Count; i++) {
+       const auto& b = pBindings[i];
+-      const auto* decl = pPipeline->FindBinding(b.Slot, b.Type);
++
++      D3D9NvrExtBindingInfo plain;   // no pipeline (replacement resources): the binding's own type, read-only, 2D
++      plain.slot = b.Slot;
++      plain.type = b.Type;
++
++      const auto* decl = pPipeline ? pPipeline->FindBinding(b.Slot, b.Type) : &plain;
+ 
+       if (unlikely(decl == nullptr)) {
+         Logger::err(str::format("NVR ext: slot ", b.Slot, " (type ", uint32_t(b.Type), ") is not declared by the pipeline"));
+         return D3DERR_INVALIDCALL;
+       }
+ 
++      if (unlikely(!pPipeline && (b.Slot >= NVR_EXT_MAX_SLOTS || b.Type == NVR_EXT_BIND_STORAGE_IMAGE)))
++        return D3DERR_INVALIDCALL;
++
+       D3D9NvrExtBound res;
+       res.slot = b.Slot;
+       res.type = b.Type;
+@@ -905,6 +918,11 @@ namespace dxvk {
+         return D3DERR_INVALIDCALL;
+       }
+ 
++      if (unlikely(image->info().sampleCount != VK_SAMPLE_COUNT_1_BIT)) {
++        Logger::err(str::format("NVR ext: Draw: target ", i, " is multisampled; passes draw into single-sample targets only"));
++        return D3DERR_INVALIDCALL;
++      }
++
+       VkExtent3D mipExtent = image->mipLevelExtent(ref.mipLevel);
+ 
+       if (i == 0) {
+@@ -1042,6 +1060,253 @@ namespace dxvk {
+   }
+ 
+ 
++  ////////////////////////////////
++  // Shader replacements (1.2)
++  ///////////////////////////////
++
++  std::string D3D9NvrExt::HashBytecode(const void* pBytecode, size_t Length) {
++    auto hasher = dxbc_spv::util::md5::Hasher();
++    hasher.update(pBytecode, Length);
++    auto digest = hasher.finalize();
++
++    std::string result;
++    for (size_t i = 0; i < digest.data.size(); i++) {
++      static const char hex[] = "0123456789abcdef";
++      result.push_back(hex[digest.data[i] >> 4]);
++      result.push_back(hex[digest.data[i] & 0xF]);
++    }
++    return result;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::RegisterShaderReplacement(const NVR_EXT_SHADER_REPLACEMENT_DESC* pDesc) {
++    if (unlikely(pDesc == nullptr || pDesc->pBytecode == nullptr || pDesc->BytecodeSize < 8u
++              || pDesc->pSpirv == nullptr || pDesc->SpirvSize < 20u || (pDesc->SpirvSize & 3u)))
++      return D3DERR_INVALIDCALL;
++
++    const char* name = pDesc->pDebugName ? pDesc->pDebugName : "NVR replacement";
++
++    // The shader's own length (the game passes bytecode without a size; DXVK measures it the same way)
++    dxbc_spv::util::ByteReader reader(pDesc->pBytecode, pDesc->BytecodeSize);
++    D3D9ShaderAnalysis analysis(reader, false);
++
++    if (unlikely(!analysis || analysis.GetShaderInfo().getType() != dxbc_spv::sm3::ShaderType::ePixel)) {
++      Logger::err(str::format("NVR ext: ", name, ": the bytecode is not a usable D3D9 pixel shader"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (unlikely(pDesc->ExtraCount > NVR_EXT_MAX_BINDINGS || (pDesc->ExtraCount && pDesc->pExtra == nullptr)))
++      return D3DERR_INVALIDCALL;
++
++    Replacement r;
++    r.spirv.resize(pDesc->SpirvSize / 4u);
++    std::memcpy(r.spirv.data(), pDesc->pSpirv, pDesc->SpirvSize);
++    r.textureMask = pDesc->TextureMask & 0xFFFFu;
++    for (size_t i = 0; i < r.floatMask.size(); i++)
++      r.floatMask[i] = pDesc->FloatRegisterMask[i];
++    r.name = name;
++
++    uint32_t samplerCount = 0u;
++    for (uint32_t j = 0; j < pDesc->ExtraCount; j++) {
++      const auto& e = pDesc->pExtra[j];
++      if (unlikely(e.Slot >= NVR_EXT_MAX_SLOTS || e.Type == NVR_EXT_BIND_STORAGE_IMAGE
++                || (e.Type == NVR_EXT_BIND_STORAGE_BUFFER && e.Writes)
++                || (e.Type == NVR_EXT_BIND_SAMPLER && samplerCount++ >= 8u))) {
++        Logger::err(str::format("NVR ext: ", name, ": extra binding ", j, " is not allowed (slot range, storage image, written buffer or more than 8 samplers)"));
++        return D3DERR_INVALIDCALL;
++      }
++      D3D9NvrExtBindingInfo own;
++      own.slot = e.Slot;
++      own.type = e.Type;
++      own.viewType = e.ViewType;
++      own.writes = false;
++      r.extras.push_back(own);
++      r.extraBindings.push_back(std::make_pair(e.Binding, j));
++    }
++
++    uint32_t originalSamplers = analysis.GetSamplerMask();
++    if (unlikely(r.textureMask & ~originalSamplers)) {
++      Logger::err(str::format("NVR ext: ", name, ": TextureMask ", r.textureMask, " uses samplers the original shader does not (its mask ", originalSamplers, ")"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    std::string key = HashBytecode(pDesc->pBytecode, analysis.GetLength());
++
++    std::lock_guard lock(m_replacementMutex);
++    m_replacements[key] = std::move(r);
++    Logger::info(str::format("NVR ext: pixel shader replacement '", name, "' registered for ", key, " (", analysis.GetLength(), " bytes of bytecode)"));
++    return D3D_OK;
++  }
++
++
++  Rc<DxvkShader> D3D9NvrExt::BuildReplacementShader(
++          D3D9ShaderType                  ShaderType,
++    const void*                           pBytecode,
++          size_t                          BytecodeLength,
++          D3D9ShaderAnalysis&             Analysis) {
++    if (ShaderType != D3D9ShaderType::PixelShader)
++      return nullptr;
++
++    Replacement r;
++
++    { std::lock_guard lock(m_replacementMutex);
++      if (m_replacements.empty())
++        return nullptr;
++
++      auto entry = m_replacements.find(HashBytecode(pBytecode, BytecodeLength));
++      if (entry == m_replacements.end())
++        return nullptr;
++
++      r = entry->second;
++    }
++
++    small_vector<DxvkBindingInfo, 32> bindings;
++
++    // D3D9 textures and their samplers, exactly where the device binds them
++    for (uint32_t i = 0; i < 16u; i++) {
++      if (!(r.textureMask & (1u << i)))
++        continue;
++
++      uint32_t index = D3D9ShaderResourceMapping::computeTextureBinding(D3D9ShaderType::PixelShader, i);
++
++      DxvkBindingInfo tex = { };
++      tex.set = 1u;
++      tex.binding = i;
++      tex.resourceIndex = index;
++      tex.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++      tex.descriptorCount = 1u;
++      tex.viewType = Analysis.GetImageViewType(i);
++      if (tex.viewType == VK_IMAGE_VIEW_TYPE_MAX_ENUM)
++        tex.viewType = VK_IMAGE_VIEW_TYPE_2D;
++      tex.access = VK_ACCESS_SHADER_READ_BIT;
++      bindings.push_back(tex);
++
++      DxvkBindingInfo smp = { };
++      smp.resourceIndex = index;
++      smp.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
++      smp.descriptorCount = 1u;
++      smp.blockOffset = MaxSharedPushDataSize + sizeof(uint16_t) * i;
++      smp.flags.set(DxvkDescriptorFlag::PushData);
++      bindings.push_back(smp);
++    }
++
++    // The stage's float (and int) constants
++    DxvkBindingInfo cbv = { };
++    cbv.set = 2u;
++    cbv.binding = D3D9ShaderResourceMapping::CbvIndex::PSStaticConstants;
++    cbv.resourceIndex = D3D9ShaderResourceMapping::CbvIndex::PSStaticConstants;
++    cbv.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
++    cbv.descriptorCount = 1u;
++    cbv.access = VK_ACCESS_UNIFORM_READ_BIT;
++    cbv.flags.set(DxvkDescriptorFlag::UniformBuffer);
++    bindings.push_back(cbv);
++
++    // NVR's own resources (extension slots), and their samplers after the D3D9 ones in push data
++    uint32_t extraSampler = 0u;
++    for (size_t k = 0; k < r.extras.size(); k++) {
++      const auto& e = r.extras[k];
++      uint32_t binding = r.extraBindings[k].first;
++
++      DxvkBindingInfo info = { };
++      info.set = 4u;
++      info.binding = binding;
++      info.descriptorCount = 1u;
++
++      switch (e.type) {
++        case NVR_EXT_BIND_SAMPLED_IMAGE:
++          info.resourceIndex = NvrExtImageSlotBase + e.slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++          info.viewType = DecodeNvrViewType(e.viewType);
++          info.access = VK_ACCESS_SHADER_READ_BIT;
++          break;
++        case NVR_EXT_BIND_UNIFORM_BUFFER:
++          info.resourceIndex = NvrExtBufferSlotBase + e.slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
++          info.access = VK_ACCESS_UNIFORM_READ_BIT;
++          info.flags.set(DxvkDescriptorFlag::UniformBuffer);
++          break;
++        case NVR_EXT_BIND_STORAGE_BUFFER:
++          info.resourceIndex = NvrExtBufferSlotBase + e.slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++          info.access = VK_ACCESS_SHADER_READ_BIT;
++          info.flags.set(DxvkDescriptorFlag::UniformBuffer);
++          break;
++        case NVR_EXT_BIND_SAMPLER:
++          info.resourceIndex = NvrExtSamplerSlotBase + e.slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
++          info.blockOffset = MaxSharedPushDataSize + 32u + sizeof(uint16_t) * (extraSampler++);
++          info.flags.set(DxvkDescriptorFlag::PushData);
++          break;
++        default:
++          break;
++      }
++
++      bindings.push_back(info);
++    }
++
++    // Another set of float constants than the original's: a layout the device uploads instead
++    bool customFloats = false;
++    for (uint32_t m : r.floatMask)
++      customFloats |= m != 0u;
++
++    if (customFloats) {
++      const auto* original = Analysis.GetConstantLayout();
++      D3D9ConstantBufferLayout floats(uint32_t(r.floatMask.size()), r.floatMask.data());
++      Analysis.SetConstantLayout(D3D9ConstantBufferCopy::getOrCreate(floats,
++        original->getLayout(D3D9ConstantType::Int), original->getLayout(D3D9ConstantType::Bool)));
++    }
++
++    DxvkSpirvShaderCreateInfo info;
++    info.bindingCount = bindings.size();
++    info.bindings = bindings.data();
++    info.flatShadingInputs = Analysis.GetFlatShadingMask();
++    info.sharedPushData = DxvkPushDataBlock(0u, sizeof(D3D9SharedPushData), 4u, 0u);
++    // 16 D3D9 sampler indices (8 dwords) then up to 8 extra ones (4 dwords), all resource data
++    info.localPushData = DxvkPushDataBlock(VK_SHADER_STAGE_FRAGMENT_BIT, MaxSharedPushDataSize, 48u, 4u, 0xFFFu);
++    info.samplerHeap = DxvkShaderBinding(VK_SHADER_STAGE_FRAGMENT_BIT, 0u, 0u);
++    info.specDataBuffer = DxvkShaderBinding(VK_SHADER_STAGE_FRAGMENT_BIT, 3u, 0u);
++    info.debugName = r.name;
++
++    try {
++      Rc<DxvkShader> shader = new DxvkSpirvShader(info, SpirvCodeBuffer(uint32_t(r.spirv.size()), r.spirv.data()));
++
++      if (shader->metadata().stage != VK_SHADER_STAGE_FRAGMENT_BIT) {
++        Logger::err(str::format("NVR ext: ", r.name, ": the replacement SPIR-V is not a fragment shader; the original is used"));
++        return nullptr;
++      }
++
++      m_device->GetDXVKDevice()->registerShader(shader);
++      Logger::info(str::format("NVR ext: pixel shader replaced by '", r.name, "'"));
++      return shader;
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext: ", r.name, ": ", e.message(), "; the original is used"));
++      return nullptr;
++    }
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::SetReplacementResources(
++          UINT                            Count,
++    const NVR_EXT_RESOURCE_BINDING*       pBindings) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    small_vector<D3D9NvrExtBound, 8> bound;
++
++    HRESULT hr = ResolveBindings(nullptr, Count, pBindings, bound);
++
++    if (FAILED(hr))
++      return hr;
++
++    m_device->EmitCs([
++      cBound = std::move(bound)
++    ] (DxvkContext* ctx) {
++      NvrBindResources(ctx, VK_SHADER_STAGE_FRAGMENT_BIT, cBound);
++    });
++
++    return D3D_OK;
++  }
++
++
+   HRESULT STDMETHODCALLTYPE D3D9NvrExt::UpdateBuffer(
+           ID3D9NvrExtBuffer*              pBuffer,
+           UINT                            Offset,
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index ed39ff9..4aeec6e 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -18,10 +18,16 @@
+ 
+ #include "../util/util_small_vector.h"
+ 
++#include <array>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
+ namespace dxvk {
+ 
+   class D3D9DeviceEx;
+   class D3D9CommonTexture;
++  class D3D9ShaderAnalysis;
+ 
+   /** Binding slot bases, chosen above everything the D3D9 side uses. */
+   constexpr uint32_t NvrExtImageSlotBase      = 64u;  // DxvkContext m_resources (image views)
+@@ -149,6 +155,25 @@ namespace dxvk {
+     HRESULT STDMETHODCALLTYPE Draw(
+       const NVR_EXT_DRAW_DESC*              pDesc);
+ 
++    HRESULT STDMETHODCALLTYPE RegisterShaderReplacement(
++      const NVR_EXT_SHADER_REPLACEMENT_DESC* pDesc);
++
++    HRESULT STDMETHODCALLTYPE SetReplacementResources(
++            UINT                            Count,
++      const NVR_EXT_RESOURCE_BINDING*       pBindings);
++
++    /**
++     * \brief Builds the registered replacement for a D3D9 shader, if any
++     *
++     * Called by the device's CreateShaderModule. Returns \c nullptr when no replacement
++     * is registered for this bytecode. May change the analysis' constant layout.
++     */
++    Rc<DxvkShader> BuildReplacementShader(
++            D3D9ShaderType                  ShaderType,
++      const void*                           pBytecode,
++            size_t                          BytecodeLength,
++            D3D9ShaderAnalysis&             Analysis);
++
+     HRESULT STDMETHODCALLTYPE CreateBuffer(
+       const NVR_EXT_BUFFER_DESC*            pDesc,
+             ID3D9NvrExtBuffer**             ppBuffer);
+@@ -231,6 +256,20 @@ namespace dxvk {
+             small_vector<D3D9NvrExtBindingInfo, 8>& OwnBindings,
+             uint64_t&                       PushResourceMask);
+ 
++    struct Replacement {
++      std::vector<uint32_t>                   spirv;
++      uint32_t                                textureMask = 0u;
++      std::array<uint32_t, 7>                 floatMask = { };
++      small_vector<D3D9NvrExtBindingInfo, 8>  extras;
++      small_vector<std::pair<uint32_t, uint32_t>, 8> extraBindings;  // (binding j, index into extras)
++      std::string                             name;
++    };
++
++    static std::string HashBytecode(const void* pBytecode, size_t Length);
++
++    dxvk::mutex                                   m_replacementMutex;
++    std::unordered_map<std::string, Replacement>  m_replacements;
++
+     D3D9DeviceEx* m_device;
+ 
+   };
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 9dfbf92..9543050 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -45,7 +45,7 @@
+ #include <unknwn.h>
+ 
+ #define NVR_EXT_VERSION_MAJOR 1
+-#define NVR_EXT_VERSION_MINOR 1
++#define NVR_EXT_VERSION_MINOR 2
+ 
+ #define NVR_EXT_MAX_SLOTS       32
+ #define NVR_EXT_MAX_BINDINGS    32
+@@ -195,6 +195,45 @@ struct NVR_EXT_DRAW_DESC {
+   UINT                            PushDataSize;
+ };
+ 
++/**
++ * A SPIR-V replacement for one of the game's (or NVR's own) D3D9 pixel shaders (since 1.2).
++ *
++ * Registered before the D3D9 shader object is created (NVR: right before its CreatePixelShader
++ * for that shader). When any CreatePixelShader call later presents the same bytecode, DXVK builds
++ * the shader from this SPIR-V instead of converting the bytecode; everything the game sets for the
++ * shader (constants, textures, sampler states, render states) keeps flowing. The original
++ * bytecode's analysis (which samplers and render targets it uses) stays in force, so the
++ * replacement must not read D3D9 samplers the original did not use.
++ *
++ * GLSL contract (fragment shader, compiled with glslangValidator -V --target-env vulkan1.1):
++ *   layout(set = 0, binding = 0) uniform sampler s_samplers[];           // DXVK's sampler heap
++ *   layout(set = 1, binding = i) uniform texture2D t_i;                   // D3D9 sampler s_i (the original's type: 2D / cube / 3D)
++ *   layout(set = 2, binding = 6, std140) uniform Consts { vec4 c[N]; };   // the float constants, ascending register order
++ *                                                                        // (N = bits set in FloatRegisterMask, or the original's set)
++ *   layout(set = 3, binding = 0, scalar) uniform SpecConsts { ... };      // D3D9's spec data (alpha test, fog, sampler types; see the
++ *                                                                        // fork's d3d9_fixed_function_common.glsl); optional
++ *   layout(set = 4, binding = j) ...;                                     // NVR's own resources (pExtra[j]), bound with SetReplacementResources
++ *   layout(push_constant) uniform Push {
++ *     uint packedFogColorAndAlphaRef; float fogDistanceScale; float fogDistanceEnd; float fogDensity;   // D3D9's shared data, offset 0
++ *     layout(offset = 32) uint d3d9SamplerIndices[8];   // heap index of D3D9 sampler i: bits 16*(i&1).. of [i/2]
++ *     uint extraSamplerIndices[4];                       // heap index of extra sampler k (pExtra entries of type sampler), same packing
++ *   };
++ *   Inputs by D3D9 semantic: location 0 NORMAL0, 1..8 TEXCOORD0..7, 9 COLOR0, 10 COLOR1, 11 FOG; outputs location 0..3 = oC0..oC3.
++ *   The alpha test and fixed-function fog that DXVK adds to a D3D9 pixel shader are NOT added here: a
++ *   replacement that needs them does them itself from the spec data and the shared push data.
++ */
++struct NVR_EXT_SHADER_REPLACEMENT_DESC {
++  const void*                 pBytecode;            // the D3D9 pixel shader bytecode this replaces
++  UINT                        BytecodeSize;         // bytes (may be larger than the shader; the shader's own length is used)
++  const void*                 pSpirv;
++  UINT                        SpirvSize;
++  UINT                        TextureMask;          // D3D9 samplers s0..s15 the replacement declares (set 1, binding i)
++  UINT                        FloatRegisterMask[7]; // c0..c223 the replacement reads; all zero = the original's own set
++  UINT                        ExtraCount;           // NVR's own resources: set 4, binding j; Slot in the extension's slot space
++  const NVR_EXT_BINDING_DESC* pExtra;               // (sampled image, uniform buffer, read-only storage buffer, sampler; PushOffset ignored)
++  const char*                 pDebugName;
++};
++
+ struct NVR_EXT_INFO {
+   UINT  ExtVersionMajor;
+   UINT  ExtVersionMinor;
+@@ -255,6 +294,18 @@ ID3D9NvrExt : public IUnknown {
+   virtual HRESULT STDMETHODCALLTYPE Draw(
+     const NVR_EXT_DRAW_DESC*              pDesc) = 0;
+ 
++  /** Registers a pixel shader replacement (since 1.2). D3DERR_INVALIDCALL when the bytecode or description is unusable. */
++  virtual HRESULT STDMETHODCALLTYPE RegisterShaderReplacement(
++    const NVR_EXT_SHADER_REPLACEMENT_DESC* pDesc) = 0;
++
++  /**
++   * Binds NVR's own resources for the replacements' extra slots (since 1.2): sampled images, buffers and
++   * samplers by Slot, as every replacement's pExtra names them. They stay bound until set again.
++   */
++  virtual HRESULT STDMETHODCALLTYPE SetReplacementResources(
++          UINT                            Count,
++    const NVR_EXT_RESOURCE_BINDING*       pBindings) = 0;
++
+   /** Creates a device-local buffer. Contents are undefined until written. */
+   virtual HRESULT STDMETHODCALLTYPE CreateBuffer(
+     const NVR_EXT_BUFFER_DESC*            pDesc,
+diff --git a/src/d3d9/d3d9_shader.h b/src/d3d9/d3d9_shader.h
+index 8428df1..4050e8e 100644
+--- a/src/d3d9/d3d9_shader.h
++++ b/src/d3d9/d3d9_shader.h
+@@ -98,6 +98,12 @@ namespace dxvk {
+       const D3D9ShaderCreateInfo& ModuleInfo,
+       const void*                 pShaderBytecode);
+ 
++    /** NVR extension: a shader built elsewhere (a SPIR-V replacement) with the original's analysis */
++    D3D9CommonShader(
++            D3D9ShaderAnalysis&&  Analysis,
++            Rc<DxvkShader>&&      Shader)
++    : m_analysis(std::move(Analysis)), m_shader(std::move(Shader)) { }
++
+ 
+     Rc<DxvkShader> GetShader() const {
+       return m_shader;
+diff --git a/src/d3d9/d3d9_shader_analysis.h b/src/d3d9/d3d9_shader_analysis.h
+index 12d3e7d..4f7b7f1 100644
+--- a/src/d3d9/d3d9_shader_analysis.h
++++ b/src/d3d9/d3d9_shader_analysis.h
+@@ -203,6 +203,11 @@ public:
+     return m_constLayout;
+   }
+ 
++  /** NVR extension: a replacement shader reading another set of constants */
++  void SetConstantLayout(const D3D9ConstantBufferCopy* layout) {
++    m_constLayout = layout;
++  }
++
+   D3D9SamplerMask GetSamplerMask() const {
+     return m_usedSamplers;
+   }
+-- 
+2.43.0
+

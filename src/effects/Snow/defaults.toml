@@ -1,0 +1,8 @@
+[_Shaders.Snow.Main]
+Flakes = 0.5
+Speed = 1.4                         # Speed multiplier for snow falling
+ForceSnow = false                   # UNOFFICIAL (2026-10-19): the mod's snow acts as if it is snowing outdoors in any weather (falling snow, snow cover building up), to try the snow effects without a snow weather mod. Snow and Snow accumulation must be on
+
+[_Shaders.Snow.Status]
+Enabled = false                     # Snow precipitation shader.
+

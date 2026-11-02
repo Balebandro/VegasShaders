@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Mon, 26 Oct 2026 05:30:00 -0400
+Subject: [PATCH] NVR: RESZ depth resolve on every GPU vendor
+
+DXVK offers AMD's RESZ depth-resolve hack (the format check and the
+D3DRS_POINTSIZE trigger) only when the adapter reports AMD. The resolve
+itself is DXVK's own image copy (D3D9DeviceEx::ResolveZ), so it works on
+any GPU. NVR reads the game's depth through RESZ; on NVIDIA it fell back
+to NVAPI, which cannot reach a DXVK device, so every depth-based NVR
+effect saw an empty depth buffer under DXVK on NVIDIA (found 2026-10-26
+with BloodFluid on a GTX 1070; the same picture as d3d9.customVendorId =
+1002, which makes DXVK report AMD). Applications that never ask for RESZ
+are unaffected.
+---
+ src/d3d9/d3d9_adapter.cpp | 6 +++---
+ src/d3d9/d3d9_device.cpp  | 2 +-
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/d3d9/d3d9_adapter.cpp b/src/d3d9/d3d9_adapter.cpp
+--- a/src/d3d9/d3d9_adapter.cpp
++++ b/src/d3d9/d3d9_adapter.cpp
+@@ -162,10 +162,10 @@
+     // AMD/Intel's driver hack for RESZ
+     // (also advertised in D3D8 by AMD drivers,
+     // not advertised at all by modern Intel drivers)
++    // NVR: offered on every vendor (the resolve is DXVK's own copy, see D3D9DeviceEx::ResolveZ), so a D3D9 app that
++    // reads depth through RESZ gets it on NVIDIA as well, where it has no other way under DXVK (NVAPI cannot reach DXVK).
+     if (unlikely(rt && CheckFormat == D3D9Format::RESZ && surface))
+-      return isAmd
+-        ? D3D_OK
+-        : D3DERR_NOTAVAILABLE;
++      return D3D_OK;
+
+     // Nvidia/Intel's driver hack for ATOC
+     if (unlikely(CheckFormat == D3D9Format::ATOC && surface))
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -2510,7 +2510,7 @@
+             // in D3D8 - once supported by Intel as well,
+             // however modern drivers do not expose it)
+             constexpr uint32_t RESZ = 0x7fa05000;
+-            if (unlikely(Value == RESZ && vendorId == amdVendorId)) {
++            if (unlikely(Value == RESZ)) {   // NVR: every vendor (d3d9_adapter.cpp offers RESZ to all)
+               ResolveZ();
+               break;
+             }
+--
+2.43.0
+

@@ -1,0 +1,95 @@
+// Grass PS -- vanilla GRASS23x000TMS.pso plus forward sun shadow.
+// Shared by GRASS23x002.vso (LFS) and GRASS23x003.vso (LVS).
+// The VS hands the lighting over already split, so only the sun is shadowed:
+//   TEXCOORD4.xyz ambient    TEXCOORD5.xyz sun    TEXCOORD5.w fade    COLOR0 fog (.w amount)
+
+#include "includes/Shadow.hlsl"
+#include "includes/PBRScale.hlsl"
+
+uniform sampler2D DiffuseMap : register(s0);
+// UNOFFICIAL 2026-10-27 [Shaders.Grass.Main] w: +1 ShadowFix (the sun shadow lookup takes the world up normal, see main),
+// +2 SkyLightScale (the sky light takes the tuft's light scale, as the game's ambient does).
+float4 TESR_GrassScale;
+#ifdef GRASS_ALPHA_TEST
+// UNOFFICIAL 2026-10-27 (user: no sun shadow on grass with the game's MSAA off, needed for FSR's RenderScale): GRASS23x000/001/003.pso,
+// the game's grass PS without transparency multisampling, include this file too. The game's own differs from its TMS twin only in
+// the alpha: a hard cut against AlphaTestRef (c3) for the alpha test instead of the coverage ramp (alpha x 1.75).
+uniform float4 AlphaTestRef : register(c3);
+#endif
+#ifdef GRASS_POINT_LIGHT
+// UNOFFICIAL 2026-10-27 PointLights (GRASS23x001TMS/003TMS.pso include this file): the game's 1POINT grass PS adds one lamp,
+// 0.4 * PointLightColor * (1 - AttMap(xy) - AttMap(z)) on top of sun + ambient. Same registers as the game's.
+uniform float4 PointLightColor : register(c2);
+uniform sampler2D AttMap : register(s1);
+#endif
+
+struct PixVaryings {
+    float2 f_uv             : TEXCOORD0;
+    float4 f_shadow_world_pos : TEXCOORD1;
+    float3 f_ambient        : TEXCOORD4_centroid;
+    float4 f_sun            : TEXCOORD5_centroid;   // .w = distance fade
+    float4 f_fog            : COLOR0;               // .w = fog amount
+#ifdef GRASS_POINT_LIGHT
+    float4 f_att            : TEXCOORD2;   // NVR's 1POINT VS; the game's writes it in TEXCOORD1 (see main)
+#endif
+    float2 f_amount         : TEXCOORD6_centroid;   // UNOFFICIAL: x ambient amount, y sun amount (plain numbers: not decoded)
+};
+
+struct PixResult {
+    float4 f_color : COLOR0;
+};
+
+PixResult main(PixVaryings pa, float2 vpos_s : VPOS) {
+    PixResult pr;
+
+    float sun_amount = pa.f_amount.y;
+
+    // Outside the guard: the skylight needs this normal whether or not forward shadows
+    // are compiled in, and ForwardShadows is a live setting that can switch them off.
+    float3 shadow_normal = GetShadowGeometricNormal(pa.f_shadow_world_pos.xyz);
+#if FORWARD_SHADOWS
+    // UNOFFICIAL 2026-10-27 ShadowFix (tester: zebra stripes on each tuft, shaded as if the sun came from the other side): the
+    // derivative normal is turned to face the CAMERA, and a grass card is two-sided, so seen with the sun behind it the normal
+    // points away from the sun and the normal offset pushes the lookup into the tuft's own shadow (mirrored), and the per-triangle
+    // derivatives of thin, swaying blades flip from blade to blade (stripes). Grass has no surface of its own to bias from: take the
+    // ground's up normal, the same for the whole tuft, as the ground it stands on. Off: as before.
+    float3 lookup_normal = fmod(TESR_GrassScale.w, 2.0f) > 0.5f ? float3(0.0f, 0.0f, 1.0f) : shadow_normal;
+    // ddx/ddy must stay at top level, outside dynamic flow control.
+    sun_amount *= SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w)
+         ? GetSunShadow(pa.f_shadow_world_pos.xyz, lookup_normal)
+         : 1.0f;
+#endif
+
+    // Same split getSunLighting/getAmbientLighting apply on the object path.
+    // UNOFFICIAL linear lighting (2026-10-14): only the colours are decoded; the amounts multiply after (see the VS).
+    // UNOFFICIAL 2026-10-27 SkyLightScale (tester: grass in shadow a little too bright): the game darkens each tuft's ambient by its
+    // own light scale (0.25-1, IN.f_amount.x, packed per tuft), but the sky light NVR adds took the full amount. In shadow the sky is
+    // most of what is left, so shaded tufts came out brighter than the game's own balance. Off: the full sky light, as before.
+    float sky_scale = TESR_GrassScale.w > 1.5f ? pa.f_amount.x : 1.0f;
+    float3 light_term = PBRLight(pa.f_sun.xyz) * sun_amount + PBRAmbient(pa.f_ambient.xyz) * pa.f_amount.x + SkyAmbient(shadow_normal, SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w) ? sky_scale : 0.0f);
+
+#ifdef GRASS_POINT_LIGHT
+    // The game's own 1POINT VS (a fallback) hands the coordinates over in TEXCOORD1, with w 0.5, not the shadow sentinel.
+    float4 falloff = SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w) ? pa.f_att : pa.f_shadow_world_pos;
+    float lamp_att = saturate(1.0f - tex2D(AttMap, falloff.xy).x - tex2D(AttMap, falloff.zw).x);
+    light_term += PBRLight(0.4f * PointLightColor.rgb) * lamp_att;
+#endif
+    float4 base_rgb = tex2D(DiffuseMap, pa.f_uv.xy);
+    float3 lit_color = LinEncode(light_term * LinColor(base_rgb.rgb));	// UNOFFICIAL linear lighting: decoded albedo, encoded result (PBRScale.hlsl decodes the light)
+
+    pr.f_color.rgb = lerp(lit_color, pa.f_fog.rgb, pa.f_fog.w);
+    // UNOFFICIAL grass fade: the game fades grass by scaling its alpha with distance (TEXCOORD5.w from the VS,
+    // fGrassStartFadeDistance / fGrassFadeRange), but grass is alpha-TESTED, so a tuft keeps its full cut-out until
+    // the scaled alpha crosses the test threshold and then vanishes in one step: the pop at the fade distance.
+    // Dissolve with a screen-space dither instead: the share of pixels that survive follows the fade, so a tuft
+    // thins out across the whole fade range. The cut-out alpha itself is unchanged.
+    float dither_v = frac(52.9829189f * frac(dot(vpos_s, float2(0.06711056f, 0.00583715f))));
+    clip(pa.f_sun.w - dither_v);
+#ifdef GRASS_ALPHA_TEST
+    pr.f_color.a = base_rgb.a > AlphaTestRef.x ? 1.0f : 0.0f;	// the game's cut (its fade is the dither above, as in the TMS build)
+#else
+    pr.f_color.a = saturate(base_rgb.a * 1.75f);
+#endif
+
+    return pr;
+};

@@ -1,0 +1,902 @@
+From d6d2982358c9eade9036735edee43061097fc733 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:27:33 -0400
+Subject: [PATCH 1/2] NVR extension rtlamp: cube-gradient samples in pixel
+ shaders become ray queries against the RT core's TLAS
+
+ID3D9NvrExtRtLamp switches the hook; src/dxvk/dxvk_nvr_rtpatch.* rewrites a lowered fragment shader's
+SPIR-V (every OpImageSampleExplicitLod with Grad on a cube image -> one opaque ray query, TLAS address baked
+via OpConvertUToAccelerationStructureKHR). The TLAS owner calls nvrRtSetTlas(address, cameraRelative).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/d3d9/d3d9_device.cpp      |   6 +
+ src/d3d9/d3d9_device.h        |   2 +
+ src/d3d9/d3d9_nvr_ext_api.h   |  33 +++
+ src/d3d9/d3d9_nvr_rtlamp.cpp  |  67 ++++++
+ src/d3d9/d3d9_nvr_rtlamp.h    |  46 ++++
+ src/d3d9/meson.build          |   1 +
+ src/dxvk/dxvk_nvr_rtpatch.cpp | 399 ++++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_nvr_rtpatch.h   |  56 +++++
+ src/dxvk/dxvk_shader_ir.cpp   |   9 +-
+ src/dxvk/meson.build          |   1 +
+ 10 files changed, 619 insertions(+), 1 deletion(-)
+ create mode 100644 src/d3d9/d3d9_nvr_rtlamp.cpp
+ create mode 100644 src/d3d9/d3d9_nvr_rtlamp.h
+ create mode 100644 src/dxvk/dxvk_nvr_rtpatch.cpp
+ create mode 100644 src/dxvk/dxvk_nvr_rtpatch.h
+
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 00ec689..1287b83 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -63,6 +63,7 @@ namespace dxvk {
+     , m_nvrExt             ( this )
+     , m_nvrExtHdr          ( this )
+     , m_nvrTess            ( this )
++    , m_nvrRtLamp          ( this )
+     , m_d3d9On12Args       ( pAdapter->Get9On12Args() )
+     , m_d3d9On12           ( this )
+     , m_d3d8Bridge         ( this ) {
+@@ -217,6 +218,11 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    if (riid == __uuidof(ID3D9NvrExtRtLamp)) {
++      *ppvObject = ref(&m_nvrRtLamp);
++      return S_OK;
++    }
++
+     if (riid == __uuidof(IDirect3DDevice9On12)) {
+       if (m_d3d9On12Args.Enable9On12) {
+         *ppvObject = ref(&m_d3d9On12);
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index ebdf55e..4ffcc20 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -24,6 +24,7 @@
+ #include "d3d9_nvr_ext.h"
+ #include "d3d9_nvr_hdr.h"
+ #include "d3d9_nvr_tess.h"
++#include "d3d9_nvr_rtlamp.h"
+ #include "d3d9_on_12.h"
+ 
+ #include <cstdint>
+@@ -1704,6 +1705,7 @@ namespace dxvk {
+     D3D9NvrExt                      m_nvrExt;
+     D3D9NvrExtHdr                   m_nvrExtHdr;
+     D3D9NvrTess                     m_nvrTess;          // NVR extension 1.7-displace (fork patch 0021)
++    D3D9NvrRtLamp                   m_nvrRtLamp;        // NVR extension rtlamp (fork patch nvr-rtlamp)
+     D3D9ON12_ARGS                   m_d3d9On12Args = { };
+     D3D9On12                        m_d3d9On12;
+     DxvkD3D8Bridge                  m_d3d8Bridge;
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 40f1844..863558e 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -966,3 +966,36 @@ __CRT_UUID_DECL(ID3D9NvrExtShare,       0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,
+ __CRT_UUID_DECL(ID3D9NvrExtSharedImage, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x27);
+ __CRT_UUID_DECL(ID3D9NvrExtSharedFence, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x28);
+ #endif
++
++/**
++ * UNOFFICIAL 2026-10-28 "rtlamp" (fork patch nvr-rtlamp; docs/next/FORK-RT-LAMPS.md): ray queries inside D3D9 pixel shaders, for the
++ * RT lamp shadows. With the hook on, every pixel shader created afterwards has each texCUBEgrad (texldd on a cube sampler; no game
++ * or NVR shader samples a cube with gradients otherwise) replaced by one opaque ray query against the fork's TLAS:
++ *   coordinate.xyz = origin (TLAS space), ddx.xyz = the ray (t 0..1 along it, unnormalised), ddy = (tMin, tMax, cull mask)
++ *   result = 1 in every component when nothing is hit, 0 when something is.
++ * QueryInterface(__uuidof(ID3D9NvrExtRtLamp)); a d3d9.dll without it answers E_NOINTERFACE.
++ */
++#define NVR_EXT_RTLAMP_USABLE                0x1u   /* the device has ray queries and the TLAS exists: the hook can be enabled */
++#define NVR_EXT_RTLAMP_TLAS_CAMERA_RELATIVE  0x2u   /* the TLAS is in camera-relative world space (else absolute world space) */
++#define NVR_EXT_RTLAMP_HOOK_ON               0x4u   /* EnableCubeGradRayQueries(TRUE) took */
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d340")
++ID3D9NvrExtRtLamp : public IUnknown {
++  /** NVR_EXT_RTLAMP_* flags. */
++  virtual HRESULT STDMETHODCALLTYPE GetRayQueryInfo(
++          UINT*                           pFlags) = 0;
++
++  /** On: pixel shaders created from now on get the replacement (before NVR loads its shaders). D3DERR_NOTAVAILABLE without
++      NVR_EXT_RTLAMP_USABLE. Off: later shaders are converted as by stock DXVK. */
++  virtual HRESULT STDMETHODCALLTYPE EnableCubeGradRayQueries(
++          BOOL                            Enable) = 0;
++
++  /** Cumulative: pixel shaders patched, ray queries put in (one per marked sample). */
++  virtual HRESULT STDMETHODCALLTYPE GetRayQueryStats(
++          UINT*                           pShaders,
++          UINT*                           pSamples) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtRtLamp,      0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x40);
++#endif
+diff --git a/src/d3d9/d3d9_nvr_rtlamp.cpp b/src/d3d9/d3d9_nvr_rtlamp.cpp
+new file mode 100644
+index 0000000..7d955f0
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_rtlamp.cpp
+@@ -0,0 +1,67 @@
++#include "d3d9_nvr_rtlamp.h"
++#include "d3d9_device.h"
++
++#include "../dxvk/dxvk_nvr_rtpatch.h"
++
++namespace dxvk {
++
++  D3D9NvrRtLamp::D3D9NvrRtLamp(D3D9DeviceEx* pDevice)
++  : m_device(pDevice) { }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrRtLamp::AddRef() {
++    return m_device->AddRef();
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrRtLamp::Release() {
++    return m_device->Release();
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRtLamp::QueryInterface(REFIID riid, void** ppvObject) {
++    return m_device->QueryInterface(riid, ppvObject);
++  }
++
++
++  bool D3D9NvrRtLamp::Usable() const {
++    // The RT core sets a TLAS address only on a device it enabled ray queries and acceleration structures on
++    return nvrRtTlasAddress() != 0u;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRtLamp::GetRayQueryInfo(UINT* pFlags) {
++    if (unlikely(pFlags == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    UINT flags = 0u;
++    if (Usable())                  flags |= NVR_EXT_RTLAMP_USABLE;
++    if (nvrRtTlasCameraRelative()) flags |= NVR_EXT_RTLAMP_TLAS_CAMERA_RELATIVE;
++    if (nvrRtHookEnabled())        flags |= NVR_EXT_RTLAMP_HOOK_ON;
++    *pFlags = flags;
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRtLamp::EnableCubeGradRayQueries(BOOL Enable) {
++    if (Enable && !Usable()) {
++      Logger::warn("NVR ext: rtlamp: ray queries requested but the device has none or no TLAS exists; the hook stays off");
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    nvrRtSetHook(Enable != FALSE);
++    Logger::info(str::format("NVR ext: rtlamp: cube-gradient ray queries ", Enable ? "on" : "off",
++      " for pixel shaders lowered from now on"));
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRtLamp::GetRayQueryStats(UINT* pShaders, UINT* pSamples) {
++    uint32_t shaders = 0u, samples = 0u;
++    nvrRtGetStats(&shaders, &samples);
++    if (pShaders) *pShaders = shaders;
++    if (pSamples) *pSamples = samples;
++    return D3D_OK;
++  }
++
++}
+diff --git a/src/d3d9/d3d9_nvr_rtlamp.h b/src/d3d9/d3d9_nvr_rtlamp.h
+new file mode 100644
+index 0000000..6c7e370
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_rtlamp.h
+@@ -0,0 +1,46 @@
++#pragma once
++
++/*
++ * NVR extension "rtlamp" (fork patch nvr-rtlamp): ID3D9NvrExtRtLamp, the switch for the ray queries that replace NVR's
++ * marked cube-gradient samples (src/dxvk/dxvk_nvr_rtpatch.h). The TLAS itself belongs to the RT core, which hands its
++ * address to nvrRtSetTlas.
++ */
++
++#include "d3d9_nvr_ext_api.h"
++#include "d3d9_include.h"
++
++namespace dxvk {
++
++  class D3D9DeviceEx;
++
++  class D3D9NvrRtLamp final : public ID3D9NvrExtRtLamp {
++
++  public:
++
++    explicit D3D9NvrRtLamp(D3D9DeviceEx* pDevice);
++
++    ULONG STDMETHODCALLTYPE AddRef();
++
++    ULONG STDMETHODCALLTYPE Release();
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    HRESULT STDMETHODCALLTYPE GetRayQueryInfo(
++            UINT*                           pFlags);
++
++    HRESULT STDMETHODCALLTYPE EnableCubeGradRayQueries(
++            BOOL                            Enable);
++
++    HRESULT STDMETHODCALLTYPE GetRayQueryStats(
++            UINT*                           pShaders,
++            UINT*                           pSamples);
++
++  private:
++
++    D3D9DeviceEx* m_device;
++
++    bool Usable() const;
++
++  };
++
++}
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 3cde06e..c8a7c6e 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -52,6 +52,7 @@ d3d9_src = [
+   'd3d9_nvr_ext.cpp',
+   'd3d9_nvr_hdr.cpp',
+   'd3d9_nvr_tess.cpp',
++  'd3d9_nvr_rtlamp.cpp',
+   'd3d9_on_12.cpp',
+   'd3d9_bridge.cpp',
+   'd3d9_shader_analysis.cpp',
+diff --git a/src/dxvk/dxvk_nvr_rtpatch.cpp b/src/dxvk/dxvk_nvr_rtpatch.cpp
+new file mode 100644
+index 0000000..0c1502d
+--- /dev/null
++++ b/src/dxvk/dxvk_nvr_rtpatch.cpp
+@@ -0,0 +1,399 @@
++#include "dxvk_nvr_rtpatch.h"
++
++#include <atomic>
++#include <cstring>
++#include <unordered_map>
++#include <unordered_set>
++
++// NVR RT lamp shadows (2026-10-28): see the header. A plain word-level rewrite of the module, so it needs nothing from
++// DXVK or dxbc-spirv and is tested on its own (tools/nvr-dxvk/test/rtpatch_test.cpp: glslang output, spirv-val).
++
++namespace dxvk {
++
++  namespace {
++
++    enum : uint32_t {
++      SpvOpExtension                         = 10,
++      SpvOpExtInstImport                     = 11,
++      SpvOpMemoryModel                       = 14,
++      SpvOpCapability                        = 17,
++      SpvOpTypeBool                          = 20,
++      SpvOpTypeInt                           = 21,
++      SpvOpTypeFloat                         = 22,
++      SpvOpTypeVector                        = 23,
++      SpvOpTypeImage                         = 25,
++      SpvOpTypeSampledImage                  = 27,
++      SpvOpTypePointer                       = 32,
++      SpvOpConstant                          = 43,
++      SpvOpConstantComposite                 = 44,
++      SpvOpFunction                          = 54,
++      SpvOpFunctionEnd                       = 56,
++      SpvOpVariable                          = 59,
++      SpvOpLoad                              = 61,
++      SpvOpVectorShuffle                     = 79,
++      SpvOpCompositeConstruct                = 80,
++      SpvOpCompositeExtract                  = 81,
++      SpvOpCopyObject                        = 83,
++      SpvOpSampledImage                      = 86,
++      SpvOpImageSampleExplicitLod            = 88,
++      SpvOpConvertFToU                       = 109,
++      SpvOpSelect                            = 169,
++      SpvOpIEqual                            = 170,
++      SpvOpPhi                               = 245,
++      SpvOpLabel                             = 248,
++      SpvOpConvertUToAccelerationStructureKHR = 4447,
++      SpvOpTypeRayQueryKHR                   = 4472,
++      SpvOpRayQueryInitializeKHR             = 4473,
++      SpvOpRayQueryProceedKHR                = 4477,
++      SpvOpRayQueryGetIntersectionTypeKHR    = 4479,
++      SpvOpTypeAccelerationStructureKHR      = 5341,
++
++      SpvCapabilityRayQueryKHR               = 4472,
++      SpvDimCube                             = 3,
++      SpvStorageClassFunction                = 7,
++      SpvImageOperandsBias                   = 0x1,
++      SpvImageOperandsLod                    = 0x2,
++      SpvImageOperandsGrad                   = 0x4,
++      RayFlagsOpaqueTerminateOnFirstHit      = 0x1 | 0x4,
++    };
++
++    struct Ins {
++      size_t   pos;
++      uint32_t op;
++      uint32_t len;
++    };
++
++    void emit(std::vector<uint32_t>& out, uint32_t op, std::initializer_list<uint32_t> operands) {
++      out.push_back((uint32_t(operands.size() + 1u) << 16) | op);
++      out.insert(out.end(), operands.begin(), operands.end());
++    }
++
++    void emitString(std::vector<uint32_t>& out, uint32_t op, const char* str) {
++      size_t chars = std::strlen(str) + 1u;
++      size_t words = (chars + 3u) / 4u;
++      out.push_back((uint32_t(words + 1u) << 16) | op);
++      size_t base = out.size();
++      out.resize(base + words, 0u);
++      std::memcpy(&out[base], str, chars);
++    }
++
++  }
++
++
++  uint32_t nvrPatchCubeGradRayQueries(std::vector<uint32_t>& code, uint64_t tlasAddress) {
++    if (code.size() < 5u || code[0] != 0x07230203u || !tlasAddress)
++      return 0u;
++
++    std::vector<Ins> ins;
++
++    for (size_t pos = 5u; pos < code.size(); ) {
++      uint32_t len = code[pos] >> 16;
++      if (!len || pos + len > code.size())
++        return 0u;
++      ins.push_back({ pos, code[pos] & 0xFFFFu, len });
++      pos += len;
++    }
++
++    auto word = [&] (const Ins& i, uint32_t n) { return n < i.len ? code[i.pos + n] : 0u; };
++
++    // Types by result id, and the result type of the values a sampled image can come from
++    std::unordered_map<uint32_t, size_t> types;
++    std::unordered_map<uint32_t, uint32_t> valueTypes;
++
++    uint32_t floatType = 0u, uintType = 0u, boolType = 0u, asType = 0u, rqType = 0u;
++
++    for (size_t k = 0; k < ins.size(); k++) {
++      const Ins& i = ins[k];
++
++      switch (i.op) {
++        case SpvOpTypeBool:
++          boolType = word(i, 1);
++          types[word(i, 1)] = k;
++          break;
++        case SpvOpTypeInt:
++          if (word(i, 2) == 32u && word(i, 3) == 0u)
++            uintType = word(i, 1);
++          types[word(i, 1)] = k;
++          break;
++        case SpvOpTypeFloat:
++          if (word(i, 2) == 32u)
++            floatType = word(i, 1);
++          types[word(i, 1)] = k;
++          break;
++        case SpvOpTypeAccelerationStructureKHR:
++          asType = word(i, 1);
++          types[word(i, 1)] = k;
++          break;
++        case SpvOpTypeRayQueryKHR:
++          rqType = word(i, 1);
++          types[word(i, 1)] = k;
++          break;
++        case SpvOpTypeVector:
++        case SpvOpTypeImage:
++        case SpvOpTypeSampledImage:
++        case SpvOpTypePointer:
++          types[word(i, 1)] = k;
++          break;
++        case SpvOpSampledImage:
++        case SpvOpLoad:
++        case SpvOpCopyObject:
++        case SpvOpPhi:
++        case SpvOpSelect:
++          valueTypes[word(i, 2)] = word(i, 1);
++          break;
++        default:
++          break;
++      }
++    }
++
++    auto typeIns = [&] (uint32_t id) -> const Ins* {
++      auto e = types.find(id);
++      return e != types.end() ? &ins[e->second] : nullptr;
++    };
++
++    auto findVector = [&] (uint32_t component, uint32_t count) {
++      for (const auto& t : types) {
++        const Ins& i = ins[t.second];
++        if (i.op == SpvOpTypeVector && word(i, 2) == component && word(i, 3) == count)
++          return t.first;
++      }
++      return 0u;
++    };
++
++    // The marked samples: explicit gradients on a cube image
++    std::vector<size_t> targets;
++
++    for (size_t k = 0; k < ins.size(); k++) {
++      const Ins& i = ins[k];
++
++      if (i.op != SpvOpImageSampleExplicitLod || i.len < 8u)
++        continue;
++
++      uint32_t mask = word(i, 5);
++      if (!(mask & SpvImageOperandsGrad) || (mask & (SpvImageOperandsBias | SpvImageOperandsLod)))
++        continue;
++
++      auto vt = valueTypes.find(word(i, 3));
++      const Ins* sampledType = vt != valueTypes.end() ? typeIns(vt->second) : nullptr;
++      const Ins* imageType = sampledType && sampledType->op == SpvOpTypeSampledImage ? typeIns(word(*sampledType, 2)) : nullptr;
++
++      if (imageType && imageType->op == SpvOpTypeImage && word(*imageType, 3) == SpvDimCube)
++        targets.push_back(k);
++    }
++
++    if (targets.empty() || !floatType)
++      return 0u;
++
++    // New ids from the bound
++    uint32_t bound = code[3];
++    auto newId = [&] () { return bound++; };
++
++    std::vector<uint32_t> decls;
++
++    if (!uintType) {
++      uintType = newId();
++      emit(decls, SpvOpTypeInt, { uintType, 32u, 0u });
++    }
++
++    if (!boolType) {
++      boolType = newId();
++      emit(decls, SpvOpTypeBool, { boolType });
++    }
++
++    uint32_t v3Type = findVector(floatType, 3u);
++    if (!v3Type) {
++      v3Type = newId();
++      emit(decls, SpvOpTypeVector, { v3Type, floatType, 3u });
++    }
++
++    uint32_t v2uType = findVector(uintType, 2u);
++    if (!v2uType) {
++      v2uType = newId();
++      emit(decls, SpvOpTypeVector, { v2uType, uintType, 2u });
++    }
++
++    if (!asType) {
++      asType = newId();
++      emit(decls, SpvOpTypeAccelerationStructureKHR, { asType });
++    }
++
++    if (!rqType) {
++      rqType = newId();
++      emit(decls, SpvOpTypeRayQueryKHR, { rqType });
++    }
++
++    uint32_t rqPtrType = newId();
++    emit(decls, SpvOpTypePointer, { rqPtrType, SpvStorageClassFunction, rqType });
++
++    uint32_t cUint0 = newId(), cUint1 = newId(), cFlags = newId(), cFloat0 = newId(), cFloat1 = newId();
++    uint32_t cAddrLo = newId(), cAddrHi = newId(), cAddr = newId();
++    float one = 1.0f, zero = 0.0f;
++    uint32_t oneBits, zeroBits;
++    std::memcpy(&oneBits, &one, 4u);
++    std::memcpy(&zeroBits, &zero, 4u);
++    emit(decls, SpvOpConstant, { uintType, cUint0, 0u });
++    emit(decls, SpvOpConstant, { uintType, cUint1, 1u });
++    emit(decls, SpvOpConstant, { uintType, cFlags, RayFlagsOpaqueTerminateOnFirstHit });
++    emit(decls, SpvOpConstant, { floatType, cFloat0, zeroBits });
++    emit(decls, SpvOpConstant, { floatType, cFloat1, oneBits });
++    emit(decls, SpvOpConstant, { uintType, cAddrLo, uint32_t(tlasAddress) });
++    emit(decls, SpvOpConstant, { uintType, cAddrHi, uint32_t(tlasAddress >> 32) });
++    emit(decls, SpvOpConstantComposite, { v2uType, cAddr, cAddrLo, cAddrHi });
++
++    // One ray query variable per function that holds a marked sample
++    std::unordered_set<size_t> targetSet(targets.begin(), targets.end());
++    std::unordered_map<size_t, uint32_t> functionLabels;   // index of the function's first OpLabel -> its variable
++
++    { size_t fnStart = SIZE_MAX, firstLabel = SIZE_MAX;
++      for (size_t k = 0; k < ins.size(); k++) {
++        if (ins[k].op == SpvOpFunction) {
++          fnStart = k;
++          firstLabel = SIZE_MAX;
++        } else if (ins[k].op == SpvOpLabel && fnStart != SIZE_MAX && firstLabel == SIZE_MAX) {
++          firstLabel = k;
++        } else if (targetSet.count(k) && firstLabel != SIZE_MAX && !functionLabels.count(firstLabel)) {
++          functionLabels[firstLabel] = newId();
++        }
++      }
++    }
++
++    // Rebuild the module
++    std::vector<uint32_t> out(code.begin(), code.begin() + 5u);
++    out.reserve(code.size() + decls.size() + targets.size() * 48u + 16u);
++
++    bool capabilityDone = false, extensionDone = false, declsDone = false;
++    uint32_t currentVar = 0u;
++
++    for (size_t k = 0; k < ins.size(); k++) {
++      const Ins& i = ins[k];
++
++      if (!extensionDone && i.op != SpvOpCapability && i.op != SpvOpExtension) {
++        emitString(out, SpvOpExtension, "SPV_KHR_ray_query");
++        extensionDone = true;
++      }
++
++      if (!declsDone && i.op == SpvOpFunction) {
++        out.insert(out.end(), decls.begin(), decls.end());
++        declsDone = true;
++      }
++
++      if (targetSet.count(k)) {
++        uint32_t resultType = word(i, 1), result = word(i, 2);
++        uint32_t coord = word(i, 4), dx = word(i, 6), dy = word(i, 7);
++
++        uint32_t origin = newId(), dir = newId(), tMin = newId(), tMax = newId(), maskF = newId(), mask = newId();
++        uint32_t as = newId(), proceed = newId(), type = newId(), none = newId(), vis = newId();
++
++        emit(out, SpvOpVectorShuffle, { v3Type, origin, coord, coord, 0u, 1u, 2u });
++        emit(out, SpvOpVectorShuffle, { v3Type, dir, dx, dx, 0u, 1u, 2u });
++        emit(out, SpvOpCompositeExtract, { floatType, tMin, dy, 0u });
++        emit(out, SpvOpCompositeExtract, { floatType, tMax, dy, 1u });
++        emit(out, SpvOpCompositeExtract, { floatType, maskF, dy, 2u });
++        emit(out, SpvOpConvertFToU, { uintType, mask, maskF });
++        emit(out, SpvOpConvertUToAccelerationStructureKHR, { asType, as, cAddr });
++        emit(out, SpvOpRayQueryInitializeKHR, { currentVar, as, cFlags, mask, origin, tMin, dir, tMax });
++        emit(out, SpvOpRayQueryProceedKHR, { boolType, proceed, currentVar });
++        emit(out, SpvOpRayQueryGetIntersectionTypeKHR, { uintType, type, currentVar, cUint1 });
++        emit(out, SpvOpIEqual, { boolType, none, type, cUint0 });
++        emit(out, SpvOpSelect, { floatType, vis, none, cFloat1, cFloat0 });
++
++        const Ins* rt = typeIns(resultType);
++        uint32_t count = rt && rt->op == SpvOpTypeVector ? word(*rt, 3) : 1u;
++
++        if (count <= 1u) {
++          emit(out, SpvOpCopyObject, { resultType, result, vis });
++        } else {
++          out.push_back(((3u + count) << 16) | SpvOpCompositeConstruct);
++          out.push_back(resultType);
++          out.push_back(result);
++          for (uint32_t c = 0; c < count; c++)
++            out.push_back(vis);
++        }
++        continue;
++      }
++
++      out.insert(out.end(), code.begin() + i.pos, code.begin() + i.pos + i.len);
++
++      if (i.op == SpvOpCapability && !capabilityDone) {
++        emit(out, SpvOpCapability, { SpvCapabilityRayQueryKHR });
++        capabilityDone = true;
++      }
++
++      if (i.op == SpvOpLabel) {
++        auto e = functionLabels.find(k);
++        if (e != functionLabels.end()) {
++          currentVar = e->second;
++          emit(out, SpvOpVariable, { rqPtrType, currentVar, SpvStorageClassFunction });
++        }
++      }
++    }
++
++    if (!declsDone || !capabilityDone)
++      return 0u;
++
++    out[3] = bound;
++    code = std::move(out);
++    return uint32_t(targets.size());
++  }
++
++
++
++  namespace {
++    std::atomic<uint64_t> g_tlasAddress    = { 0u };
++    std::atomic<bool>     g_cameraRelative = { false };
++    std::atomic<bool>     g_hook           = { false };
++    std::atomic<uint32_t> g_shaders        = { 0u };
++    std::atomic<uint32_t> g_samples        = { 0u };
++  }
++
++
++  void nvrRtSetTlas(uint64_t address, bool cameraRelative) {
++    g_cameraRelative.store(cameraRelative);
++    g_tlasAddress.store(address);
++  }
++
++
++  uint64_t nvrRtTlasAddress() {
++    return g_tlasAddress.load();
++  }
++
++
++  bool nvrRtTlasCameraRelative() {
++    return g_cameraRelative.load();
++  }
++
++
++  void nvrRtSetHook(bool enable) {
++    g_hook.store(enable);
++  }
++
++
++  bool nvrRtHookEnabled() {
++    return g_hook.load(std::memory_order_relaxed);
++  }
++
++
++  void nvrRtPatchLowered(std::vector<uint32_t>& code) {
++    if (!nvrRtHookEnabled())
++      return;
++
++    uint64_t address = g_tlasAddress.load();
++
++    if (!address)
++      return;
++
++    uint32_t samples = nvrPatchCubeGradRayQueries(code, address);
++
++    if (samples) {
++      g_shaders += 1u;
++      g_samples += samples;
++    }
++  }
++
++
++  void nvrRtGetStats(uint32_t* pShaders, uint32_t* pSamples) {
++    if (pShaders) *pShaders = g_shaders.load();
++    if (pSamples) *pSamples = g_samples.load();
++  }
++
++}
+diff --git a/src/dxvk/dxvk_nvr_rtpatch.h b/src/dxvk/dxvk_nvr_rtpatch.h
+new file mode 100644
+index 0000000..0a5e008
+--- /dev/null
++++ b/src/dxvk/dxvk_nvr_rtpatch.h
+@@ -0,0 +1,56 @@
++#pragma once
++
++#include <cstdint>
++#include <vector>
++
++namespace dxvk {
++
++  /**
++   * \brief NVR RT lamp shadows: cube-gradient samples become ray queries
++   *
++   * NVR's lamp-shadow pixel shaders (PointShadowForward.hlsl, POINT_SHADOW_RT) mark each shadow ray as
++   * texCUBEgrad(cube, origin, segment, params), which no other shader uses. After DXVK has converted such a
++   * shader to SPIR-V, every OpImageSampleExplicitLod with Grad on a cube image is replaced by one opaque ray
++   * query against the TLAS at \c tlasAddress (baked as a constant; OpConvertUToAccelerationStructureKHR):
++   *
++   *   origin   = coordinate.xyz        (TLAS space)
++   *   segment  = dx.xyz                (the ray's direction, unnormalised: t runs 0..1 along it)
++   *   tMin     = dy.x, tMax = dy.y     (in units of the segment)
++   *   cullMask = uint(dy.z)            (instances whose mask shares no bit are skipped)
++   *   result   = 1.0 in every component when nothing is hit, 0.0 when something is
++   *
++   * Flags: opaque, terminate on first hit. The shader must keep 0 <= tMin <= tMax and finite inputs.
++   * Shaders without the marker are returned unchanged.
++   *
++   * \param [in,out] code SPIR-V words
++   * \param [in] tlasAddress Device address of the top-level acceleration structure
++   * \returns Number of samples replaced (0: the code is untouched)
++   */
++  uint32_t nvrPatchCubeGradRayQueries(std::vector<uint32_t>& code, uint64_t tlasAddress);
++
++  /**
++   * rief The TLAS the patched shaders trace against
++   *
++   * Set by the RT core (the TLAS owner) once its acceleration structure exists, and never moved after: the address is
++   * baked into every patched shader. \c cameraRelative: the TLAS's space is camera-relative world (else absolute world).
++   * An address of 0 withdraws it (shaders patched before keep the old address: the owner must keep it valid while the
++   * device lives).
++   */
++  void nvrRtSetTlas(uint64_t address, bool cameraRelative);
++
++  uint64_t nvrRtTlasAddress();
++
++  bool nvrRtTlasCameraRelative();
++
++  /** The hook (D3D9's ID3D9NvrExtRtLamp): while on, fragment shaders DXVK lowers to SPIR-V get the replacement. */
++  void nvrRtSetHook(bool enable);
++
++  bool nvrRtHookEnabled();
++
++  /** Applies the replacement to a lowered fragment shader when the hook is on and a TLAS is set (counted). */
++  void nvrRtPatchLowered(std::vector<uint32_t>& code);
++
++  /** Cumulative: lowerings patched, ray queries put in. */
++  void nvrRtGetStats(uint32_t* pShaders, uint32_t* pSamples);
++
++}
+diff --git a/src/dxvk/dxvk_shader_ir.cpp b/src/dxvk/dxvk_shader_ir.cpp
+index 9840248..cf2fed2 100644
+--- a/src/dxvk/dxvk_shader_ir.cpp
++++ b/src/dxvk/dxvk_shader_ir.cpp
+@@ -5,6 +5,7 @@
+ #include <util/util_log.h>
+ 
+ #include "dxvk_shader_ir.h"
++#include "dxvk_nvr_rtpatch.h"   // NVR rtlamp
+ 
+ namespace dxvk {
+ 
+@@ -2133,7 +2134,13 @@ namespace dxvk {
+     dxbc_spv::spirv::SpirvBuilder spirvBuilder(irBuilder, mapping, options);
+     spirvBuilder.buildSpirvBinary();
+ 
+-    return SpirvCodeBuffer(spirvBuilder.getSpirvBinary());
++    // NVR rtlamp: the marked cube-gradient samples of NVR's lamp shaders become ray queries (dxvk_nvr_rtpatch.h)
++    auto spirv = spirvBuilder.getSpirvBinary();
++
++    if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT)
++      nvrRtPatchLowered(spirv);
++
++    return SpirvCodeBuffer(std::move(spirv));
+   }
+ 
+ 
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index 40f4cc0..c708350 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -73,6 +73,7 @@ dxvk_src = [
+   'dxvk_shader_cache.cpp',
+   'dxvk_shader_io.cpp',
+   'dxvk_shader_ir.cpp',
++  'dxvk_nvr_rtpatch.cpp',
+   'dxvk_shader_key.cpp',
+   'dxvk_shader_spirv.cpp',
+   'dxvk_signal.cpp',
+-- 
+2.40.0.windows.1
+
+
+From 59692e0dec6346de23a540a03914a5ab4cb2ec67 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:30:09 -0400
+Subject: [PATCH 2/2] NVR rtlamp: the hook takes the RT core's scene address
+ (ID3D9NvrExtRt 1.8-rt) instead of a TLAS owner hand-off
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/d3d9/d3d9_nvr_ext_api.h  | 22 ++++++++++++----------
+ src/d3d9/d3d9_nvr_rtlamp.cpp | 27 ++++++++++-----------------
+ src/d3d9/d3d9_nvr_rtlamp.h   |  7 ++-----
+ 3 files changed, 24 insertions(+), 32 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 863558e..df96f17 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -969,15 +969,17 @@ __CRT_UUID_DECL(ID3D9NvrExtSharedFence, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,
+ 
+ /**
+  * UNOFFICIAL 2026-10-28 "rtlamp" (fork patch nvr-rtlamp; docs/next/FORK-RT-LAMPS.md): ray queries inside D3D9 pixel shaders, for the
+- * RT lamp shadows. With the hook on, every pixel shader created afterwards has each texCUBEgrad (texldd on a cube sampler; no game
+- * or NVR shader samples a cube with gradients otherwise) replaced by one opaque ray query against the fork's TLAS:
+- *   coordinate.xyz = origin (TLAS space), ddx.xyz = the ray (t 0..1 along it, unnormalised), ddy = (tMin, tMax, cull mask)
++ * RT lamp shadows, against a scene of the RT core (ID3D9NvrExtRt, "1.8-rt"). With the hook on, every pixel shader DXVK converts
++ * afterwards has each texCUBEgrad (texldd on a cube sampler; no game or NVR shader samples a cube with gradients otherwise)
++ * replaced by one opaque ray query against that scene, its address baked into the shader:
++ *   coordinate.xyz = origin (the scene's space: NVR's camera-relative world), ddx.xyz = the ray (t 0..1 along it, unnormalised),
++ *   ddy = (tMin, tMax, cull mask: ANDed with the instances' Mask)
+  *   result = 1 in every component when nothing is hit, 0 when something is.
++ * The scene must stay alive while the device does (its address never changes: ID3D9NvrExtRtScene::GetAddress), and a shader
++ * may trace it only after a BuildScene (until then NVR keeps the rays switched off in its constants).
+  * QueryInterface(__uuidof(ID3D9NvrExtRtLamp)); a d3d9.dll without it answers E_NOINTERFACE.
+  */
+-#define NVR_EXT_RTLAMP_USABLE                0x1u   /* the device has ray queries and the TLAS exists: the hook can be enabled */
+-#define NVR_EXT_RTLAMP_TLAS_CAMERA_RELATIVE  0x2u   /* the TLAS is in camera-relative world space (else absolute world space) */
+-#define NVR_EXT_RTLAMP_HOOK_ON               0x4u   /* EnableCubeGradRayQueries(TRUE) took */
++#define NVR_EXT_RTLAMP_HOOK_ON               0x1u   /* EnableCubeGradRayQueries took a scene */
+ 
+ MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d340")
+ ID3D9NvrExtRtLamp : public IUnknown {
+@@ -985,12 +987,12 @@ ID3D9NvrExtRtLamp : public IUnknown {
+   virtual HRESULT STDMETHODCALLTYPE GetRayQueryInfo(
+           UINT*                           pFlags) = 0;
+ 
+-  /** On: pixel shaders created from now on get the replacement (before NVR loads its shaders). D3DERR_NOTAVAILABLE without
+-      NVR_EXT_RTLAMP_USABLE. Off: later shaders are converted as by stock DXVK. */
++  /** SceneAddress != 0: pixel shaders converted from now on trace that scene (call before NVR loads its shaders). 0: later
++      shaders are converted as by stock DXVK. D3DERR_NOTAVAILABLE when the device has no ray queries. */
+   virtual HRESULT STDMETHODCALLTYPE EnableCubeGradRayQueries(
+-          BOOL                            Enable) = 0;
++          UINT64                          SceneAddress) = 0;
+ 
+-  /** Cumulative: pixel shaders patched, ray queries put in (one per marked sample). */
++  /** Cumulative: shader conversions patched, ray queries put in (one per marked sample). */
+   virtual HRESULT STDMETHODCALLTYPE GetRayQueryStats(
+           UINT*                           pShaders,
+           UINT*                           pSamples) = 0;
+diff --git a/src/d3d9/d3d9_nvr_rtlamp.cpp b/src/d3d9/d3d9_nvr_rtlamp.cpp
+index 7d955f0..aecc2e5 100644
+--- a/src/d3d9/d3d9_nvr_rtlamp.cpp
++++ b/src/d3d9/d3d9_nvr_rtlamp.cpp
+@@ -24,34 +24,27 @@ namespace dxvk {
+   }
+ 
+ 
+-  bool D3D9NvrRtLamp::Usable() const {
+-    // The RT core sets a TLAS address only on a device it enabled ray queries and acceleration structures on
+-    return nvrRtTlasAddress() != 0u;
+-  }
+-
+-
+   HRESULT STDMETHODCALLTYPE D3D9NvrRtLamp::GetRayQueryInfo(UINT* pFlags) {
+     if (unlikely(pFlags == nullptr))
+       return D3DERR_INVALIDCALL;
+ 
+-    UINT flags = 0u;
+-    if (Usable())                  flags |= NVR_EXT_RTLAMP_USABLE;
+-    if (nvrRtTlasCameraRelative()) flags |= NVR_EXT_RTLAMP_TLAS_CAMERA_RELATIVE;
+-    if (nvrRtHookEnabled())        flags |= NVR_EXT_RTLAMP_HOOK_ON;
+-    *pFlags = flags;
++    *pFlags = nvrRtHookEnabled() && nvrRtTlasAddress() ? NVR_EXT_RTLAMP_HOOK_ON : 0u;
+     return D3D_OK;
+   }
+ 
+ 
+-  HRESULT STDMETHODCALLTYPE D3D9NvrRtLamp::EnableCubeGradRayQueries(BOOL Enable) {
+-    if (Enable && !Usable()) {
+-      Logger::warn("NVR ext: rtlamp: ray queries requested but the device has none or no TLAS exists; the hook stays off");
++  HRESULT STDMETHODCALLTYPE D3D9NvrRtLamp::EnableCubeGradRayQueries(UINT64 SceneAddress) {
++    const auto& features = m_device->GetDXVKDevice()->features();
++
++    if (SceneAddress && !(features.khrRayQuery.rayQuery && features.khrAccelerationStructure.accelerationStructure)) {
++      Logger::warn("NVR ext: rtlamp: ray queries requested but the device has none; the hook stays off");
+       return D3DERR_NOTAVAILABLE;
+     }
+ 
+-    nvrRtSetHook(Enable != FALSE);
+-    Logger::info(str::format("NVR ext: rtlamp: cube-gradient ray queries ", Enable ? "on" : "off",
+-      " for pixel shaders lowered from now on"));
++    nvrRtSetTlas(SceneAddress, true);
++    nvrRtSetHook(SceneAddress != 0u);
++    Logger::info(str::format("NVR ext: rtlamp: cube-gradient ray queries ", SceneAddress ? "on" : "off",
++      " for pixel shaders converted from now on"));
+     return D3D_OK;
+   }
+ 
+diff --git a/src/d3d9/d3d9_nvr_rtlamp.h b/src/d3d9/d3d9_nvr_rtlamp.h
+index 6c7e370..fd706f7 100644
+--- a/src/d3d9/d3d9_nvr_rtlamp.h
++++ b/src/d3d9/d3d9_nvr_rtlamp.h
+@@ -2,8 +2,7 @@
+ 
+ /*
+  * NVR extension "rtlamp" (fork patch nvr-rtlamp): ID3D9NvrExtRtLamp, the switch for the ray queries that replace NVR's
+- * marked cube-gradient samples (src/dxvk/dxvk_nvr_rtpatch.h). The TLAS itself belongs to the RT core, which hands its
+- * address to nvrRtSetTlas.
++ * marked cube-gradient samples (src/dxvk/dxvk_nvr_rtpatch.h), against a scene NVR made with the RT core (ID3D9NvrExtRt).
+  */
+ 
+ #include "d3d9_nvr_ext_api.h"
+@@ -29,7 +28,7 @@ namespace dxvk {
+             UINT*                           pFlags);
+ 
+     HRESULT STDMETHODCALLTYPE EnableCubeGradRayQueries(
+-            BOOL                            Enable);
++            UINT64                          SceneAddress);
+ 
+     HRESULT STDMETHODCALLTYPE GetRayQueryStats(
+             UINT*                           pShaders,
+@@ -39,8 +38,6 @@ namespace dxvk {
+ 
+     D3D9DeviceEx* m_device;
+ 
+-    bool Usable() const;
+-
+   };
+ 
+ }
+-- 
+2.40.0.windows.1
+

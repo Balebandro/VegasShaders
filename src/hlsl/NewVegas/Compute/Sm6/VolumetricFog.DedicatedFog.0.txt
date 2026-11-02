@@ -1,0 +1,4 @@
+nvr-sm6-index 1
+macros PHYSICAL_SKY_ON
+variant b95a152b PHYSICAL_SKY_ON=0
+variant b85a1398 PHYSICAL_SKY_ON=1

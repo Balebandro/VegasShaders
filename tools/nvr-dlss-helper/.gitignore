@@ -1,0 +1,6 @@
+# Build output (the default OutDir/IntDir) and anything from NVIDIA's SDK: never committed.
+bin/
+obj/
+*.dll
+*.lib
+nvsdk_ngx*.h

@@ -1,0 +1,40 @@
+From b514188c6535e4764b318c96a52997ca73343d37 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 17:05:29 -0400
+Subject: [PATCH] NVR extension: injected graphics passes end suspended (DXVK
+ own layout handling, no barrier after every pass)
+
+---
+ src/dxvk/dxvk_context.h | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 98cb666..74da75e 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -970,13 +970,21 @@ namespace dxvk {
+      * pipeline state) takes a copy before and puts it back afterwards with
+      * \ref nvrSetState, which ends the current pass and marks everything
+      * dirty so the client API's state is re-applied at its next draw.
++     *
++     * The pass ends suspended, as DXVK ends its own passes when the client
++     * switches render targets: the targets stay in their attachment layout
++     * and go back to their default layout at the next render pass, compute
++     * dispatch or copy, merged with that work's barriers and only with the
++     * memory barriers its hazards need. Ending it fully instead put a global
++     * memory barrier and a layout change after every injected pass (a GPU
++     * capture of Lucky 38, 2026-10-26: ~40 of them a frame).
+      */
+     DxvkContextState nvrGetState() const {
+       return m_state;
+     }
+ 
+     void nvrSetState(DxvkContextState&& state) {
+-      this->endCurrentPass(false);
++      this->endCurrentPass(true);
+ 
+       m_state = std::move(state);
+ 
+-- 
+2.43.0
+

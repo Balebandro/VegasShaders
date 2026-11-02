@@ -1,0 +1,89 @@
+# fork1026-hiz diag-out (2026-10-26, deep/fork-hiz): og-desert. Old trace / HiZ as shipped / HiZ + HiZSafeCells (the pyramid-channel
+# fix, test only): DebugView 9 (walk end rule: green hit, cyan hit after the cell limit, yellow thrown away, red nothing, magenta cell
+# limit + nothing, blue not started; HiZ only), DebugView 2 (hits incl. fallbacks), DebugView 1 (reflection alone); then F10 timing
+# old vs HiZ+fix ABAB x3 ('  Reflections trace (half)', '  Hi-Z pyramid', 'Reflections (SSR)'). Vulkan passes on, GroundSheen 1.
+frames 300
+shot hizout9settle
+wait 900
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+shot hizout9hiz-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main DebugView 9
+shot hizout9fix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+set Shaders.Reflections.Main DebugView 9
+shot hizout2old-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main DebugView 2
+shot hizout2hiz-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main DebugView 2
+shot hizout2fix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+set Shaders.Reflections.Main DebugView 2
+shot hizout1old-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main DebugView 1
+shot hizout1hiz-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main DebugView 1
+shot hizout1fix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+set Shaders.Reflections.Main DebugView 1
+shot hizoutold-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+shot hizoutfix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+shot hizoutold-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+shot hizoutfix-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+shot hizoutold-3
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+shot hizoutfix-3
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true

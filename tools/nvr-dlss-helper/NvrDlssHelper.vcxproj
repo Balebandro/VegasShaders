@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  NvrDlssHelper.exe: the 64-bit DLSS helper for New Vegas Reloaded (README.md). Built on its own, never part of VegasShaders.dll.
+
+  msbuild tools\nvr-dlss-helper\NvrDlssHelper.vcxproj /p:Configuration=Release /p:Platform=x64
+    /p:DlssSdkDir=<NVIDIA DLSS SDK folder>   (default: %NVR_DLSS_SDK%, else $(MSBuildThisFileDirectory)dlss-sdk)
+    /p:DlssDevDll=true                       (copy NVIDIA's development nvngx_dlss.dll with its on-screen overlay; testing only)
+  Without the SDK folder it still builds, pass-through test only (NVR_DLSS_NO_SDK).
+  NVIDIA's SDK files are never part of the NVR repository; nvngx_dlss.dll is copied next to the exe at build time.
+  UNOFFICIAL 2026-10-30: so is NVIDIA's Ray Reconstruction runtime nvngx_dlssd.dll, when the SDK folder has it (rel, or dev with
+  DlssDevDll=true, next to nvngx_dlss.dll); without it the helper runs DLSS SR only and reports Ray Reconstruction as not available.
+-->
+<Project DefaultTargets="Build" ToolsVersion="16.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <ProjectGuid>{7C1D2E4A-3B9F-4E21-9A6D-5F0C8B2E7D13}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <RootNamespace>NvrDlssHelper</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <DlssSdkDir Condition="'$(DlssSdkDir)'==''">$(NVR_DLSS_SDK)</DlssSdkDir>
+    <DlssSdkDir Condition="'$(DlssSdkDir)'==''">$(MSBuildThisFileDirectory)dlss-sdk</DlssSdkDir>
+    <!-- lib\x64 + lib\rel|dev (a trimmed copy), or NVIDIA's own tree: lib\Windows_x86_64\x64 (or x86_64) + lib\Windows_x86_64\rel|dev -->
+    <DlssLibDir Condition="Exists('$(DlssSdkDir)\lib\x64\nvsdk_ngx_s.lib')">$(DlssSdkDir)\lib\x64</DlssLibDir>
+    <DlssLibDir Condition="'$(DlssLibDir)'=='' And Exists('$(DlssSdkDir)\lib\Windows_x86_64\x64\nvsdk_ngx_s.lib')">$(DlssSdkDir)\lib\Windows_x86_64\x64</DlssLibDir>
+    <DlssLibDir Condition="'$(DlssLibDir)'=='' And Exists('$(DlssSdkDir)\lib\Windows_x86_64\x86_64\nvsdk_ngx_s.lib')">$(DlssSdkDir)\lib\Windows_x86_64\x86_64</DlssLibDir>
+    <DlssDllDir Condition="Exists('$(DlssSdkDir)\lib\rel\nvngx_dlss.dll')">$(DlssSdkDir)\lib</DlssDllDir>
+    <DlssDllDir Condition="'$(DlssDllDir)'==''">$(DlssSdkDir)\lib\Windows_x86_64</DlssDllDir>
+    <DlssHaveSdk Condition="Exists('$(DlssSdkDir)\include\nvsdk_ngx_vk.h') And '$(DlssLibDir)'!=''">true</DlssHaveSdk>
+    <VulkanSdkDir Condition="'$(VulkanSdkDir)'==''">$(VULKAN_SDK)</VulkanSdkDir>
+    <VulkanSdkDir Condition="'$(VulkanSdkDir)'==''">C:\VulkanSDK\1.3.296.0</VulkanSdkDir>
+    <TargetName>NvrDlssHelper</TargetName>
+    <OutDir Condition="'$(OutDir)'=='' Or '$(OutDir)'=='$(SolutionDir)$(Platform)\$(Configuration)\'">$(MSBuildProjectDirectory)\bin\</OutDir>
+    <IntDir Condition="'$(IntDir)'=='' Or '$(IntDir)'=='$(Platform)\$(Configuration)\'">$(MSBuildProjectDirectory)\obj\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <!-- nvsdk_ngx_s.lib is NVIDIA's static-CRT build: the helper uses the static CRT too. -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(DlssHaveSdk)'!='true'">NVR_DLSS_NO_SDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(VulkanSdkDir)\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories Condition="'$(DlssHaveSdk)'=='true'">$(DlssSdkDir)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(VulkanSdkDir)\Lib\vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(DlssHaveSdk)'=='true'">$(DlssLibDir)\nvsdk_ngx_s.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="NvrDlssHelper.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="NvrDlssProtocol.h" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- NVIDIA's redistributable DLSS runtime next to the exe (release build; the development build with DlssDevDll=true). -->
+  <Target Name="CopyNgxDll" AfterTargets="Build" Condition="'$(DlssHaveSdk)'=='true'">
+    <PropertyGroup>
+      <NgxDll Condition="'$(DlssDevDll)'=='true'">$(DlssDllDir)\dev\nvngx_dlss.dll</NgxDll>
+      <NgxDll Condition="'$(DlssDevDll)'!='true'">$(DlssDllDir)\rel\nvngx_dlss.dll</NgxDll>
+    </PropertyGroup>
+    <Copy SourceFiles="$(NgxDll)" DestinationFolder="$(OutDir)" Condition="Exists('$(NgxDll)')" />
+    <Message Importance="high" Text="NvrDlssHelper: built with NVIDIA's DLSS SDK from $(DlssSdkDir); copied $(NgxDll)" />
+    <!-- UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction's runtime (nvngx_dlssd.dll), only when it is in the SDK folder. -->
+    <PropertyGroup>
+      <NgxDlssdDll Condition="'$(DlssDevDll)'=='true'">$(DlssDllDir)\dev\nvngx_dlssd.dll</NgxDlssdDll>
+      <NgxDlssdDll Condition="'$(DlssDevDll)'!='true'">$(DlssDllDir)\rel\nvngx_dlssd.dll</NgxDlssdDll>
+    </PropertyGroup>
+    <Copy SourceFiles="$(NgxDlssdDll)" DestinationFolder="$(OutDir)" Condition="Exists('$(NgxDlssdDll)')" />
+    <Message Importance="high" Condition="Exists('$(NgxDlssdDll)')" Text="NvrDlssHelper: copied $(NgxDlssdDll) (Ray Reconstruction)" />
+    <Message Importance="high" Condition="!Exists('$(NgxDlssdDll)')" Text="NvrDlssHelper: no $(NgxDlssdDll): Ray Reconstruction needs NVIDIA's nvngx_dlssd.dll next to the exe" />
+  </Target>
+  <Target Name="NoSdkNote" AfterTargets="Build" Condition="'$(DlssHaveSdk)'!='true'">
+    <Message Importance="high" Text="NvrDlssHelper: NVIDIA's DLSS SDK not found at '$(DlssSdkDir)': built for the pass-through test only (NVR_DLSS_NO_SDK)" />
+  </Target>
+</Project>

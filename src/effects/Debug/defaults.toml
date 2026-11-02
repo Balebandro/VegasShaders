@@ -1,0 +1,6 @@
+[_Shaders.Debug.Main]
+ClipView = 0                           # UNOFFICIAL, for finding faults: marks the pixels that are clipped (a colour channel at full brightness, so detail and colour are lost there). Works without switching the Debug effect on; the rest of the picture is shown dimmed and grey. 1: the finished picture (magenta = colour distorted because one or two channels are clipped, cyan = burnt out to plain white). 2: the same for the picture as it comes out of the tonemapper (its white point), before the mod's colour effects (Coloring, LUT, Cinema, Image Adjust, Sharpening). 3: who clipped it: red = already clipped coming out of the tonemapper (too much light: flashlight, sun, exposure or tonemapper settings), yellow = clipped only by the mod's colour effects afterwards. 0 off. Applies immediately
+
+[_Shaders.Debug.Status]
+Enabled = false                        # Displays debug information: depth, normal and shadow buffers, colors of the weather/fog and lights positions.
+

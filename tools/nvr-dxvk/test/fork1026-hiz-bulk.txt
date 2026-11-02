@@ -1,0 +1,121 @@
+# fork1026-hiz bulk (2026-10-26, deep/fork-hiz, for the combined build): toggles ONLY the Hi-Z settings.
+# [Shaders.Reflections.Main] HiZ (Hi-Z SSR march) and [Shaders.AmbientLight.Main] HiZ (AO far taps; measured no win, picture check only).
+# Every shot sets the conditions they need: NvrDxvkPasses on, Reflections on with GroundSheen/InteriorFloors 1 (fork d3d9.dll + dxvk.conf
+# d3d9.customVendorId = 1002 for depth). Pairs: DebugView 2 (hits: green found, red not) and 1 (the reflection alone) off/on adjacent,
+# then hizoff/hizssr ABAB x3 with F10 timers ('  Reflections trace (half)', '  Hi-Z pyramid', 'Reflections (SSR)'), then AO off/on x2.
+# Scenes: lucky22 (static camera, best for the picture), og-desert, og-lake.
+frames 600
+profile
+shot hizsettle
+wait 900
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizdbgoff-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 2
+shot hizdbgssr-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 2
+set Shaders.Reflections.Main HiZ true
+shot hizdbgoff-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 2
+shot hizdbgssr-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 2
+set Shaders.Reflections.Main HiZ true
+shot hizrefoff-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 1
+shot hizrefssr-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 1
+set Shaders.Reflections.Main HiZ true
+shot hizrefoff-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 1
+shot hizrefssr-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 1
+set Shaders.Reflections.Main HiZ true
+shot hizoff-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizssr-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+shot hizoff-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizssr-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+shot hizoff-3
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizssr-3
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+shot hizoff-4
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizao-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.AmbientLight.Main HiZ 3
+shot hizoff-5
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizao-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main GroundSheen 1.0
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.AmbientLight.Main HiZ 3

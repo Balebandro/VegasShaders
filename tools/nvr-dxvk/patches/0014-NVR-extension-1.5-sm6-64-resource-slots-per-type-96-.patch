@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Mon, 26 Oct 2026 09:24:43 -0400
+Subject: [PATCH] NVR extension 1.5-sm6: 64 resource slots per type, 96
+ bindings per pipeline (NVR SM6 builds of its own passes)
+
+---
+ src/d3d9/d3d9_nvr_ext.h     | 2 +-
+ src/d3d9/d3d9_nvr_ext_api.h | 6 ++++--
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index a0aa83c..71c094c 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -31,7 +31,7 @@ namespace dxvk {
+ 
+   /** Binding slot bases, chosen above everything the D3D9 side uses. */
+   constexpr uint32_t NvrExtImageSlotBase      = 64u;  // DxvkContext m_resources (image views)
+-  constexpr uint32_t NvrExtBufferViewSlotBase = 96u;  // DxvkContext m_resources (raw buffer views: storage buffers the shader writes)
++  constexpr uint32_t NvrExtBufferViewSlotBase = 128u; // DxvkContext m_resources (raw buffer views: storage buffers the shader writes); 1.5-sm6: after the 64 image slots (64..127)
+   constexpr uint32_t NvrExtBufferSlotBase     = 64u;  // DxvkContext m_uniformBuffers (read-only buffers in the UBO set)
+   constexpr uint32_t NvrExtSamplerSlotBase    = 64u;  // DxvkContext m_samplers
+ 
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 8190c41..aa1bbba 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -47,8 +47,10 @@
+ #define NVR_EXT_VERSION_MAJOR 1
+ #define NVR_EXT_VERSION_MINOR 6
+ 
+-#define NVR_EXT_MAX_SLOTS       32
+-#define NVR_EXT_MAX_BINDINGS    32
++// 1.5-sm6 (NVR SM6 builds of its own passes, 2026-10-26): 64 resource slots per type and 96 bindings per pipeline (were 32 / 32),
++// so a pass compiled without ps_3_0 limits is not held to 16-ish textures by the extension. NVR reads MaxSlots from GetInfo.
++#define NVR_EXT_MAX_SLOTS       64
++#define NVR_EXT_MAX_BINDINGS    96
+ #define NVR_EXT_MAX_PUSH_BYTES  240
+ 
+ enum NVR_EXT_BIND_TYPE {
+-- 
+2.40.0.windows.1
+

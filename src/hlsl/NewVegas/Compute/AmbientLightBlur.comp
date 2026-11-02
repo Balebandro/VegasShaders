@@ -1,0 +1,145 @@
+// AmbientLight's two blur passes (Effects/AmbientLight.fx.hlsl Blur, passes BlurX then BlurY) as ONE compute
+// dispatch (needs NVR DXVK; [Main.Main.Performance] AmbientLightBlurCompute, effects/AmbientLight.cpp).
+//
+// Same result as the two D3D9 passes: each 16x16 tile loads NVR_ALBuffer (the Estimate's output, rgb bounce, a
+// visibility) and the depth the blur reads round it into shared memory, runs pass X over the tile's rows and the
+// rows above and below it that pass Y reads, keeps that intermediate rounded to half floats (the D3D9 pass stores
+// it in an A16B16G16R16F target), then runs pass Y and writes the result. Same taps, weights, tolerances, BlurStep
+// and DebugView 3-6 early-out; the arithmetic follows fxc's ps_3_0 code for Blur (reciprocal tolerances, the
+// weights' clamp, the sums in tap order).
+//
+// Texture coordinates as the D3D9 pass sees them: the frame quad's (ShaderManager::CreateFrameVertex: +0.5 / full
+// size) at a half-resolution pixel, uv = p / halfSize + 0.5 / fullSize (DXVK puts D3D9's pixel centres there), and
+// each tap at uv + axis / halfSize * (i * side * BlurStep). Both textures are point sampled (CLAMP): NVR_ALBuffer's
+// texel is floor(tapUV * halfSize), clamped to the picture, read from shared memory; the depth (readDepthLod: the
+// full-resolution TESR_DepthBuffer x farZ) is the pixel's own read through the same point sampler at its uv, kept
+// in shared memory, and for a tap whose texel lies off the picture (the D3D9 sampler clamps at full resolution
+// there) or when BlurStep is not a whole number (a tap between two half-resolution texels may fall on another
+// full-resolution texel) it is read through the sampler at the tap's own uv, as the D3D9 pass does.
+//
+// Build: glslangValidator -V --target-env vulkan1.1 -S comp -o AmbientLightBlur.spv AmbientLightBlur.comp
+// (the .spv next to this file is what NVR loads: Shaders\NewVegasReloaded\Compute\AmbientLightBlur.spv)
+//
+// Dispatch: groups (ceil(halfW / 16), ceil(halfH / 16)); writes i_dst (NVR_AmbientLight1: what BlurX writes in
+// D3D9; the passes after it read it there, since the result cannot go back into the texture it reads).
+
+#version 450
+#extension GL_EXT_samplerless_texture_functions : enable
+#extension GL_GOOGLE_include_directive : enable
+
+#include "Common.glsl"
+
+#define TILE 16
+#define MAX_APRON 13                       // ceil(3 x BlurStep) + 1 at BlurStep 4 (BlurRadius is clamped to 0.5-4)
+#define SPAN (TILE + 2 * MAX_APRON)
+
+layout(local_size_x = TILE, local_size_y = TILE, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_buffer;            // NVR_ALBuffer: NVR_AmbientLight0 (A16B16G16R16F)
+layout(set = 1, binding = 1) uniform texture2D t_depth;             // TESR_DepthBuffer (CombineDepth's: linear depth / farZ)
+layout(set = 1, binding = 2, rgba16f) uniform writeonly image2D i_dst;   // NVR_AmbientLight1
+
+layout(push_constant) uniform Push {
+    vec4  layoutData;   //  0: NVR_ALLayout (zw: 1 / half-resolution size)
+    vec2  uvOffset;     // 16: the frame quad's texture offset (0.5 / full width, 0.5 / full height)
+    float blurRadius;   // 24: TESR_AmbientLightData2.z
+    float debugView;    // 28: TESR_AmbientLightData2.w
+    float farZ;         // 32: TESR_CameraData.y
+    uint  apron;        // 36: half-resolution texels loaded each side of the tile (<= MAX_APRON)
+    uint  wholeStep;    // 40: 1 = BlurStep is a whole number (every depth tap from shared memory inside the picture)
+    uint  samplerIndex; // 44: point, clamp (low 16 bits)
+    uint  width;        // 48: half-resolution size
+    uint  height;       // 52
+    uint  pad0;         // 56
+    uint  pad1;         // 60
+} pc;                   // 64 bytes
+
+shared uvec2 s_buffer[SPAN * SPAN];   // NVR_ALBuffer as half floats (its own format: exact)
+shared float s_depth[SPAN * SPAN];    // readDepthLod at each texel's own uv
+shared uvec2 s_mid[SPAN * TILE];      // pass X's result, half floats (the D3D9 intermediate target's format)
+
+const float weights[4] = float[4](0.30, 0.23, 0.11, 0.05);
+
+uvec2 packHalf4(vec4 v) { return uvec2(packHalf2x16(v.xy), packHalf2x16(v.zw)); }
+vec4 unpackHalf4(uvec2 p) { return vec4(unpackHalf2x16(p.x), unpackHalf2x16(p.y)); }
+
+float readDepthLod(vec2 uv) {
+    return textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).x * pc.farZ;
+}
+
+// The uv the D3D9 pass interpolates at half-resolution pixel p.
+vec2 pixelUV(ivec2 p) { return vec2(p) * pc.layoutData.zw + pc.uvOffset; }
+
+ivec2 regionOrigin() { return ivec2(gl_WorkGroupID.xy) * TILE - int(pc.apron); }
+int slot(ivec2 q) { ivec2 r = q - regionOrigin(); return r.y * SPAN + r.x; }   // q: a texel inside the loaded region
+
+// One pass of Blur at pixel p: along x it reads s_buffer, along y the intermediate s_mid (both by texel).
+vec4 blurPass(ivec2 p, bool alongY) {
+    ivec2 size = ivec2(pc.width, pc.height);
+    ivec2 origin = regionOrigin();
+    vec2 uv = pixelUV(p);
+    float blurStep = max(pc.blurRadius, 0.5);
+    vec2 axisStep = (alongY ? vec2(0.0, 1.0) : vec2(1.0, 0.0)) * pc.layoutData.zw;
+    int axis = alongY ? 1 : 0;
+
+    float depth = s_depth[slot(p)];
+    vec4 center = alongY ? unpackHalf4(s_mid[(p.y - origin.y) * TILE + (p.x - origin.x - int(pc.apron))]) : unpackHalf4(s_buffer[slot(p)]);
+    if (pc.debugView > 2.5 && pc.debugView < 6.5) return center;   // the diagnostics 3-6 unblurred
+
+    // fxc: 1 / max(depth * 0.03, 2) and 1 / max(depth * 0.25, 16) as reciprocals
+    vec2 toleranceInv = vec2(1.0 / max(depth * 0.03, 2.0), 1.0 / max(depth * 0.25, 16.0));
+    vec3 bounce = center.rgb * weights[0];
+    float visibility = center.a * weights[0];
+    vec2 total = vec2(weights[0]);   // x occlusion, y bounce
+    for (int i = 1; i < 4; i++) {
+        for (int side = -1; side <= 1; side += 2) {
+            vec2 tapUV = uv + axisStep * (blurStep * float(i * side));
+            int unclamped = int(floor(tapUV[axis] * float(size[axis])));
+            ivec2 tap = p;
+            tap[axis] = clamp(unclamped, 0, size[axis] - 1);
+            bool inside = unclamped == tap[axis];
+            float tapDepth = pc.wholeStep != 0u && inside ? s_depth[slot(tap)] : readDepthLod(tapUV);
+            float dz = abs(tapDepth - depth);
+            vec2 w = vec2(1.0) - dz * toleranceInv;
+            w = mix(vec2(0.0), w * weights[i], greaterThanEqual(w, vec2(0.0)));   // weights[i] * saturate(1 - dz / tolerance)
+            vec4 value = alongY ? unpackHalf4(s_mid[(tap.y - origin.y) * TILE + (tap.x - origin.x - int(pc.apron))]) : unpackHalf4(s_buffer[slot(tap)]);
+            visibility += value.a * w.x;
+            bounce += value.rgb * w.y;
+            total += w;
+        }
+    }
+    return vec4(bounce * (1.0 / total.y), visibility * (1.0 / total.x));
+}
+
+void main() {
+    ivec2 size = ivec2(pc.width, pc.height);
+    ivec2 origin = regionOrigin();
+    int apron = int(pc.apron);
+    int span = TILE + 2 * apron;
+    uint thread = gl_LocalInvocationIndex;
+
+    // 1. The region (tile + apron each side): NVR_ALBuffer and each texel's depth (texels off the picture: the edge's,
+    //    never read as such: every tap index is clamped first).
+    for (uint k = thread; k < uint(span * span); k += TILE * TILE) {
+        ivec2 q = origin + ivec2(int(k) % span, int(k) / span);
+        ivec2 c = clamp(q, ivec2(0), size - 1);
+        s_buffer[slot(q)] = packHalf4(texelFetch(t_buffer, c, 0));
+        s_depth[slot(q)] = readDepthLod(pixelUV(c));
+    }
+    barrier();
+
+    // 2. Pass X over the tile's columns, for every row of the region inside the picture (pass Y reads them).
+    for (uint k = thread; k < uint(span * TILE); k += TILE * TILE) {
+        ivec2 p = ivec2(gl_WorkGroupID.xy) * TILE + ivec2(int(k) % TILE, int(k) / TILE - apron);
+        if (p.y < 0 || p.y >= size.y) continue;
+        ivec2 c = ivec2(min(p.x, size.x - 1), p.y);   // a column past the picture: computed on the edge's, never used
+        vec4 x = blurPass(c, false);
+        s_mid[(p.y - origin.y) * TILE + (p.x - origin.x - apron)] = packHalf4(x);
+    }
+    barrier();
+
+    // 3. Pass Y, written where the D3D9 pass X writes (see the top).
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+    imageStore(i_dst, p, blurPass(p, true));
+}

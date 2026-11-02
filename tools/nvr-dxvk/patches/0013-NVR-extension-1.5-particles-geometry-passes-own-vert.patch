@@ -1,0 +1,323 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Mon, 26 Oct 2026 12:43:03 -0400
+Subject: [PATCH] NVR extension 1.5-particles: geometry passes (own vertex
+ shader reading buffers, instanced draws)
+
+A new interface ID3D9NvrExtGeometry, queried from ID3D9NvrExt (own GUID, so
+ID3D9NvrExt's method table is unchanged and older/other builds answer
+E_NOINTERFACE): CreateGeometryPipeline (a graphics pipeline whose vertex
+shader reads read-only storage buffers and uniform buffers by slot) and
+DrawGeometry (DrawShifted's pass with VertexCount x InstanceCount vertices,
+triangle list, no vertex input). First user: NVR's GPU particles (rain and
+snow drops simulated in a compute shader, collided with the scene depth).
+---
+ src/d3d9/d3d9_nvr_ext.cpp   | 108 +++++++++++++++++++++++++++++++++---
+ src/d3d9/d3d9_nvr_ext.h     |  29 +++++++++-
+ src/d3d9/d3d9_nvr_ext_api.h |  40 +++++++++++++
+ 3 files changed, 165 insertions(+), 12 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 14a537a..141bc8b 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -151,6 +151,12 @@ namespace dxvk {
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9NvrExt::QueryInterface(REFIID riid, void** ppvObject) {
++    // 1.5-particles: the geometry passes' interface hangs off the extension, not the device
++    if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtGeometry)) {
++      *ppvObject = ref(static_cast<ID3D9NvrExtGeometry*>(this));
++      return S_OK;
++    }
++
+     return m_device->QueryInterface(riid, ppvObject);
+   }
+ 
+@@ -346,6 +352,44 @@ namespace dxvk {
+   HRESULT STDMETHODCALLTYPE D3D9NvrExt::CreateGraphicsPipeline(
+     const NVR_EXT_GRAPHICS_PIPELINE_DESC* pDesc,
+           ID3D9NvrExtPipeline**           ppPipeline) {
++    return CreateGraphicsPipelineImpl(pDesc, 0u, nullptr, ppPipeline);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CreateGeometryPipeline(
++    const NVR_EXT_GEOMETRY_PIPELINE_DESC* pDesc,
++          ID3D9NvrExtPipeline**           ppPipeline) {
++    InitReturnPtr(ppPipeline);
++
++    if (unlikely(pDesc == nullptr || ppPipeline == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(pDesc->Graphics.pVertexSpirv == nullptr)) {
++      Logger::err("NVR ext: CreateGeometryPipeline: a vertex shader is required");
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (unlikely(pDesc->VertexBindingCount > NVR_EXT_MAX_BINDINGS || (pDesc->VertexBindingCount && pDesc->pVertexBindings == nullptr)))
++      return D3DERR_INVALIDCALL;
++
++    for (uint32_t i = 0; i < pDesc->VertexBindingCount; i++) {
++      const auto& b = pDesc->pVertexBindings[i];
++
++      if (unlikely(!((b.Type == NVR_EXT_BIND_STORAGE_BUFFER && !b.Writes) || b.Type == NVR_EXT_BIND_UNIFORM_BUFFER))) {
++        Logger::err(str::format("NVR ext: CreateGeometryPipeline: vertex binding ", i, ": only read-only storage buffers and uniform buffers"));
++        return D3DERR_INVALIDCALL;
++      }
++    }
++
++    return CreateGraphicsPipelineImpl(&pDesc->Graphics, pDesc->VertexBindingCount, pDesc->pVertexBindings, ppPipeline);
++  }
++
++
++  HRESULT D3D9NvrExt::CreateGraphicsPipelineImpl(
++    const NVR_EXT_GRAPHICS_PIPELINE_DESC* pDesc,
++          uint32_t                        VertexBindingCount,
++    const NVR_EXT_BINDING_DESC*           pVertexBindings,
++          ID3D9NvrExtPipeline**           ppPipeline) {
+     InitReturnPtr(ppPipeline);
+ 
+     if (unlikely(pDesc == nullptr || ppPipeline == nullptr))
+@@ -378,6 +422,31 @@ namespace dxvk {
+     if (FAILED(hr))
+       return hr;
+ 
++    // 1.5-particles: the vertex stage's own bindings (buffers only, no push block). A slot both
++    // stages read is one entry in the pipeline's slot list.
++    small_vector<DxvkBindingInfo, 16>       vsDxvkBindings;
++
++    if (VertexBindingCount) {
++      small_vector<D3D9NvrExtBindingInfo, 8> vsOwnBindings;
++      uint64_t vsPushMask = 0u;
++
++      hr = BuildPipelineBindings(name, VertexBindingCount, pVertexBindings, 0u, FALSE,
++        vsDxvkBindings, vsOwnBindings, vsPushMask);
++
++      if (FAILED(hr))
++        return hr;
++
++      for (size_t i = 0; i < vsOwnBindings.size(); i++) {
++        bool found = false;
++
++        for (size_t j = 0; j < ownBindings.size() && !found; j++)
++          found = ownBindings[j].slot == vsOwnBindings[i].slot && ownBindings[j].type == vsOwnBindings[i].type;
++
++        if (!found)
++          ownBindings.push_back(vsOwnBindings[i]);
++      }
++    }
++
+     // Blend state, the same for every target
+     VkColorComponentFlags writeMask = pDesc->ColorWriteMask
+       ? VkColorComponentFlags(pDesc->ColorWriteMask & 0xFu)
+@@ -429,6 +498,8 @@ namespace dxvk {
+       }
+ 
+       DxvkSpirvShaderCreateInfo vsInfo;
++      vsInfo.bindingCount = vsDxvkBindings.size();
++      vsInfo.bindings = vsDxvkBindings.data();
+       vsInfo.debugName = std::string(name) + " VS";
+ 
+       Rc<DxvkShader> vs = pDesc->pVertexSpirv
+@@ -440,10 +511,12 @@ namespace dxvk {
+         return D3DERR_INVALIDCALL;
+       }
+ 
+-      *ppPipeline = ref(new D3D9NvrExtPipeline(std::move(vs), std::move(fs), pDesc->PushConstantSize,
+-        std::move(ownBindings), pDesc->ColorTargetCount, blend));
++      auto* pipeline = new D3D9NvrExtPipeline(std::move(vs), std::move(fs), pDesc->PushConstantSize,
++        std::move(ownBindings), pDesc->ColorTargetCount, blend);
++      pipeline->SetVertexResources(VertexBindingCount != 0u);
++      *ppPipeline = ref(pipeline);
+       Logger::info(str::format("NVR ext: graphics pipeline '", name, "' created (", pDesc->BindingCount, " bindings, ",
+-        pDesc->PushConstantSize, " push bytes, ", pDesc->ColorTargetCount, " targets)"));
++        VertexBindingCount, " vertex bindings, ", pDesc->PushConstantSize, " push bytes, ", pDesc->ColorTargetCount, " targets)"));
+       return D3D_OK;
+     } catch (const DxvkError& e) {
+       Logger::err(str::format("NVR ext: ", name, ": ", e.message()));
+@@ -968,7 +1041,18 @@ namespace dxvk {
+   }
+ 
+ 
+-  HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY, const NVR_EXT_DEPTH_STENCIL* pDepthStencil) {
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::DrawGeometry(const NVR_EXT_GEOMETRY_DRAW_DESC* pDesc) {
++    if (unlikely(pDesc == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(!pDesc->VertexCount || !pDesc->InstanceCount))
++      return D3D_OK;
++
++    return DrawImpl(&pDesc->Draw, 0.0f, 0.0f, nullptr, pDesc->VertexCount, pDesc->InstanceCount);
++  }
++
++
++  HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY, const NVR_EXT_DEPTH_STENCIL* pDepthStencil, uint32_t VertexCount, uint32_t InstanceCount) {
+     D3D9DeviceLock lock = m_device->LockDevice();
+ 
+     if (unlikely(pDesc == nullptr || pDesc->pPipeline == nullptr))
+@@ -1159,7 +1243,12 @@ namespace dxvk {
+       cStencilRef  = stencilRef,
+       cBound       = std::move(bound),
+       cPush        = push,
+-      cPushSize    = pipeline->GetPushSize()
++      cPushSize    = pipeline->GetPushSize(),
++      cVertexCount = VertexCount,
++      cInstances   = InstanceCount,
++      cResStages   = pipeline->HasVertexResources()
++        ? VkShaderStageFlags(VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT)
++        : VkShaderStageFlags(VK_SHADER_STAGE_FRAGMENT_BIT)
+     ] (DxvkContext* ctx) {
+       constexpr VkShaderStageFlags Stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+ 
+@@ -1220,17 +1309,18 @@ namespace dxvk {
+         ctx->setBlendMode(i, mode);
+       }
+ 
+-      NvrBindResources(ctx, Stage, cBound);
++      // 1.5-particles: a geometry pipeline's vertex shader reads resources as well (cResStages)
++      NvrBindResources(ctx, cResStages, cBound);
+ 
+       if (cPushSize)
+         ctx->pushData(Stage, 0u, cPushSize, cPush.data());
+ 
+       VkDrawIndirectCommand draw = { };
+-      draw.vertexCount = 3u;
+-      draw.instanceCount = 1u;
++      draw.vertexCount = cVertexCount;
++      draw.instanceCount = cInstances;
+       ctx->draw(1u, &draw);
+ 
+-      NvrUnbindResources(ctx, Stage, cBound);
++      NvrUnbindResources(ctx, cResStages, cBound);
+       ctx->nvrSetState(std::move(savedState));
+     });
+ 
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index 5c3c57e..a0aa83c 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -71,6 +71,11 @@ namespace dxvk {
+ 
+     const DxvkBlendMode& GetBlendMode() const { return m_blend; }
+ 
++    /** 1.5-particles: the vertex shader reads resources too (bound for both stages). */
++    void SetVertexResources(bool v) { m_vertexResources = v; }
++
++    bool HasVertexResources() const { return m_vertexResources; }
++
+     const D3D9NvrExtBindingInfo* FindBinding(uint32_t slot, NVR_EXT_BIND_TYPE type) const;
+ 
+   private:
+@@ -82,6 +87,7 @@ namespace dxvk {
+     bool                                     m_graphics = false;
+     uint32_t                                 m_targetCount = 0u;
+     DxvkBlendMode                            m_blend = { };
++    bool                                     m_vertexResources = false;
+ 
+   };
+ 
+@@ -127,7 +133,7 @@ namespace dxvk {
+    *
+    * Like D3D9VkInteropDevice: its reference count is the device's.
+    */
+-  class D3D9NvrExt final : public ID3D9NvrExt {
++  class D3D9NvrExt final : public ID3D9NvrExt, public ID3D9NvrExtGeometry {
+ 
+   public:
+ 
+@@ -241,8 +247,23 @@ namespace dxvk {
+             FLOAT                           ShiftX,
+             FLOAT                           ShiftY);
+ 
++    // 1.5-particles: ID3D9NvrExtGeometry
++    HRESULT STDMETHODCALLTYPE CreateGeometryPipeline(
++      const NVR_EXT_GEOMETRY_PIPELINE_DESC* pDesc,
++            ID3D9NvrExtPipeline**           ppPipeline);
++
++    HRESULT STDMETHODCALLTYPE DrawGeometry(
++      const NVR_EXT_GEOMETRY_DRAW_DESC*     pDesc);
++
+   private:
+ 
++    /** CreateGraphicsPipeline and CreateGeometryPipeline. */
++    HRESULT CreateGraphicsPipelineImpl(
++      const NVR_EXT_GRAPHICS_PIPELINE_DESC* pDesc,
++            uint32_t                        VertexBindingCount,
++      const NVR_EXT_BINDING_DESC*           pVertexBindings,
++            ID3D9NvrExtPipeline**           ppPipeline);
++
+     struct TextureRef {
+       D3D9CommonTexture* texture = nullptr;
+       uint32_t           mipLevel = 0u;
+@@ -257,12 +278,14 @@ namespace dxvk {
+ 
+     uint64_t m_profileOverhead100 = 0u;   // NVR profiling: the timer's own cost per call x 100 (SetProfiling)
+ 
+-    /** Draw, DrawShifted and DrawDepthStencil (pDepthStencil null: none). */
++    /** Draw, DrawShifted, DrawDepthStencil (pDepthStencil null: none) and DrawGeometry (VertexCount x InstanceCount). */
+     HRESULT DrawImpl(
+       const NVR_EXT_DRAW_DESC*              pDesc,
+             float                           ShiftX,
+             float                           ShiftY,
+-      const NVR_EXT_DEPTH_STENCIL*          pDepthStencil);
++      const NVR_EXT_DEPTH_STENCIL*          pDepthStencil,
++            uint32_t                        VertexCount = 3u,
++            uint32_t                        InstanceCount = 1u);
+ 
+     /** Validates a binding list and resolves it for the CS thread (shared by Dispatch and Draw). */
+     HRESULT ResolveBindings(
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 0aab58c..8190c41 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -475,6 +475,46 @@ ID3D9NvrExt : public IUnknown {
+           FLOAT                           ShiftY) = 0;
+ };
+ 
++/*
++ * 1.5-particles: passes with their own geometry (GPU particles, any instanced quads).
++ *
++ * A separate interface, queried from ID3D9NvrExt (QueryInterface with its GUID), so a d3d9.dll
++ * without it simply returns E_NOINTERFACE and ID3D9NvrExt's own method table is untouched.
++ *
++ * The pipeline is a full-screen pipeline whose vertex shader is required and may read
++ * resources of its own: storage buffers (read only) and uniform buffers, by slot like
++ * every other binding (no samplers, no push block in the vertex stage). A slot may be
++ * listed for both stages. The draw is DrawShifted's with a vertex and an instance count:
++ * VertexCount vertices x InstanceCount instances as a triangle list, no vertex input
++ * (gl_VertexIndex / gl_InstanceIndex), no depth buffer (a shader that needs the scene's
++ * depth samples it), no culling. Same state save/restore as Draw.
++ */
++struct NVR_EXT_GEOMETRY_PIPELINE_DESC {
++  NVR_EXT_GRAPHICS_PIPELINE_DESC Graphics;           // pVertexSpirv must be given
++  UINT                        VertexBindingCount;
++  const NVR_EXT_BINDING_DESC* pVertexBindings;       // STORAGE_BUFFER (Writes = FALSE) or UNIFORM_BUFFER
++};
++
++struct NVR_EXT_GEOMETRY_DRAW_DESC {
++  NVR_EXT_DRAW_DESC           Draw;                  // bindings: the fragment's and the vertex stage's together
++  UINT                        VertexCount;           // per instance
++  UINT                        InstanceCount;
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d309")
++ID3D9NvrExtGeometry : public IUnknown {
++  virtual HRESULT STDMETHODCALLTYPE CreateGeometryPipeline(
++    const NVR_EXT_GEOMETRY_PIPELINE_DESC* pDesc,
++          ID3D9NvrExtPipeline**           ppPipeline) = 0;
++
++  virtual HRESULT STDMETHODCALLTYPE DrawGeometry(
++    const NVR_EXT_GEOMETRY_DRAW_DESC*     pDesc) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtGeometry, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x09);
++#endif
++
+ /*
+  * HDR output (extension 1.5-hdr; its own interface, so the main vtable is untouched).
+  *
+-- 
+2.40.0.windows.1
+

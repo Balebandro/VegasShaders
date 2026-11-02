@@ -1,0 +1,1795 @@
+From 7980f604453799c62e5c54482c302870a1d95eb9 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Wed, 28 Oct 2026 12:50:39 -0400
+Subject: [PATCH] NVR extension 1.8-rt: ray tracing core (ID3D9NvrExtRt):
+ geometry staging for the 64-bit ray tracing helper, opt-in in-process
+ acceleration structures
+
+Windows' 32-bit Vulkan drivers (AMD 25.10, NVIDIA 582; measured 2026-10-28) offer no ray tracing,
+so NVR traces in a 64-bit helper (NvrRtHelper.exe, NVR repository tools/nvr-rt-helper) and the game
+only hands it triangles: MeasureGeometry / StageGeometry / FlushStagedGeometry convert D3D9 vertex
+and index ranges (float3/float4/half4 positions, 16/32-bit lists and strips, base vertex, no index
+buffer) by device address into a staging copy of an R32F shared image (the arena) and copy the
+touched rows into it. Work on every GPU with the fork.
+
+The in-process path (CreateGeometry / CreateScene / BuildScene, ray queries in NVR's own passes by
+the scene's address) enables VK_KHR_acceleration_structure + VK_KHR_ray_query only with dxvk.conf
+nvr.rayTracing = True and a driver that offers them to this process (Linux RADV); default off, the
+Vulkan device is then created as without this patch.
+
+DXVK edits: the three extensions and their features (dxvk_device_info), their entry points
+(vulkan_loader.h), DxvkContext::nvrBeginRawCommands / nvrEndRawCommands / nvrFullBarrier /
+nvrTrack*, DxvkCommandList::nvrExecBuffer, a friend line in D3D9DeviceEx (FlushBuffer).
+New: d3d9_nvr_rt.{h,cpp}, shaders/d3d9_nvr_rt_convert.comp.
+---
+ src/d3d9/d3d9_device.h                    |   1 +
+ src/d3d9/d3d9_nvr_ext.cpp                 |   9 +
+ src/d3d9/d3d9_nvr_ext.h                   |   4 +
+ src/d3d9/d3d9_nvr_ext_api.h               | 197 +++++
+ src/d3d9/d3d9_nvr_rt.cpp                  | 924 ++++++++++++++++++++++
+ src/d3d9/d3d9_nvr_rt.h                    | 234 ++++++
+ src/d3d9/meson.build                      |   2 +
+ src/d3d9/shaders/d3d9_nvr_rt_convert.comp |  97 +++
+ src/dxvk/dxvk_cmdlist.h                   |  12 +-
+ src/dxvk/dxvk_context.cpp                 |  15 +
+ src/dxvk/dxvk_context.h                   |  35 +
+ src/dxvk/dxvk_device_info.cpp             |  23 +
+ src/dxvk/dxvk_device_info.h               |   6 +
+ src/vulkan/vulkan_loader.h                |   9 +
+ 14 files changed, 1567 insertions(+), 1 deletion(-)
+ create mode 100644 src/d3d9/d3d9_nvr_rt.cpp
+ create mode 100644 src/d3d9/d3d9_nvr_rt.h
+ create mode 100644 src/d3d9/shaders/d3d9_nvr_rt_convert.comp
+
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index ebdf55e..ed9a507 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -234,6 +234,7 @@ namespace dxvk {
+     friend D3D9NvrExt;
+     friend D3D9NvrExtHdr;
+     friend D3D9NvrTess;
++    friend class D3D9NvrRt;   // NVR ray tracing core (fork patch 0028): FlushBuffer
+ 
+     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
+   public:
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 558f0ae..19f0012 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -1,4 +1,5 @@
+ #include "d3d9_nvr_ext.h"
++#include "d3d9_nvr_rt.h"
+ #include "d3d9_device.h"
+ #include "d3d9_common_texture.h"
+ #include "d3d9_surface.h"
+@@ -169,6 +170,14 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    // 1.8-rt: the ray tracing core (its own object, made once; it answers on every GPU, Supported says whether it works)
++    if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtRt)) {
++      if (!m_rt)
++        m_rt = std::make_unique<D3D9NvrRt>(m_device);
++      *ppvObject = ref(static_cast<ID3D9NvrExtRt*>(m_rt.get()));
++      return S_OK;
++    }
++
+     // 1.7-dlss: images and semaphores shared with another process
+     if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtShare)) {
+       *ppvObject = ref(static_cast<ID3D9NvrExtShare*>(this));
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index 3383b4a..09fdc20 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -20,6 +20,7 @@
+ #include "../util/util_small_vector.h"
+ 
+ #include <array>
++#include <memory>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+@@ -29,6 +30,7 @@ namespace dxvk {
+   class D3D9DeviceEx;
+   class D3D9CommonTexture;
+   class D3D9ShaderAnalysis;
++  class D3D9NvrRt;
+ 
+   /** Binding slot bases, chosen above everything the D3D9 side uses. */
+   constexpr uint32_t NvrExtImageSlotBase      = 64u;  // DxvkContext m_resources (image views)
+@@ -447,6 +449,8 @@ namespace dxvk {
+ 
+     D3D9DeviceEx* m_device;
+ 
++    std::unique_ptr<D3D9NvrRt> m_rt;   // 1.8-rt (fork patch 0028): made at the first QueryInterface for it
++
+   };
+ 
+ }
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 40f1844..905263d 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -966,3 +966,200 @@ __CRT_UUID_DECL(ID3D9NvrExtShare,       0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,
+ __CRT_UUID_DECL(ID3D9NvrExtSharedImage, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x27);
+ __CRT_UUID_DECL(ID3D9NvrExtSharedFence, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x28);
+ #endif
++
++/*
++ * Ray tracing core ("1.8-rt", fork patch 0028; docs/next/FORK-RT-CORE.md in the NVR repository).
++ *
++ * Acceleration structures built from the game's own D3D9 vertex/index buffers, and ray queries (GLSL
++ * GL_EXT_ray_query) in NVR's passes. A separate interface, queried from ID3D9NvrExt with its GUID, so a
++ * d3d9.dll without it answers E_NOINTERFACE and the rest of the extension is untouched.
++ *
++ * Feature detection: the fork enables VK_KHR_acceleration_structure + VK_KHR_ray_query (with
++ * VK_KHR_deferred_host_operations; buffer device addresses DXVK already requires) only when dxvk.conf says
++ * `nvr.rayTracing = True` AND the GPU's driver offers them to this (32-bit) process. Default False: measured
++ * 2026-10-28, AMD's and NVIDIA's 32-bit Windows drivers offer no ray tracing at all, so on Windows NVR traces
++ * in a 64-bit helper (MeasureGeometry / StageGeometry / FlushStagedGeometry at the end, which work everywhere).
++ * Without in-process support (the default; any Pascal GPU such as the GTX 1070) GetRtInfo says Supported = FALSE
++ * and CreateGeometry / CreateScene / BuildScene fail with D3DERR_NOTAVAILABLE: nothing created, nothing recorded,
++ * the Vulkan device is created exactly as without this patch.
++ *
++ * Model:
++ * - A geometry (ID3D9NvrExtRtGeometry) is one bottom-level structure: the triangles of one or more D3D9 draws
++ *   of one vertex buffer (+ index buffer), in object space. CreateGeometry records, in order with the D3D9
++ *   work, a copy of the positions (any stride / offset; float3, float4 or half4) and indices (16 or 32 bit;
++ *   lists and strips, strips turned into lists) into the fork's own memory, then the build. The D3D9 buffers
++ *   may change or go away afterwards: the structure keeps its own copy. Static geometry: a vertex buffer the
++ *   game rewrites (skinning on the CPU, morphs) needs a new geometry.
++ * - A scene (ID3D9NvrExtRtScene) is one top-level structure: up to MaxInstances instances of geometries,
++ *   each with a 3x4 transform. BuildScene records the instance upload and a full rebuild (fast-build
++ *   flavour); passes recorded after it see the new scene, passes recorded before it the old one.
++ * - A pass (Draw / Dispatch / DrawGeometry ...) reads the scene through its GPU address in the push block:
++ *     #extension GL_EXT_ray_query : require
++ *     layout(push_constant) uniform Push { uvec2 scene; ... };       // ID3D9NvrExtRtScene::GetAddress, lo/hi
++ *     rayQueryEXT q;
++ *     rayQueryInitializeEXT(q, accelerationStructureEXT(scene), gl_RayFlagsTerminateOnFirstHitEXT,
++ *                           0xFF, origin, tMin, direction, tMax);
++ *     while (rayQueryProceedEXT(q)) { }
++ *     bool hit = rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
++ *   Compile with glslangValidator -V --target-env vulkan1.2 (ray queries need SPIR-V 1.4). No descriptor is
++ *   involved (no new binding type): the address alone names the structure, and the fork keeps every structure
++ *   a scene refers to alive and complete before any pass recorded after BuildScene runs.
++ * - Spaces: whatever the caller uses consistently. NVR uses camera-relative world space (Gamebryo units,
++ *   z up, origin at the camera), as its D3D9 passes do, so floats stay precise far from the world origin.
++ *
++ * Threading: like every extension method, the device's thread. All work is recorded into DXVK's command
++ * stream (CS thread); nothing waits for the GPU.
++ */
++enum NVR_EXT_RT_POSITION_FORMAT {
++  NVR_EXT_RT_POSITION_FLOAT3 = 0,   // D3DDECLTYPE_FLOAT3
++  NVR_EXT_RT_POSITION_FLOAT4 = 1,   // D3DDECLTYPE_FLOAT4 (w ignored)
++  NVR_EXT_RT_POSITION_HALF4  = 2,   // D3DDECLTYPE_FLOAT16_4 (w ignored)
++};
++
++enum NVR_EXT_RT_TOPOLOGY {
++  NVR_EXT_RT_TRIANGLE_LIST  = 0,
++  NVR_EXT_RT_TRIANGLE_STRIP = 1,    // degenerate triangles (strip joins) are kept: zero area, never hit
++};
++
++/** One D3D9 draw's triangles (DrawIndexedPrimitive's or DrawPrimitive's arguments). */
++struct NVR_EXT_RT_RANGE {
++  NVR_EXT_RT_TOPOLOGY Topology;
++  UINT                StartIndex;      // first index (indexed) or first vertex (no index buffer)
++  UINT                PrimitiveCount;  // triangles, as D3D9 counts them
++  INT                 BaseVertex;      // added to every index (BaseVertexIndex); indexed only
++};
++
++#define NVR_EXT_RT_MAX_RANGES 1024
++
++struct NVR_EXT_RT_GEOMETRY_DESC {
++  IDirect3DVertexBuffer9*     pVertexBuffer;
++  UINT                        PositionOffset;   // bytes from the buffer's start to vertex 0's position (stream offset + element offset)
++  UINT                        VertexStride;     // bytes
++  UINT                        VertexCount;      // vertices from vertex 0 that indices may address (index + BaseVertex < VertexCount)
++  NVR_EXT_RT_POSITION_FORMAT  PositionFormat;
++  IDirect3DIndexBuffer9*      pIndexBuffer;     // null: non-indexed ranges; 16 or 32 bit from the buffer's format
++  UINT                        RangeCount;       // 1..NVR_EXT_RT_MAX_RANGES
++  const NVR_EXT_RT_RANGE*     pRanges;
++  UINT                        Flags;            // reserved, 0 (1.8: every geometry is opaque, no any-hit; alpha testing is later work)
++  const char*                 pDebugName;
++};
++
++/** Instance flags (VkGeometryInstanceFlagBitsKHR's values). */
++enum NVR_EXT_RT_INSTANCE_FLAGS {
++  NVR_EXT_RT_INSTANCE_CULL_DISABLE = 0x1,   // both faces count whatever the ray flags say
++  NVR_EXT_RT_INSTANCE_FLIP_FACING  = 0x2,
++  NVR_EXT_RT_INSTANCE_FORCE_OPAQUE = 0x4,
++};
++
++struct NVR_EXT_RT_INSTANCE {
++  struct ID3D9NvrExtRtGeometry* pGeometry;       // null: the entry is skipped
++  FLOAT                         Transform[3][4]; // object -> scene: p' = (row0 . p1, row1 . p1, row2 . p1), p1 = (x, y, z, 1)
++  UINT                          InstanceId;      // low 24 bits: rayQueryGetIntersectionInstanceCustomIndexEXT
++  UINT                          Mask;            // low 8 bits, ANDed with the ray's cull mask (0: never hit)
++  UINT                          Flags;           // NVR_EXT_RT_INSTANCE_FLAGS
++};
++
++struct NVR_EXT_RT_INFO {
++  BOOL    Supported;          // acceleration structures and ray queries are on for this device
++  UINT    VersionMinor;       // 0 for 1.8-rt as first written; bumped (never broken) by additions
++  char    Reason[96];         // why not (Supported FALSE): "no VK_KHR_ray_query", "nvr.rayTracing = False", ...
++  UINT    MaxInstances;       // per scene (the device's limit, capped at 1 << 20)
++  UINT64  MaxPrimitiveCount;  // per geometry
++};
++
++/** Sizes of one geometry (MeasureGeometry / StageGeometry). */
++struct NVR_EXT_RT_GEOMETRY_INFO {
++  UINT    VertexCount;
++  UINT    TriangleCount;
++  UINT    Texels;             // 3 x VertexCount + 3 x TriangleCount: the 32-bit words StageGeometry writes
++};
++
++/** Counters since the device was made (and of the last BuildScene). */
++struct NVR_EXT_RT_STATS {
++  UINT    Geometries;         // alive
++  UINT64  Triangles;          // in the alive geometries
++  UINT64  GeometryBytes;      // their structures' memory (not the scratch)
++  UINT64  GeometriesBuilt;    // ever
++  UINT    Scenes;             // alive
++  UINT    LastInstances;      // instances in the last BuildScene (after skipping null geometries)
++  UINT64  SceneBuilds;        // ever
++  UINT64  SceneBytes;         // the alive scenes' structures + instance buffers
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d331")
++ID3D9NvrExtRtGeometry : public IUnknown {
++  virtual UINT STDMETHODCALLTYPE GetTriangleCount() = 0;
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d332")
++ID3D9NvrExtRtScene : public IUnknown {
++  /** The top-level structure's GPU address for accelerationStructureEXT(uvec2(lo, hi)); fixed for the scene's life. */
++  virtual UINT64 STDMETHODCALLTYPE GetAddress() = 0;
++
++  virtual UINT STDMETHODCALLTYPE GetMaxInstances() = 0;
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d330")
++ID3D9NvrExtRt : public IUnknown {
++  virtual void STDMETHODCALLTYPE GetRtInfo(
++          NVR_EXT_RT_INFO*                pInfo) = 0;
++
++  /**
++   * Records the copy of the triangles and the build of one bottom-level structure (see the model above).
++   * D3DERR_INVALIDCALL for a bad description (the DXVK log says why), D3DERR_NOTAVAILABLE without ray tracing,
++   * E_OUTOFMEMORY when the memory could not be had. A range that reads past either buffer is refused.
++   */
++  virtual HRESULT STDMETHODCALLTYPE CreateGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++          ID3D9NvrExtRtGeometry**         ppGeometry) = 0;
++
++  /** A scene of up to MaxInstances instances (memory is reserved for that many); empty until BuildScene. */
++  virtual HRESULT STDMETHODCALLTYPE CreateScene(
++          UINT                            MaxInstances,
++    const char*                           pDebugName,
++          ID3D9NvrExtRtScene**            ppScene) = 0;
++
++  /**
++   * Records the instance upload and the rebuild of the scene. Count 0 makes it an empty scene (every ray
++   * misses). Count above the scene's MaxInstances fails (D3DERR_INVALIDCALL).
++   */
++  virtual HRESULT STDMETHODCALLTYPE BuildScene(
++          ID3D9NvrExtRtScene*             pScene,
++          UINT                            Count,
++    const NVR_EXT_RT_INSTANCE*            pInstances) = 0;
++
++  virtual void STDMETHODCALLTYPE GetRtStats(
++          NVR_EXT_RT_STATS*               pStats) = 0;
++
++  /*
++   * Geometry for a ray tracing HELPER process (NvrRtHelper.exe; docs/next/FORK-RT-CORE.md). These three work on
++   * every GPU that has the fork (no ray tracing in this process needed): Windows' 32-bit Vulkan drivers offer no
++   * ray tracing, so NVR's scene lives in a 64-bit helper and the game only hands it triangles.
++   *
++   * The arena is an ID3D9NvrExtSharedImage of format NVR_EXT_SHARED_R32F used as raw 32-bit words, row-major
++   * (texel t = (t % Width, t / Width)). StageGeometry queues the conversion of one geometry to texels DstTexel ..
++   * DstTexel + Texels - 1: first 3 x VertexCount floats (x, y, z of each vertex, object space), then 3 x TriangleCount
++   * uints (the triangle list, indices from the geometry's vertex 0; strips turned into lists, out-of-range triangles
++   * made degenerate). FlushStagedGeometry records every queued conversion (one block, between full barriers) and
++   * copies the touched rows into the arena; call it once a frame, before SignalShared, and only after the previous
++   * frame's WaitShared was recorded (the helper reads the arena between the two).
++   */
++  virtual HRESULT STDMETHODCALLTYPE MeasureGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++          NVR_EXT_RT_GEOMETRY_INFO*       pInfo) = 0;
++
++  virtual HRESULT STDMETHODCALLTYPE StageGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++          ID3D9NvrExtSharedImage*         pArena,
++          UINT                            DstTexel,
++          NVR_EXT_RT_GEOMETRY_INFO*       pInfo) = 0;
++
++  virtual HRESULT STDMETHODCALLTYPE FlushStagedGeometry(
++          ID3D9NvrExtSharedImage*         pArena) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtRt,         0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x30);
++__CRT_UUID_DECL(ID3D9NvrExtRtGeometry, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x31);
++__CRT_UUID_DECL(ID3D9NvrExtRtScene,    0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x32);
++#endif
+diff --git a/src/d3d9/d3d9_nvr_rt.cpp b/src/d3d9/d3d9_nvr_rt.cpp
+new file mode 100644
+index 0000000..888cc26
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_rt.cpp
+@@ -0,0 +1,924 @@
++#include "d3d9_nvr_rt.h"
++#include "d3d9_device.h"
++#include "d3d9_buffer.h"
++#include "d3d9_nvr_ext.h"
++
++#include "../dxvk/dxvk_context.h"
++#include "../dxvk/dxvk_shader_spirv.h"
++
++#include <d3d9_nvr_rt_convert.h>
++
++#include <algorithm>
++#include <cstring>
++
++namespace dxvk {
++
++  namespace {
++
++    /** The push block of d3d9_nvr_rt_convert.comp. */
++    struct D3D9NvrRtConvertPush {
++      uint64_t src;
++      uint64_t dst;
++      uint32_t mode;
++      uint32_t count;
++      uint32_t srcOffset;
++      uint32_t stride;
++      int32_t  baseVertex;
++      uint32_t dstOffset;
++      uint32_t vertexCount;
++      uint32_t pad;
++    };
++
++    constexpr uint32_t ModePositionsFloat = 0u;
++    constexpr uint32_t ModePositionsHalf4 = 1u;
++    constexpr uint32_t ModeList           = 2u;
++    constexpr uint32_t ModeStrip          = 3u;
++
++    constexpr size_t   MaxPendingJobs      = 512u;
++    constexpr uint64_t MaxPendingTriangles = 4u << 20;
++
++    VkDeviceSize AlignUp(VkDeviceSize v, VkDeviceSize a) {
++      return (v + a - 1u) / a * a;
++    }
++
++  }
++
++
++  ////////////////////////////////
++  // Objects
++  ///////////////////////////////
++
++  D3D9NvrRtAccel::~D3D9NvrRtAccel() {
++    if (m_handle)
++      m_vkd->vkDestroyAccelerationStructureKHR(m_vkd->device(), m_handle, nullptr);
++  }
++
++
++  D3D9NvrRtGeometry::~D3D9NvrRtGeometry() {
++    m_rt->OnGeometryGone(m_triangles, m_accel->size());
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRtGeometry::QueryInterface(REFIID riid, void** ppvObject) {
++    if (ppvObject == nullptr)
++      return E_POINTER;
++
++    *ppvObject = nullptr;
++
++    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D9NvrExtRtGeometry)) {
++      *ppvObject = ref(this);
++      return S_OK;
++    }
++
++    return E_NOINTERFACE;
++  }
++
++
++  D3D9NvrRtScene::~D3D9NvrRtScene() {
++    m_rt->OnSceneGone(m_tlas->size() + m_instances->info().size, m_state, m_tlas);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRtScene::QueryInterface(REFIID riid, void** ppvObject) {
++    if (ppvObject == nullptr)
++      return E_POINTER;
++
++    *ppvObject = nullptr;
++
++    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D9NvrExtRtScene)) {
++      *ppvObject = ref(this);
++      return S_OK;
++    }
++
++    return E_NOINTERFACE;
++  }
++
++
++  ////////////////////////////////
++  // The interface
++  ///////////////////////////////
++
++  D3D9NvrRt::D3D9NvrRt(D3D9DeviceEx* pDevice)
++  : m_device(pDevice) {
++    Rc<DxvkDevice> device = m_device->GetDXVKDevice();
++    const DxvkDeviceFeatures& features = device->features();
++
++    // The conversion shader serves both paths (the helper's arena and in-process builds)
++    try {
++      DxvkSpirvShaderCreateInfo info;
++      info.localPushData = DxvkPushDataBlock(VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(D3D9NvrRtConvertPush), 4u, 0u);
++      info.debugName = "NVR rt convert";
++      m_convert = new DxvkSpirvShader(info, d3d9_nvr_rt_convert);
++    } catch (const DxvkError& e) {
++      m_reason = str::format("the conversion shader failed: ", e.message());
++      Logger::err(str::format("NVR ext rt: ", m_reason));
++      return;
++    }
++
++    if (!features.khrAccelerationStructure.accelerationStructure || !features.khrRayQuery.rayQuery) {
++      m_reason = "no in-process ray tracing (dxvk.conf nvr.rayTracing is off, or this 32-bit driver has no VK_KHR_ray_query): use the helper";
++      Logger::info(str::format("NVR ext rt: geometry staging for the ray tracing helper ready; ", m_reason));
++      return;
++    }
++
++    VkPhysicalDeviceAccelerationStructurePropertiesKHR asProperties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR };
++    VkPhysicalDeviceProperties2 properties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
++    properties.pNext = &asProperties;
++
++    Rc<DxvkAdapter> adapter = device->adapter();
++    adapter->vki()->vkGetPhysicalDeviceProperties2(adapter->handle(), &properties);
++
++    m_scratchAlign  = std::max<VkDeviceSize>(asProperties.minAccelerationStructureScratchOffsetAlignment, 256u);
++    m_maxInstances  = uint32_t(std::min<uint64_t>(asProperties.maxInstanceCount, 1u << 20));
++    m_maxPrimitives = asProperties.maxPrimitiveCount;
++
++    m_supported = true;
++    Logger::info(str::format("NVR ext rt: in-process ray tracing on ", properties.properties.deviceName,
++      " (max ", m_maxInstances, " instances a scene, ", m_maxPrimitives, " triangles a geometry, scratch alignment ",
++      asProperties.minAccelerationStructureScratchOffsetAlignment, ")"));
++  }
++
++
++  D3D9NvrRt::~D3D9NvrRt() {
++
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrRt::AddRef() {
++    return m_device->AddRef();
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrRt::Release() {
++    return m_device->Release();
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::QueryInterface(REFIID riid, void** ppvObject) {
++    return m_device->QueryInterface(riid, ppvObject);
++  }
++
++
++  void STDMETHODCALLTYPE D3D9NvrRt::GetRtInfo(NVR_EXT_RT_INFO* pInfo) {
++    if (pInfo == nullptr)
++      return;
++
++    *pInfo = NVR_EXT_RT_INFO();
++    pInfo->Supported = m_supported;
++    pInfo->VersionMinor = 0u;
++    std::strncpy(pInfo->Reason, m_reason.c_str(), sizeof(pInfo->Reason) - 1u);
++    pInfo->MaxInstances = m_maxInstances;
++    pInfo->MaxPrimitiveCount = m_maxPrimitives;
++  }
++
++
++  D3D9CommonBuffer* D3D9NvrRt::ResolveBuffer(IUnknown* pResource, D3DRESOURCETYPE type) {
++    if (pResource == nullptr)
++      return nullptr;
++
++    Com<IDirect3DResource9> resource;
++    if (FAILED(pResource->QueryInterface(__uuidof(IDirect3DResource9), reinterpret_cast<void**>(&resource))))
++      return nullptr;
++
++    if (resource->GetType() != type)
++      return nullptr;
++
++    if (type == D3DRTYPE_VERTEXBUFFER)
++      return static_cast<D3D9VertexBuffer*>(static_cast<IDirect3DVertexBuffer9*>(resource.ptr()))->GetCommonBuffer();
++
++    return static_cast<D3D9IndexBuffer*>(static_cast<IDirect3DIndexBuffer9*>(resource.ptr()))->GetCommonBuffer();
++  }
++
++
++  Rc<DxvkBuffer> D3D9NvrRt::CreateRtBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const char* name) {
++    DxvkBufferCreateInfo info;
++    info.size   = std::max<VkDeviceSize>(size, 256u);
++    info.usage  = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
++    info.stages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
++    info.access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
++    info.debugName = name;
++
++    try {
++      Rc<DxvkBuffer> buffer = m_device->GetDXVKDevice()->createBuffer(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++      buffer->enableStableAddress();   // structures and the instances refer to it by address
++      return buffer;
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext rt: ", name, ": ", e.message()));
++      return nullptr;
++    }
++  }
++
++
++  Rc<D3D9NvrRtAccel> D3D9NvrRt::CreateAccel(VkAccelerationStructureTypeKHR type, VkDeviceSize size, const char* name) {
++    Rc<DxvkBuffer> storage = CreateRtBuffer(size, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR, name);
++
++    if (storage == nullptr)
++      return nullptr;
++
++    DxvkResourceBufferInfo slice = storage->getSliceInfo();
++
++    if (slice.offset % 256u) {
++      Logger::err(str::format("NVR ext rt: ", name, ": storage offset ", slice.offset, " is not 256-aligned"));
++      return nullptr;
++    }
++
++    Rc<vk::DeviceFn> vkd = m_device->GetDXVKDevice()->vkd();
++
++    VkAccelerationStructureCreateInfoKHR info = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
++    info.buffer = slice.buffer;
++    info.offset = slice.offset;
++    info.size   = size;
++    info.type   = type;
++
++    VkAccelerationStructureKHR handle = VK_NULL_HANDLE;
++    VkResult vr = vkd->vkCreateAccelerationStructureKHR(vkd->device(), &info, nullptr, &handle);
++
++    if (vr != VK_SUCCESS) {
++      Logger::err(str::format("NVR ext rt: ", name, ": vkCreateAccelerationStructureKHR failed: ", vr));
++      return nullptr;
++    }
++
++    VkAccelerationStructureDeviceAddressInfoKHR addressInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
++    addressInfo.accelerationStructure = handle;
++    uint64_t address = vkd->vkGetAccelerationStructureDeviceAddressKHR(vkd->device(), &addressInfo);
++
++    return new D3D9NvrRtAccel(vkd, handle, std::move(storage), address);
++  }
++
++
++  HRESULT D3D9NvrRt::PrepareJob(const NVR_EXT_RT_GEOMETRY_DESC* pDesc, D3D9NvrRtJob& job, bool Upload) {
++    if (pDesc == nullptr)
++      return D3DERR_INVALIDCALL;
++
++    const char* name = pDesc->pDebugName ? pDesc->pDebugName : "(unnamed)";
++    auto refuse = [name] (const std::string& why) {
++      Logger::warn(str::format("NVR ext rt: geometry ", name, " refused: ", why));
++      return D3DERR_INVALIDCALL;
++    };
++
++    D3D9CommonBuffer* vb = ResolveBuffer(pDesc->pVertexBuffer, D3DRTYPE_VERTEXBUFFER);
++    D3D9CommonBuffer* ib = pDesc->pIndexBuffer ? ResolveBuffer(pDesc->pIndexBuffer, D3DRTYPE_INDEXBUFFER) : nullptr;
++
++    if (vb == nullptr)
++      return refuse("no D3D9 vertex buffer");
++    if (pDesc->pIndexBuffer && ib == nullptr)
++      return refuse("the index buffer is not a D3D9 index buffer");
++    if (pDesc->RangeCount == 0u || pDesc->RangeCount > NVR_EXT_RT_MAX_RANGES || pDesc->pRanges == nullptr)
++      return refuse(str::format("range count ", pDesc->RangeCount));
++    if (pDesc->VertexStride == 0u || (pDesc->VertexStride & 3u) || (pDesc->PositionOffset & 3u))
++      return refuse(str::format("stride ", pDesc->VertexStride, " / position offset ", pDesc->PositionOffset, " (both must be multiples of 4)"));
++
++    uint32_t positionSize = 0u;
++    switch (pDesc->PositionFormat) {
++      case NVR_EXT_RT_POSITION_FLOAT3: positionSize = 12u; break;
++      case NVR_EXT_RT_POSITION_FLOAT4: positionSize = 16u; break;
++      case NVR_EXT_RT_POSITION_HALF4:  positionSize =  8u; break;
++      default: return refuse("position format");
++    }
++
++    const uint64_t vbSize = vb->Desc()->Size;
++
++    if (pDesc->PositionOffset + positionSize > vbSize)
++      return refuse("the position offset is past the vertex buffer");
++
++    uint32_t vertexCount = pDesc->VertexCount
++      ? pDesc->VertexCount
++      : uint32_t((vbSize - pDesc->PositionOffset - positionSize) / pDesc->VertexStride + 1u);
++
++    if (vertexCount == 0u || pDesc->PositionOffset + uint64_t(vertexCount - 1u) * pDesc->VertexStride + positionSize > vbSize)
++      return refuse(str::format(vertexCount, " vertices do not fit the vertex buffer (", vbSize, " bytes)"));
++
++    const uint32_t indexSize = ib ? (ib->Desc()->Format == D3D9Format::INDEX32 ? 4u : 2u) : 0u;
++    const uint64_t ibSize = ib ? ib->Desc()->Size : 0u;
++
++    job.positionOffset = pDesc->PositionOffset;
++    job.stride         = pDesc->VertexStride;
++    job.vertexCount    = vertexCount;
++    job.indexSize      = indexSize;
++    job.half           = pDesc->PositionFormat == NVR_EXT_RT_POSITION_HALF4;
++
++    uint64_t triangles = 0u;
++
++    for (uint32_t i = 0u; i < pDesc->RangeCount; i++) {
++      const NVR_EXT_RT_RANGE& r = pDesc->pRanges[i];
++
++      if (r.PrimitiveCount == 0u)
++        continue;
++
++      const bool strip = r.Topology == NVR_EXT_RT_TRIANGLE_STRIP;
++
++      if (!strip && r.Topology != NVR_EXT_RT_TRIANGLE_LIST)
++        return refuse(str::format("range ", i, ": topology"));
++
++      const uint64_t elements = strip ? uint64_t(r.PrimitiveCount) + 2u : uint64_t(r.PrimitiveCount) * 3u;
++
++      if (ib ? (uint64_t(r.StartIndex) + elements) * indexSize > ibSize : uint64_t(r.StartIndex) + elements > vertexCount)
++        return refuse(str::format("range ", i, " (start ", r.StartIndex, ", ", r.PrimitiveCount, " triangles) reads past the ", ib ? "index" : "vertex", " buffer"));
++
++      D3D9NvrRtJob::Range range;
++      range.mode       = strip ? ModeStrip : ModeList;
++      range.triangles  = r.PrimitiveCount;
++      range.start      = r.StartIndex;
++      range.dstOffset  = uint32_t(triangles * 3u);
++      range.baseVertex = ib ? r.BaseVertex : 0;
++      job.ranges.push_back(range);
++
++      triangles += r.PrimitiveCount;
++    }
++
++    if (triangles == 0u || (m_supported && triangles > m_maxPrimitives) || triangles > (1u << 28))
++      return refuse(str::format(triangles, " triangles"));
++
++    job.triangles = uint32_t(triangles);
++
++    if (!Upload)
++      return D3D_OK;
++
++    // Managed buffers may still have data only on the CPU side: upload it now, in order before the job
++    if (vb->NeedsUpload())
++      m_device->FlushBuffer(vb);
++    if (ib && ib->NeedsUpload())
++      m_device->FlushBuffer(ib);
++
++    job.vertexBuffer = vb->GetBuffer<D3D9_COMMON_BUFFER_TYPE_REAL>();
++    job.indexBuffer  = ib ? ib->GetBuffer<D3D9_COMMON_BUFFER_TYPE_REAL>() : nullptr;
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::CreateGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++          ID3D9NvrExtRtGeometry**         ppGeometry) {
++    if (ppGeometry == nullptr || pDesc == nullptr)
++      return D3DERR_INVALIDCALL;
++
++    *ppGeometry = nullptr;
++
++    if (!m_supported)
++      return D3DERR_NOTAVAILABLE;
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    D3D9NvrRtJob job;
++    HRESULT hr = PrepareJob(pDesc, job, true);
++
++    if (FAILED(hr))
++      return hr;
++
++    const uint32_t vertexCount = job.vertexCount;
++    const uint64_t triangles = job.triangles;
++
++    // Build sizes (the addresses do not matter for the query)
++    VkAccelerationStructureGeometryKHR geometry = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
++    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
++    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
++    geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
++    geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
++    geometry.geometry.triangles.vertexStride = 12u;
++    geometry.geometry.triangles.maxVertex = vertexCount - 1u;
++    geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
++
++    VkAccelerationStructureBuildGeometryInfoKHR buildInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
++    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
++    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
++    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
++    buildInfo.geometryCount = 1u;
++    buildInfo.pGeometries = &geometry;
++
++    Rc<vk::DeviceFn> vkd = m_device->GetDXVKDevice()->vkd();
++    VkAccelerationStructureBuildSizesInfoKHR sizes = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
++    vkd->vkGetAccelerationStructureBuildSizesKHR(vkd->device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
++      &buildInfo, &job.triangles, &sizes);
++
++    job.dstPositions = 0u;
++    job.dstIndices = AlignUp(VkDeviceSize(vertexCount) * 12u, 256u);
++    job.dst = CreateRtBuffer(job.dstIndices + VkDeviceSize(job.triangles) * 12u,
++      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, "NVR rt geometry input");
++    job.scratchSize = sizes.buildScratchSize;
++    job.accel = CreateAccel(VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR, sizes.accelerationStructureSize, "NVR rt geometry");
++
++    if (job.dst == nullptr || job.accel == nullptr)
++      return E_OUTOFMEMORY;
++
++    Rc<D3D9NvrRtAccel> accel = job.accel;
++    m_pendingTriangles += job.triangles;
++    m_pending.push_back(std::move(job));
++
++    if (m_pending.size() >= MaxPendingJobs || m_pendingTriangles >= MaxPendingTriangles)
++      FlushJobs();
++
++    m_geometries++;
++    m_triangles += triangles;
++    m_geometryBytes += accel->size();
++    m_geometriesBuilt++;
++
++    *ppGeometry = ref(new D3D9NvrRtGeometry(this, std::move(accel), uint32_t(triangles)));
++    return D3D_OK;
++  }
++
++
++  void D3D9NvrRt::FlushJobs() {
++    if (m_pending.empty())
++      return;
++
++    // One scratch buffer for the whole batch (every build of one call needs its own region)
++    std::vector<VkDeviceSize> scratchOffsets;
++    VkDeviceSize scratchTotal = 0u;
++
++    for (const auto& job : m_pending) {
++      scratchOffsets.push_back(scratchTotal);
++      scratchTotal += AlignUp(job.scratchSize, m_scratchAlign);
++    }
++
++    Rc<DxvkBuffer> scratch = CreateRtBuffer(scratchTotal + m_scratchAlign, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "NVR rt build scratch");
++
++    if (scratch == nullptr) {
++      Logger::err(str::format("NVR ext rt: no scratch memory for ", m_pending.size(), " builds: dropped (their geometries stay empty)"));
++      m_pending.clear();
++      m_pendingTriangles = 0u;
++      return;
++    }
++
++    m_device->EmitCs([
++      cJobs    = std::move(m_pending),
++      cScratch = std::move(scratch),
++      cOffsets = std::move(scratchOffsets),
++      cAlign   = m_scratchAlign,
++      cConvert = m_convert,
++      cVkd     = m_device->GetDXVKDevice()->vkd()
++    ] (DxvkContext* ctx) {
++      // Everything earlier (the game's uploads of these buffers among it) before the conversion reads them
++      ctx->nvrBeginRawCommands();
++
++      RecordConversions(ctx, cConvert, cJobs);
++
++      // The conversions' writes before the builds read them
++      VkCommandBuffer cmd = ctx->nvrBeginRawCommands();
++
++      const uint64_t scratchBase = AlignUp(cScratch->getSliceInfo().gpuAddress, cAlign);
++
++      std::vector<VkAccelerationStructureGeometryKHR> geometries(cJobs.size());
++      std::vector<VkAccelerationStructureBuildGeometryInfoKHR> infos(cJobs.size());
++      std::vector<VkAccelerationStructureBuildRangeInfoKHR> ranges(cJobs.size());
++      std::vector<const VkAccelerationStructureBuildRangeInfoKHR*> rangePointers(cJobs.size());
++
++      for (size_t i = 0u; i < cJobs.size(); i++) {
++        const auto& job = cJobs[i];
++        const uint64_t input = job.dst->getSliceInfo().gpuAddress;
++
++        VkAccelerationStructureGeometryKHR& g = geometries[i];
++        g = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
++        g.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
++        g.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
++        g.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
++        g.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
++        g.geometry.triangles.vertexData.deviceAddress = input;
++        g.geometry.triangles.vertexStride = 12u;
++        g.geometry.triangles.maxVertex = job.vertexCount - 1u;
++        g.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
++        g.geometry.triangles.indexData.deviceAddress = input + job.dstIndices;
++
++        VkAccelerationStructureBuildGeometryInfoKHR& b = infos[i];
++        b = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
++        b.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
++        b.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
++        b.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
++        b.dstAccelerationStructure = job.accel->handle();
++        b.geometryCount = 1u;
++        b.pGeometries = &g;
++        b.scratchData.deviceAddress = scratchBase + cOffsets[i];
++
++        ranges[i] = VkAccelerationStructureBuildRangeInfoKHR { job.triangles, 0u, 0u, 0u };
++        rangePointers[i] = &ranges[i];
++      }
++
++      cVkd->vkCmdBuildAccelerationStructuresKHR(cmd, uint32_t(infos.size()), infos.data(), rangePointers.data());
++
++      // The builds before anything that reads the structures (a scene build, a pass)
++      ctx->nvrEndRawCommands(cmd);
++
++      ctx->nvrTrackResource(cScratch, DxvkAccess::Write);
++
++      for (const auto& job : cJobs) {
++        ctx->nvrTrackResource(job.dst, DxvkAccess::Write);
++        ctx->nvrTrack(job.accel);
++      }
++    });
++
++    m_pending.clear();
++    m_pendingTriangles = 0u;
++  }
++
++
++  void D3D9NvrRt::RecordConversions(DxvkContext* ctx, const Rc<DxvkShader>& convert, const std::vector<D3D9NvrRtJob>& jobs) {
++    DxvkPushDataState savedPushData = ctx->nvrGetPushDataState();
++    ctx->bindShader<VK_SHADER_STAGE_COMPUTE_BIT>(Rc<DxvkShader>(convert));
++
++    for (const auto& job : jobs) {
++      const uint64_t dst = job.dst->getSliceInfo().gpuAddress;
++
++      D3D9NvrRtConvertPush push = { };
++      push.src       = job.vertexBuffer->getSliceInfo().gpuAddress;
++      push.dst       = dst + job.dstPositions;
++      push.mode      = job.half ? ModePositionsHalf4 : ModePositionsFloat;
++      push.count     = job.vertexCount;
++      push.srcOffset = job.positionOffset;
++      push.stride    = job.stride;
++      ctx->pushData(VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
++      ctx->dispatch((job.vertexCount + 63u) / 64u, 1u, 1u);
++
++      const uint64_t indices = job.indexBuffer != nullptr ? job.indexBuffer->getSliceInfo().gpuAddress : 0u;
++
++      for (const auto& range : job.ranges) {
++        push = D3D9NvrRtConvertPush();
++        push.src         = indices;
++        push.dst         = dst + job.dstIndices;
++        push.mode        = range.mode;
++        push.count       = range.triangles;
++        push.srcOffset   = range.start;
++        push.stride      = job.indexSize;
++        push.baseVertex  = range.baseVertex;
++        push.dstOffset   = range.dstOffset;
++        push.vertexCount = job.vertexCount;
++        ctx->pushData(VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
++        ctx->dispatch((range.triangles + 63u) / 64u, 1u, 1u);
++      }
++
++      ctx->nvrTrackResource(job.vertexBuffer, DxvkAccess::Read);
++      if (job.indexBuffer != nullptr)
++        ctx->nvrTrackResource(job.indexBuffer, DxvkAccess::Read);
++    }
++
++    ctx->bindShader<VK_SHADER_STAGE_COMPUTE_BIT>(nullptr);
++    ctx->nvrSetPushDataState(savedPushData);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::MeasureGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++          NVR_EXT_RT_GEOMETRY_INFO*       pInfo) {
++    if (pInfo == nullptr)
++      return D3DERR_INVALIDCALL;
++
++    *pInfo = NVR_EXT_RT_GEOMETRY_INFO();
++
++    if (m_convert == nullptr)
++      return D3DERR_NOTAVAILABLE;
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    D3D9NvrRtJob job;
++    HRESULT hr = PrepareJob(pDesc, job, false);
++
++    if (FAILED(hr))
++      return hr;
++
++    pInfo->VertexCount   = job.vertexCount;
++    pInfo->TriangleCount = job.triangles;
++    pInfo->Texels        = 3u * (job.vertexCount + job.triangles);
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::StageGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++          ID3D9NvrExtSharedImage*         pArena,
++          UINT                            DstTexel,
++          NVR_EXT_RT_GEOMETRY_INFO*       pInfo) {
++    if (pInfo != nullptr)
++      *pInfo = NVR_EXT_RT_GEOMETRY_INFO();
++
++    if (m_convert == nullptr)
++      return D3DERR_NOTAVAILABLE;
++
++    if (pArena == nullptr)
++      return D3DERR_INVALIDCALL;
++
++    NVR_EXT_SHARED_IMAGE_INFO arena = { };
++    pArena->GetInfo(&arena);
++
++    if (arena.VkFormat != uint32_t(VK_FORMAT_R32_SFLOAT)) {
++      Logger::warn("NVR ext rt: StageGeometry: the arena must be an NVR_EXT_SHARED_R32F image");
++      return D3DERR_INVALIDCALL;
++    }
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    D3D9NvrRtJob job;
++    HRESULT hr = PrepareJob(pDesc, job, true);
++
++    if (FAILED(hr))
++      return hr;
++
++    const uint64_t texels = 3ull * (uint64_t(job.vertexCount) + job.triangles);
++    const uint64_t capacity = uint64_t(arena.Width) * arena.Height;
++
++    if (uint64_t(DstTexel) + texels > capacity) {
++      Logger::warn(str::format("NVR ext rt: StageGeometry: ", texels, " texels at ", DstTexel, " do not fit the arena (", capacity, ")"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    // The staging copy of the arena (the conversion writes buffers by address; one copy into the image at the flush)
++    if (m_staging == nullptr || m_stagingBytes < capacity * 4u) {
++      if (!m_staged.empty())
++        FlushStagedGeometry(pArena);
++
++      m_staging = CreateRtBuffer(capacity * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "NVR rt arena staging");
++      m_stagingBytes = m_staging != nullptr ? capacity * 4u : 0u;
++
++      if (m_staging == nullptr)
++        return E_OUTOFMEMORY;
++    }
++
++    job.dst = m_staging;
++    job.dstPositions = VkDeviceSize(DstTexel) * 4u;
++    job.dstIndices = (VkDeviceSize(DstTexel) + 3u * job.vertexCount) * 4u;
++
++    m_stagedMin = std::min<uint32_t>(m_stagedMin, DstTexel);
++    m_stagedMax = std::max<uint32_t>(m_stagedMax, uint32_t(DstTexel + texels));
++
++    if (pInfo != nullptr) {
++      pInfo->VertexCount   = job.vertexCount;
++      pInfo->TriangleCount = job.triangles;
++      pInfo->Texels        = uint32_t(texels);
++    }
++
++    m_staged.push_back(std::move(job));
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::FlushStagedGeometry(
++          ID3D9NvrExtSharedImage*         pArena) {
++    if (m_convert == nullptr)
++      return D3DERR_NOTAVAILABLE;
++
++    if (pArena == nullptr)
++      return D3DERR_INVALIDCALL;
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (m_staged.empty())
++      return D3D_OK;
++
++    Rc<DxvkImage> image = static_cast<D3D9NvrExtSharedImage*>(pArena)->GetImage();
++    const VkExtent3D size = image->info().extent;
++
++    const uint32_t rowFirst = m_stagedMin / size.width;
++    const uint32_t rowEnd = std::min<uint32_t>((m_stagedMax + size.width - 1u) / size.width, size.height);
++
++    m_device->EmitCs([
++      cJobs    = std::move(m_staged),
++      cConvert = m_convert,
++      cStaging = m_staging,
++      cImage   = std::move(image),
++      cRow     = rowFirst,
++      cRows    = rowEnd - rowFirst,
++      cWidth   = size.width
++    ] (DxvkContext* ctx) {
++      // Everything earlier (the game's uploads of these buffers, the last copy out of the staging) before the conversions
++      ctx->nvrBeginRawCommands();
++
++      RecordConversions(ctx, cConvert, cJobs);
++
++      // The conversions' writes before the copy reads them (DXVK does not see writes by address)
++      ctx->nvrBeginRawCommands();
++
++      VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u };
++      ctx->copyBufferToImage(cImage, layers, VkOffset3D { 0, int32_t(cRow), 0 }, VkExtent3D { cWidth, cRows, 1u },
++        cStaging, VkDeviceSize(cRow) * cWidth * 4u, 0u, 0u, cImage->info().format);
++
++      ctx->nvrTrackResource(cStaging, DxvkAccess::Write);
++    });
++
++    m_staged.clear();
++    m_stagedMin = ~0u;
++    m_stagedMax = 0u;
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::CreateScene(
++          UINT                            MaxInstances,
++    const char*                           pDebugName,
++          ID3D9NvrExtRtScene**            ppScene) {
++    if (ppScene == nullptr)
++      return D3DERR_INVALIDCALL;
++
++    *ppScene = nullptr;
++
++    if (!m_supported)
++      return D3DERR_NOTAVAILABLE;
++
++    const char* name = pDebugName ? pDebugName : "(unnamed)";
++
++    if (MaxInstances == 0u || MaxInstances > m_maxInstances) {
++      Logger::warn(str::format("NVR ext rt: scene ", name, " refused: ", MaxInstances, " instances (1..", m_maxInstances, ")"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    VkAccelerationStructureGeometryKHR geometry = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
++    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
++    geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
++    geometry.geometry.instances.arrayOfPointers = VK_FALSE;
++
++    VkAccelerationStructureBuildGeometryInfoKHR buildInfo = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
++    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
++    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
++    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
++    buildInfo.geometryCount = 1u;
++    buildInfo.pGeometries = &geometry;
++
++    Rc<vk::DeviceFn> vkd = m_device->GetDXVKDevice()->vkd();
++    uint32_t maxCount = MaxInstances;
++    VkAccelerationStructureBuildSizesInfoKHR sizes = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
++    vkd->vkGetAccelerationStructureBuildSizesKHR(vkd->device(), VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
++      &buildInfo, &maxCount, &sizes);
++
++    Rc<D3D9NvrRtAccel> tlas = CreateAccel(VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize, name);
++    Rc<DxvkBuffer> instances = CreateRtBuffer(VkDeviceSize(MaxInstances) * sizeof(VkAccelerationStructureInstanceKHR),
++      VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_DST_BIT, "NVR rt scene instances");
++    Rc<DxvkBuffer> scratch = CreateRtBuffer(sizes.buildScratchSize + m_scratchAlign, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, "NVR rt scene scratch");
++
++    if (tlas == nullptr || instances == nullptr || scratch == nullptr)
++      return E_OUTOFMEMORY;
++
++    m_scenes++;
++    m_sceneBytes += tlas->size() + instances->info().size;
++
++    D3D9NvrRtScene* scene = new D3D9NvrRtScene(this, MaxInstances, std::move(tlas), std::move(instances), std::move(scratch), sizes.buildScratchSize);
++
++    // An empty build at once: the address is valid (every ray misses) before the first BuildScene
++    *ppScene = ref(scene);
++    BuildScene(scene, 0u, nullptr);
++
++    Logger::info(str::format("NVR ext rt: scene ", name, " created (", MaxInstances, " instances, ",
++      (sizes.accelerationStructureSize + 1023u) >> 10, " KiB structure, ", (sizes.buildScratchSize + 1023u) >> 10, " KiB scratch)"));
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::BuildScene(
++          ID3D9NvrExtRtScene*             pScene,
++          UINT                            Count,
++    const NVR_EXT_RT_INSTANCE*            pInstances) {
++    if (!m_supported)
++      return D3DERR_NOTAVAILABLE;
++
++    if (pScene == nullptr || (Count && pInstances == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    D3D9NvrRtScene* scene = static_cast<D3D9NvrRtScene*>(pScene);
++
++    if (Count > scene->m_maxInstances) {
++      Logger::warn(str::format("NVR ext rt: BuildScene refused: ", Count, " instances, the scene holds ", scene->m_maxInstances));
++      return D3DERR_INVALIDCALL;
++    }
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    // Geometries made since the last scene build are built first (same block order on the CS thread)
++    FlushJobs();
++
++    std::vector<VkAccelerationStructureInstanceKHR> instances;
++    std::vector<Rc<D3D9NvrRtAccel>> referenced;
++    instances.reserve(Count);
++    referenced.reserve(Count);
++
++    for (uint32_t i = 0u; i < Count; i++) {
++      const NVR_EXT_RT_INSTANCE& src = pInstances[i];
++
++      if (src.pGeometry == nullptr)
++        continue;
++
++      const Rc<D3D9NvrRtAccel>& accel = static_cast<D3D9NvrRtGeometry*>(src.pGeometry)->GetAccel();
++
++      VkAccelerationStructureInstanceKHR dst = { };
++      std::memcpy(&dst.transform, src.Transform, sizeof(dst.transform));
++      dst.instanceCustomIndex = src.InstanceId & 0xFFFFFFu;
++      dst.mask = src.Mask & 0xFFu;
++      dst.instanceShaderBindingTableRecordOffset = 0u;
++      dst.flags = src.Flags & 0xFFu;
++      dst.accelerationStructureReference = accel->address();
++      instances.push_back(dst);
++
++      if (referenced.empty() || referenced.back().ptr() != accel.ptr())
++        referenced.push_back(accel);
++    }
++
++    std::sort(referenced.begin(), referenced.end(), [] (const Rc<D3D9NvrRtAccel>& a, const Rc<D3D9NvrRtAccel>& b) { return a.ptr() < b.ptr(); });
++    referenced.erase(std::unique(referenced.begin(), referenced.end(), [] (const Rc<D3D9NvrRtAccel>& a, const Rc<D3D9NvrRtAccel>& b) { return a.ptr() == b.ptr(); }), referenced.end());
++
++    m_lastInstances = uint32_t(instances.size());
++    m_sceneBuilds++;
++
++    m_device->EmitCs([
++      cInstances  = std::move(instances),
++      cReferenced = std::move(referenced),
++      cState      = scene->m_state,
++      cTlas       = scene->m_tlas,
++      cBuffer     = scene->m_instances,
++      cScratch    = scene->m_scratch,
++      cAlign      = m_scratchAlign,
++      cVkd        = m_device->GetDXVKDevice()->vkd()
++    ] (DxvkContext* ctx) mutable {
++      VkCommandBuffer cmd = ctx->nvrBeginRawCommands();
++
++      DxvkResourceBufferInfo buffer = cBuffer->getSliceInfo();
++      const VkDeviceSize bytes = VkDeviceSize(cInstances.size()) * sizeof(VkAccelerationStructureInstanceKHR);
++      const char* data = reinterpret_cast<const char*>(cInstances.data());
++
++      for (VkDeviceSize done = 0u; done < bytes; ) {
++        VkDeviceSize chunk = std::min<VkDeviceSize>(bytes - done, 65536u);
++        cVkd->vkCmdUpdateBuffer(cmd, buffer.buffer, buffer.offset + done, chunk, data + done);
++        done += chunk;
++      }
++
++      // The upload before the build reads the instances
++      ctx->nvrFullBarrier(cmd);
++
++      VkAccelerationStructureGeometryKHR geometry = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
++      geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
++      geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
++      geometry.geometry.instances.arrayOfPointers = VK_FALSE;
++      geometry.geometry.instances.data.deviceAddress = buffer.gpuAddress;
++
++      VkAccelerationStructureBuildGeometryInfoKHR info = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
++      info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
++      info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
++      info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
++      info.dstAccelerationStructure = cTlas->handle();
++      info.geometryCount = 1u;
++      info.pGeometries = &geometry;
++      info.scratchData.deviceAddress = AlignUp(cScratch->getSliceInfo().gpuAddress, cAlign);
++
++      VkAccelerationStructureBuildRangeInfoKHR range = { uint32_t(cInstances.size()), 0u, 0u, 0u };
++      const VkAccelerationStructureBuildRangeInfoKHR* rangePointer = &range;
++      cVkd->vkCmdBuildAccelerationStructuresKHR(cmd, 1u, &info, &rangePointer);
++
++      ctx->nvrEndRawCommands(cmd);
++
++      // Keep this build's structures, and the last build's once more (passes of earlier command lists may
++      // still trace them), until this command list is done; the scene keeps this build's until the next one
++      ctx->nvrTrack(cTlas);
++      ctx->nvrTrackResource(cBuffer, DxvkAccess::Write);
++      ctx->nvrTrackResource(cScratch, DxvkAccess::Write);
++
++      for (const auto& accel : cReferenced)
++        ctx->nvrTrack(accel);
++      for (const auto& accel : cState->referenced)
++        ctx->nvrTrack(accel);
++
++      cState->referenced = std::move(cReferenced);
++    });
++
++    return D3D_OK;
++  }
++
++
++  void STDMETHODCALLTYPE D3D9NvrRt::GetRtStats(NVR_EXT_RT_STATS* pStats) {
++    if (pStats == nullptr)
++      return;
++
++    *pStats = NVR_EXT_RT_STATS();
++    pStats->Geometries      = m_geometries.load();
++    pStats->Triangles       = m_triangles.load();
++    pStats->GeometryBytes   = m_geometryBytes.load();
++    pStats->GeometriesBuilt = m_geometriesBuilt.load();
++    pStats->Scenes          = m_scenes.load();
++    pStats->LastInstances   = m_lastInstances.load();
++    pStats->SceneBuilds     = m_sceneBuilds.load();
++    pStats->SceneBytes      = m_sceneBytes.load();
++  }
++
++
++  void D3D9NvrRt::OnGeometryGone(uint32_t triangles, VkDeviceSize bytes) {
++    m_geometries--;
++    m_triangles -= triangles;
++    m_geometryBytes -= bytes;
++  }
++
++
++  void D3D9NvrRt::OnSceneGone(VkDeviceSize bytes, const Rc<D3D9NvrRtSceneState>& state, const Rc<D3D9NvrRtAccel>& tlas) {
++    m_scenes--;
++    m_sceneBytes -= bytes;
++
++    // Passes recorded before this may still trace the scene: keep it and what it refers to until the
++    // command list being recorded now is done
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    m_device->EmitCs([
++      cState = state,
++      cTlas  = tlas
++    ] (DxvkContext* ctx) {
++      ctx->nvrTrack(cTlas);
++
++      for (const auto& accel : cState->referenced)
++        ctx->nvrTrack(accel);
++    });
++  }
++
++}
+diff --git a/src/d3d9/d3d9_nvr_rt.h b/src/d3d9/d3d9_nvr_rt.h
+new file mode 100644
+index 0000000..e7ba508
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_rt.h
+@@ -0,0 +1,234 @@
++#pragma once
++
++/*
++ * NVR extension, ray tracing core ("1.8-rt", fork patch 0028): the implementation of ID3D9NvrExtRt
++ * (d3d9_nvr_ext_api.h). Acceleration structures from the game's D3D9 vertex/index buffers and scenes of
++ * them; NVR's passes trace rays against a scene through its GPU address (GL_EXT_ray_query).
++ *
++ * Recording: CreateGeometry queues a job (its own input and structure memory are made at once, on the
++ * caller's thread); the queue is recorded by the next BuildScene (or when it grows large) as ONE block on the
++ * CS thread: a full barrier, the conversion dispatches (d3d9_nvr_rt_convert.comp: the game's positions and
++ * indices by device address into the job's input buffer), a full barrier, every build in one
++ * vkCmdBuildAccelerationStructuresKHR, a full barrier. BuildScene then uploads the instances (vkCmdUpdateBuffer)
++ * and rebuilds the top level between full barriers. DXVK's hazard tracking never sees these accesses, hence
++ * the full barriers (DxvkContext::nvrBeginRawCommands); a frame with no new geometry costs two of them.
++ *
++ * Lifetimes: a structure is an RcObject (D3D9NvrRtAccel) that destroys its Vulkan handle when the last
++ * reference goes. Command lists track (keep) every structure their builds write or their scenes refer to;
++ * each scene keeps the structures of its last build until the next one, and that next build's command list
++ * tracks them once more, so a pass recorded after a build (in any later command list) never sees a freed one.
++ */
++
++#include "d3d9_nvr_ext_api.h"
++#include "d3d9_include.h"
++
++#include "../dxvk/dxvk_buffer.h"
++#include "../dxvk/dxvk_shader.h"
++
++#include <atomic>
++#include <memory>
++#include <string>
++#include <vector>
++
++namespace dxvk {
++
++  class D3D9DeviceEx;
++  class D3D9CommonBuffer;
++  class DxvkContext;
++
++  /** One acceleration structure and its memory. Destroyed (Vulkan handle) with its last reference. */
++  class D3D9NvrRtAccel : public RcObject {
++
++  public:
++
++    D3D9NvrRtAccel(Rc<vk::DeviceFn> vkd, VkAccelerationStructureKHR handle, Rc<DxvkBuffer> storage, uint64_t address)
++    : m_vkd(std::move(vkd)), m_handle(handle), m_storage(std::move(storage)), m_address(address) { }
++
++    ~D3D9NvrRtAccel();
++
++    VkAccelerationStructureKHR handle() const { return m_handle; }
++
++    uint64_t address() const { return m_address; }
++
++    VkDeviceSize size() const { return m_storage->info().size; }
++
++  private:
++
++    Rc<vk::DeviceFn>            m_vkd;
++    VkAccelerationStructureKHR  m_handle;
++    Rc<DxvkBuffer>              m_storage;
++    uint64_t                    m_address;
++
++  };
++
++  class D3D9NvrRt;
++
++  class D3D9NvrRtGeometry final : public ComObject<ID3D9NvrExtRtGeometry> {
++
++  public:
++
++    D3D9NvrRtGeometry(D3D9NvrRt* pRt, Rc<D3D9NvrRtAccel> accel, uint32_t triangles)
++    : m_rt(pRt), m_accel(std::move(accel)), m_triangles(triangles) { }
++
++    ~D3D9NvrRtGeometry();
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    UINT STDMETHODCALLTYPE GetTriangleCount() { return m_triangles; }
++
++    const Rc<D3D9NvrRtAccel>& GetAccel() const { return m_accel; }
++
++  private:
++
++    D3D9NvrRt*          m_rt;
++    Rc<D3D9NvrRtAccel>  m_accel;
++    uint32_t            m_triangles;
++
++  };
++
++  /** What a scene's builds share on the CS thread: the structures of its last build (kept until the next one). */
++  struct D3D9NvrRtSceneState : public RcObject {
++    std::vector<Rc<D3D9NvrRtAccel>> referenced;
++  };
++
++  class D3D9NvrRtScene final : public ComObject<ID3D9NvrExtRtScene> {
++
++  public:
++
++    D3D9NvrRtScene(D3D9NvrRt* pRt, uint32_t maxInstances, Rc<D3D9NvrRtAccel> tlas,
++      Rc<DxvkBuffer> instances, Rc<DxvkBuffer> scratch, VkDeviceSize scratchSize)
++    : m_rt(pRt), m_maxInstances(maxInstances), m_tlas(std::move(tlas)), m_instances(std::move(instances)),
++      m_scratch(std::move(scratch)), m_scratchSize(scratchSize), m_state(new D3D9NvrRtSceneState()) { }
++
++    ~D3D9NvrRtScene();
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    UINT64 STDMETHODCALLTYPE GetAddress() { return m_tlas->address(); }
++
++    UINT STDMETHODCALLTYPE GetMaxInstances() { return m_maxInstances; }
++
++    D3D9NvrRt*                  m_rt;
++    uint32_t                    m_maxInstances;
++    Rc<D3D9NvrRtAccel>          m_tlas;
++    Rc<DxvkBuffer>              m_instances;
++    Rc<DxvkBuffer>              m_scratch;
++    VkDeviceSize                m_scratchSize;
++    Rc<D3D9NvrRtSceneState>     m_state;
++
++  };
++
++  /** One geometry's conversion (and, in-process, its bottom-level build). */
++  struct D3D9NvrRtJob {
++    struct Range { uint32_t mode, triangles, start, dstOffset; int32_t baseVertex; };
++    Rc<DxvkBuffer>          vertexBuffer;   // the game's
++    Rc<DxvkBuffer>          indexBuffer;    // the game's (null: non-indexed)
++    uint32_t                positionOffset = 0u, stride = 0u, vertexCount = 0u, indexSize = 0u;
++    bool                    half = false;
++    std::vector<Range>      ranges;
++    uint32_t                triangles = 0u;
++    Rc<DxvkBuffer>          dst;            // where the conversion writes: float3 positions at dstPositions, the uint list at dstIndices
++    VkDeviceSize            dstPositions = 0u;
++    VkDeviceSize            dstIndices = 0u;
++    VkDeviceSize            scratchSize = 0u;   // in-process build only
++    Rc<D3D9NvrRtAccel>      accel;              // in-process build only
++  };
++
++  class D3D9NvrRt final : public ID3D9NvrExtRt {
++
++  public:
++
++    explicit D3D9NvrRt(D3D9DeviceEx* pDevice);
++
++    ~D3D9NvrRt();
++
++    ULONG STDMETHODCALLTYPE AddRef();
++
++    ULONG STDMETHODCALLTYPE Release();
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    void STDMETHODCALLTYPE GetRtInfo(
++            NVR_EXT_RT_INFO*                pInfo);
++
++    HRESULT STDMETHODCALLTYPE CreateGeometry(
++      const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++            ID3D9NvrExtRtGeometry**         ppGeometry);
++
++    HRESULT STDMETHODCALLTYPE CreateScene(
++            UINT                            MaxInstances,
++      const char*                           pDebugName,
++            ID3D9NvrExtRtScene**            ppScene);
++
++    HRESULT STDMETHODCALLTYPE BuildScene(
++            ID3D9NvrExtRtScene*             pScene,
++            UINT                            Count,
++      const NVR_EXT_RT_INSTANCE*            pInstances);
++
++    void STDMETHODCALLTYPE GetRtStats(
++            NVR_EXT_RT_STATS*               pStats);
++
++    HRESULT STDMETHODCALLTYPE MeasureGeometry(
++      const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++            NVR_EXT_RT_GEOMETRY_INFO*       pInfo);
++
++    HRESULT STDMETHODCALLTYPE StageGeometry(
++      const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++            ID3D9NvrExtSharedImage*         pArena,
++            UINT                            DstTexel,
++            NVR_EXT_RT_GEOMETRY_INFO*       pInfo);
++
++    HRESULT STDMETHODCALLTYPE FlushStagedGeometry(
++            ID3D9NvrExtSharedImage*         pArena);
++
++    /** Object bookkeeping (stats) */
++    void OnGeometryGone(uint32_t triangles, VkDeviceSize bytes);
++    void OnSceneGone(VkDeviceSize bytes, const Rc<D3D9NvrRtSceneState>& state, const Rc<D3D9NvrRtAccel>& tlas);
++
++  private:
++
++    D3D9DeviceEx*     m_device;
++    bool              m_supported = false;   // in-process acceleration structures (CreateGeometry ... BuildScene)
++    std::string       m_reason;
++    VkDeviceSize      m_scratchAlign = 256u;
++    uint32_t          m_maxInstances = 0u;
++    uint64_t          m_maxPrimitives = 0u;
++    Rc<DxvkShader>    m_convert;
++
++    std::vector<D3D9NvrRtJob> m_pending;
++    uint64_t                  m_pendingTriangles = 0u;
++
++    // Helper geometry (StageGeometry): the conversions queued for the arena, into a staging copy of it
++    std::vector<D3D9NvrRtJob> m_staged;
++    Rc<DxvkBuffer>            m_staging;
++    VkDeviceSize              m_stagingBytes = 0u;
++    uint32_t                  m_stagedMin = ~0u;    // texels touched since the last flush
++    uint32_t                  m_stagedMax = 0u;
++
++    std::atomic<uint32_t>  m_geometries = { 0u };
++    std::atomic<uint64_t>  m_triangles = { 0u };
++    std::atomic<uint64_t>  m_geometryBytes = { 0u };
++    std::atomic<uint64_t>  m_geometriesBuilt = { 0u };
++    std::atomic<uint32_t>  m_scenes = { 0u };
++    std::atomic<uint32_t>  m_lastInstances = { 0u };
++    std::atomic<uint64_t>  m_sceneBuilds = { 0u };
++    std::atomic<uint64_t>  m_sceneBytes = { 0u };
++
++    /** Records the queued bottom-level builds (one block). Device lock held. */
++    void FlushJobs();
++
++    /** Validates a description and fills a job (no memory, nothing recorded). Device lock held when Upload. */
++    HRESULT PrepareJob(const NVR_EXT_RT_GEOMETRY_DESC* pDesc, D3D9NvrRtJob& job, bool Upload);
++
++    /** CS thread: the conversion dispatches of jobs into their dst (the caller puts the barriers around them). */
++    static void RecordConversions(DxvkContext* ctx, const Rc<DxvkShader>& convert, const std::vector<D3D9NvrRtJob>& jobs);
++
++    Rc<DxvkBuffer> CreateRtBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const char* name);
++
++    Rc<D3D9NvrRtAccel> CreateAccel(VkAccelerationStructureTypeKHR type, VkDeviceSize size, const char* name);
++
++    static D3D9CommonBuffer* ResolveBuffer(IUnknown* pResource, D3DRESOURCETYPE type);
++
++  };
++
++}
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 3cde06e..18a2d65 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -12,6 +12,7 @@ d3d9_shaders = files([
+   'shaders/d3d9_fixed_function_frag.frag',
+   'shaders/d3d9_fixed_function_frag_sample.frag',
+   'shaders/d3d9_nvr_fullscreen_vert.vert',
++  'shaders/d3d9_nvr_rt_convert.comp',
+ ])
+ 
+ d3d9_src = [
+@@ -52,6 +53,7 @@ d3d9_src = [
+   'd3d9_nvr_ext.cpp',
+   'd3d9_nvr_hdr.cpp',
+   'd3d9_nvr_tess.cpp',
++  'd3d9_nvr_rt.cpp',
+   'd3d9_on_12.cpp',
+   'd3d9_bridge.cpp',
+   'd3d9_shader_analysis.cpp',
+diff --git a/src/d3d9/shaders/d3d9_nvr_rt_convert.comp b/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
+new file mode 100644
+index 0000000..f8199c9
+--- /dev/null
++++ b/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
+@@ -0,0 +1,97 @@
++#version 460
++
++// NVR ray tracing core (fork patch 0028): the input of one bottom-level structure build, from the game's D3D9 buffers.
++// One dispatch per job: the positions (any stride and offset; float3, float4 or half4) into a packed float3 array, or
++// one draw range's indices (16 or 32 bit, list or strip, or none) into a uint triangle list. Everything by device
++// address (every DXVK buffer has one): no descriptors. An index that would reach past the vertices makes its triangle
++// degenerate (all three corners vertex 0): zero area, never hit, and the build never reads out of range.
++
++#extension GL_EXT_buffer_reference : require
++#extension GL_EXT_buffer_reference_uvec2 : require
++
++layout(local_size_x = 64) in;
++
++layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint w[]; };
++layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Floats { float f[]; };
++layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Uints { uint u[]; };
++
++#define MODE_POSITIONS_FLOAT  0u   // float3 or float4
++#define MODE_POSITIONS_HALF4  1u
++#define MODE_LIST             2u
++#define MODE_STRIP            3u
++
++layout(push_constant) uniform Push {
++  uvec2 src;          // the D3D9 buffer (vertex or index buffer) at offset 0
++  uvec2 dst;          // positions: float3 array; indices: uint array
++  uint  mode;
++  uint  count;        // positions: vertices; indices: triangles
++  uint  srcOffset;    // positions: bytes to vertex 0's position; indices: first index (in indices; or first vertex without an index buffer)
++  uint  stride;       // positions: vertex stride in bytes; indices: index size in bytes (2 or 4), 0 = no index buffer
++  int   baseVertex;   // indices: added to each index
++  uint  dstOffset;    // indices: first uint written
++  uint  vertexCount;  // indices: the vertices available
++  uint  pad;
++} p;
++
++uint readU16(Words b, uint byteOffset) {
++  uint word = b.w[byteOffset >> 2u];
++  return (byteOffset & 2u) != 0u ? (word >> 16u) : (word & 0xFFFFu);
++}
++
++uint readIndex(uint i) {
++  if (p.stride == 0u)
++    return p.srcOffset + i;
++  Words b = Words(p.src);
++  uint at = p.srcOffset + i;
++  return p.stride == 2u ? readU16(b, at * 2u) : b.w[at];
++}
++
++void main() {
++  uint id = gl_GlobalInvocationID.x;
++  if (id >= p.count)
++    return;
++
++  if (p.mode <= MODE_POSITIONS_HALF4) {
++    Words b = Words(p.src);
++    uint at = p.srcOffset + id * p.stride;   // bytes, 4-aligned (checked on the host)
++    vec3 pos;
++    if (p.mode == MODE_POSITIONS_FLOAT) {
++      pos = vec3(uintBitsToFloat(b.w[at >> 2u]), uintBitsToFloat(b.w[(at >> 2u) + 1u]), uintBitsToFloat(b.w[(at >> 2u) + 2u]));
++    } else {
++      vec2 xy = unpackHalf2x16(b.w[at >> 2u]);
++      vec2 zw = unpackHalf2x16(b.w[(at >> 2u) + 1u]);
++      pos = vec3(xy, zw.x);
++    }
++    // NaN or infinite corners would make the build undefined: such a vertex goes to the origin
++    if (any(isnan(pos)) || any(isinf(pos)))
++      pos = vec3(0.0);
++    Floats o = Floats(p.dst);
++    o.f[id * 3u + 0u] = pos.x;
++    o.f[id * 3u + 1u] = pos.y;
++    o.f[id * 3u + 2u] = pos.z;
++    return;
++  }
++
++  uvec3 tri;
++  if (p.mode == MODE_LIST) {
++    tri = uvec3(readIndex(id * 3u), readIndex(id * 3u + 1u), readIndex(id * 3u + 2u));
++  } else {
++    tri = uvec3(readIndex(id), readIndex(id + 1u), readIndex(id + 2u));
++    if ((id & 1u) != 0u)
++      tri.xy = tri.yx;   // a strip's odd triangles have the other winding
++  }
++
++  if (p.stride != 0u) {
++    ivec3 v = ivec3(tri) + p.baseVertex;
++    tri = uvec3(max(v, ivec3(0)));
++    if (any(lessThan(v, ivec3(0))))
++      tri = uvec3(0u);
++  }
++  if (any(greaterThanEqual(tri, uvec3(p.vertexCount))))
++    tri = uvec3(0u);
++
++  Uints o = Uints(p.dst);
++  o.u[p.dstOffset + id * 3u + 0u] = tri.x;
++  o.u[p.dstOffset + id * 3u + 1u] = tri.y;
++  o.u[p.dstOffset + id * 3u + 2u] = tri.z;
++}
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+index bc3c649..c61a3a3 100644
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -306,7 +306,17 @@ namespace dxvk {
+      * to split the command list into multiple submissions.
+      */
+     void next();
+-    
++
++    /**
++     * \brief NVR ray tracing core (fork patch 0028): the exec command buffer for raw commands
++     *
++     * Only through DxvkContext::nvrBeginRawCommands, which puts the barriers around them.
++     */
++    VkCommandBuffer nvrExecBuffer() {
++      m_cmd.execCommands = true;
++      return getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
++    }
++
+     /**
+      * \brief Tracks an object
+      *
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 698063c..7470fc5 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -10854,4 +10854,19 @@ namespace dxvk {
+     return slice;
+   }
+ 
++
++  void DxvkContext::nvrFullBarrier(VkCommandBuffer cmd) {
++    // NVR ray tracing core (fork patch 0028): every earlier write before every later access, in all stages
++    VkMemoryBarrier2 barrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
++    barrier.srcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++    barrier.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
++    barrier.dstStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++    barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
++
++    VkDependencyInfo dependency = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
++    dependency.memoryBarrierCount = 1u;
++    dependency.pMemoryBarriers = &barrier;
++    m_device->vkd()->vkCmdPipelineBarrier2(cmd, &dependency);
++  }
++
+ }
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 74da75e..1874905 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -999,6 +999,41 @@ namespace dxvk {
+       m_descriptorState.dirtyStages(VK_SHADER_STAGE_ALL);
+     }
+ 
++    /**
++     * \brief NVR ray tracing core (fork patch 0028): raw commands in the exec buffer
++     *
++     * Acceleration structure builds have no DXVK context call. This ends the current
++     * render pass, flushes the barriers DXVK has queued and puts a global memory barrier
++     * (everything before -> everything after), then hands out the exec command buffer;
++     * \ref nvrEndRawCommands puts the same barrier after the raw commands. DXVK's own
++     * hazard tracking never sees what the raw commands read or write, so the two full
++     * barriers order them against all D3D9 work on either side. Objects the raw commands
++     * use must be kept alive with \ref nvrTrack.
++     */
++    VkCommandBuffer nvrBeginRawCommands() {
++      this->endCurrentPass(true);
++      this->flushBarriers();
++      VkCommandBuffer cmd = m_cmd->nvrExecBuffer();
++      nvrFullBarrier(cmd);
++      return cmd;
++    }
++
++    void nvrEndRawCommands(VkCommandBuffer cmd) {
++      nvrFullBarrier(cmd);
++    }
++
++    void nvrFullBarrier(VkCommandBuffer cmd);
++
++    template<typename T>
++    void nvrTrack(Rc<T> object) {
++      m_cmd->track(std::move(object));
++    }
++
++    template<typename T>
++    void nvrTrackResource(const Rc<T>& resource, DxvkAccess access) {
++      m_cmd->track(resource, access);
++    }
++
+     /**
+      * \brief Updates push data
+      * 
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index eedd040..2df5960 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -44,6 +44,9 @@ namespace dxvk {
+     HANDLE_EXT(extSwapchainMaintenance1);          \
+     HANDLE_EXT(extTransformFeedback);              \
+     HANDLE_EXT(extVertexAttributeDivisor);         \
++    HANDLE_EXT(khrAccelerationStructure);          \
++    HANDLE_EXT(khrDeferredHostOperations);         \
++    HANDLE_EXT(khrRayQuery);                       \
+     HANDLE_EXT(khrDynamicRenderingLocalRead);      \
+     HANDLE_EXT(khrExternalMemoryWin32);            \
+     HANDLE_EXT(khrExternalSemaphoreWin32);         \
+@@ -536,6 +539,20 @@ namespace dxvk {
+         m_featuresSupported.extDescriptorBuffer.descriptorBuffer = VK_FALSE;
+     }
+ 
++    // NVR ray tracing core (fork patch 0028): both acceleration structures and ray queries, or neither, and only
++    // when dxvk.conf says nvr.rayTracing = True (default False: Windows' 32-bit drivers offer no ray tracing, NVR
++    // traces in a 64-bit helper; with the default the device is created exactly as without the patch). The deferred
++    // host operations extension (a spec dependency of acceleration structures) is only asked for together with them.
++    if (!instance.config().getOption<bool>("nvr.rayTracing", false)
++     || !m_featuresSupported.khrAccelerationStructure.accelerationStructure
++     || !m_featuresSupported.khrRayQuery.rayQuery
++     || !m_featuresSupported.khrDeferredHostOperations
++     || !m_featuresSupported.vk12.bufferDeviceAddress) {
++      m_featuresSupported.khrAccelerationStructure.accelerationStructure = VK_FALSE;
++      m_featuresSupported.khrRayQuery.rayQuery = VK_FALSE;
++      m_featuresSupported.khrDeferredHostOperations = VK_FALSE;
++    }
++
+     // Disable unified layouts if disabled via config
+     if (!instance.options().enableUnifiedImageLayout)
+       m_featuresSupported.khrUnifiedImageLayouts.unifiedImageLayouts = VK_FALSE;
+@@ -995,6 +1012,12 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extVertexAttributeDivisor, vertexAttributeInstanceRateDivisor, false),
+       ENABLE_EXT_FEATURE(extVertexAttributeDivisor, vertexAttributeInstanceRateZeroDivisor, false),
+ 
++      /* NVR ray tracing core (fork patch 0028): acceleration structures and ray queries for NVR's passes,
++       * only with dxvk.conf nvr.rayTracing = True and where the driver offers both (see above) */
++      ENABLE_EXT(khrDeferredHostOperations, false),
++      ENABLE_EXT_FEATURE(khrAccelerationStructure, accelerationStructure, false),
++      ENABLE_EXT_FEATURE(khrRayQuery, rayQuery, false),
++
+       /* Tiler stuff */
+       ENABLE_EXT_FEATURE(khrDynamicRenderingLocalRead, dynamicRenderingLocalRead, false),
+ 
+diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
+index 6f0ab40..4701f49 100644
+--- a/src/dxvk/dxvk_device_info.h
++++ b/src/dxvk/dxvk_device_info.h
+@@ -86,6 +86,9 @@ namespace dxvk {
+     VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT          extSwapchainMaintenance1        = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT };
+     VkPhysicalDeviceTransformFeedbackFeaturesEXT              extTransformFeedback            = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT };
+     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT         extVertexAttributeDivisor       = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES };
++    VkPhysicalDeviceAccelerationStructureFeaturesKHR          khrAccelerationStructure        = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };  // NVR ray tracing core
++    VkBool32                                                  khrDeferredHostOperations       = VK_FALSE;                                                                    // (AS dependency)
++    VkPhysicalDeviceRayQueryFeaturesKHR                       khrRayQuery                     = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };               // NVR ray tracing core
+     VkPhysicalDeviceDynamicRenderingLocalReadFeatures         khrDynamicRenderingLocalRead    = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR };
+     VkBool32                                                  khrExternalMemoryWin32          = VK_FALSE;
+     VkBool32                                                  khrExternalSemaphoreWin32       = VK_FALSE;
+@@ -158,6 +161,9 @@ namespace dxvk {
+     VkExtensionProperties extSwapchainMaintenance1          = vk::makeExtension(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+     VkExtensionProperties extTransformFeedback              = vk::makeExtension(VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
+     VkExtensionProperties extVertexAttributeDivisor         = vk::makeExtension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
++    VkExtensionProperties khrAccelerationStructure          = vk::makeExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
++    VkExtensionProperties khrDeferredHostOperations         = vk::makeExtension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
++    VkExtensionProperties khrRayQuery                       = vk::makeExtension(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+     VkExtensionProperties khrDynamicRenderingLocalRead      = vk::makeExtension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
+     VkExtensionProperties khrExternalMemoryWin32            = vk::makeExtension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
+     VkExtensionProperties khrExternalSemaphoreWin32         = vk::makeExtension(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
+diff --git a/src/vulkan/vulkan_loader.h b/src/vulkan/vulkan_loader.h
+index 7d02632..385c27e 100644
+--- a/src/vulkan/vulkan_loader.h
++++ b/src/vulkan/vulkan_loader.h
+@@ -504,6 +504,15 @@ namespace dxvk::vk {
+     VULKAN_FN(vkWaitForPresentKHR);
+     #endif
+ 
++    // NVR ray tracing core (fork patch 0028): loaded always, used only when the extension is enabled
++    #ifdef VK_KHR_acceleration_structure
++    VULKAN_FN(vkCreateAccelerationStructureKHR);
++    VULKAN_FN(vkDestroyAccelerationStructureKHR);
++    VULKAN_FN(vkGetAccelerationStructureBuildSizesKHR);
++    VULKAN_FN(vkGetAccelerationStructureDeviceAddressKHR);
++    VULKAN_FN(vkCmdBuildAccelerationStructuresKHR);
++    #endif
++
+     #ifdef VK_KHR_present_wait2
+     VULKAN_FN(vkWaitForPresent2KHR);
+     #endif
+-- 
+2.40.0.windows.1
+

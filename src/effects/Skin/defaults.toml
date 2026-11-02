@@ -1,0 +1,51 @@
+[_Shaders.Skin.Main]
+SpecularStrength = 1.0              # (2026-10-25) Skin highlight strength: two layers, a tight oily sheen and a broad pore haze, at real skin's reflectance (not the plastic-like shine of the object shaders). 1 reads a half-grey specular mask as full skin; 0 none; 2 double.
+Roughness = 0.45                    # (2026-10-25) Skin roughness, 0.1-1: lower is oilier (tighter, brighter highlights), higher is matte.
+Scattering = 1.0                    # (2026-10-25) How far light spreads under the skin, worked out per pixel from the surface's curvature: light wraps past the shadow line (red furthest) and small features soften (nose, ears, lips, fingers). 1 = twice real skin's measured spread (the true width barely shows on a head at game distances); 0 = plain shading; up to 4. Where the screen-space blur runs ([Shaders.Skin.Scattering]) the blur takes over.
+Translucency = 0.5                  # (2026-10-25) Light glowing through thin parts (ears, nostrils, fingers) against the light: white at the thinnest rims, orange, then deep red. 0 off, 2 strong.
+ShadowScatter = 1.0                 # (2026-10-25) Light carried under the skin across shadow edges: the soft edge of sun and lamp shadows warms (red reaches furthest into the shadow; since 2026-10-27 only on soft edges, never as red specks inside a shadow), and the scattered light passes the skin's own shadow line just past it. 0 off, 2 strong.
+Sheen = 1.0                         # (2026-10-25) The fine fuzz on skin: a soft velvety glow along the rims of cheeks, ears and noses where both the light and your view skim the skin. 0 off, 2 strong.
+SkyReflection = 1.0                 # (2026-10-25) The sky reflected off skin at glancing angles, through the same two highlight layers. Outdoors only. 0 off, 2 strong.
+RainWetness = 0.5                   # (2026-10-25) How wet and glossy skin gets in the rain. 0 dry, 1 fully wet.
+MuteGameHighlights = true           # (2026-10-25) The skin shader draws its own highlights, so the game's extra face highlight passes (drawn with the object shaders' plastic-like shine) are switched off. false keeps them as well: shinier faces, as the older skin shaders had them.
+OverrideVanillaPlusSkin = true      # (2026-10-25) With the Vanilla Plus Skin mod installed: true = this build's skin shader is used anyway; false = VPS's own lighting, with the mod's sun shadows added, which also needs the optional Vanilla Plus Skin compatibility files (SkinVPSTemplate.hlsl, Includes\\SkinVPS.hlsl, a separate download since 2026-11-02; without them this build's skin shader is used). Needs a restart.
+
+[_Shaders.Skin.Interiors]
+SpecularStrength = 1.0              # (2026-10-25) Indoors: skin highlight strength.
+Roughness = 0.45                    # (2026-10-25) Indoors: skin roughness. Lower is oilier.
+Scattering = 1.0                    # (2026-10-25) Indoors: how far light spreads under the skin (per pixel, from the curvature).
+Translucency = 0.5                  # (2026-10-25) Indoors: light through thin parts against a lamp.
+ShadowScatter = 1.0                 # (2026-10-25) Indoors: light carried across the edges of lamp shadows.
+Sheen = 1.0                         # (2026-10-25) Indoors: the fine fuzz on skin.
+ScreenSpace = true                  # Indoors: screen-space subsurface scattering on top of the skin shader (see [Shaders.Skin.Scattering]).
+Width = 28.6                        # Indoors: how far light spreads under the skin on screen. (2026-10-19) 28.6 is Community Shaders' Blur Radius 1.0 (was 8 on a narrower kernel).
+DepthFollow = 1.0                   # Indoors: how sharply the blur stops at depth edges.
+AlbedoDetail = 1.0                  # Indoors: how much skin texture detail stays sharp (1 sharpest).
+StrengthRed = 0.48                  # Indoors: how much of each colour scatters.
+StrengthGreen = 0.41
+StrengthBlue = 0.28
+FalloffRed = 1.0                    # Indoors: how wide each colour spreads within the blur, 0-1.
+FalloffGreen = 0.37
+FalloffBlue = 0.3
+
+[_Shaders.Skin.Scattering]
+ScreenSpace = true                  # Screen-space subsurface scattering on top of the skin shader (outdoors): light spreads under the skin across the screen (separable SSS, the ENB look), the skin texture stays sharp. Needs the game's MSAA off: with MSAA on, D3D9 drivers (NVIDIA at least) draw nothing while its extra targets are bound, so it switches itself off and the skin shader's own per-pixel scattering ([Shaders.Skin.Main] Scattering) does the work.
+Width = 28.6                        # How far light spreads under the skin on screen, x the measured skin profile. Higher is softer and waxier. (2026-10-19) 28.6 is Community Shaders' Blur Radius 1.0, its default (was 8 on a narrower kernel).
+DepthFollow = 1.0                   # How sharply the blur stops at depth edges (nose against cheek, chin against neck).
+AlbedoDetail = 1.0                  # How much skin texture detail (freckles, pores, brows, stubble) stays sharp: 1 diffuses only the light, 0 blurs the texture with it (the waxy look).
+StrengthRed = 0.48                  # How much of each colour scatters. Red scatters most, which gives skin its warmth.
+StrengthGreen = 0.41
+StrengthBlue = 0.28
+FalloffRed = 1.0                    # How wide each colour spreads within the blur, 0-1 (above 1 is clamped: it breaks the blur into dots). Use Width to spread further.
+FalloffGreen = 0.37
+FalloffBlue = 0.3
+
+[_Shaders.Skin.Debug]
+DebugView = 0                       # Skin diagnostics, indoors and out. 0 off. 1 which pass drew the skin: green one full pass, cyan one full pass with several lamps, yellow a light-only pass the game multiplies by the texture afterwards, red added for every extra lamp pass on top. 2 which settings are in use: blue Interiors, orange outdoors; bright where the screen-space blur takes the skin, dark where the per-pixel scattering stands in. 3 direct light (sun and lamps) on white skin. 4 ambient and sky light on white skin. 5 highlights alone (lobes, sheen, sky reflection). 6 material: red roughness, green highlight strength, blue wetness. 7 curvature: red the per-pixel scattering, green thin features (Translucency). 8 the screen-space blur's skin test: green blurred, red rejected by distance, blue rejected by colour. 9 scene brightness against the skin's own pass: green equal, red brighter (extra lamp passes), blue darker. 10 what the blur changed: dark nothing, bright a lot.
+LogDraws = 0                        # Diagnostic: logs the first this-many skin draws of the world scene (pass, shader, blend). 0 off. Read at startup.
+BindFaceGenMaps = true              # Diagnostic: the FaceGen map binding in the light-only face passes (used to divide the face colour out of the highlights). Switch off to compare.
+LegacyFaceShadows = false           # (2026-10-27) Diagnostic, live: true = the skin's shadow edges as they were before the 2026-10-27 fix (red blotches and a red line along shadow edges, and grainy self-shadow, on faces in a low side sun): the old per-colour penumbra curve, the scattered light let through the shadow over the whole shaded side, the curvature read in creases too, and CharacterShadowReach measured along the sun's ray. For an A/B only; leave false.
+[_Shaders.Skin.Status]
+Enabled = true                      # (2026-10-25) The skin shader: light spreading under the skin, light through ears and fingers, real skin highlights and sheen, the sky's light and the sun's and lamps' shadows on faces and bodies, rain wetness. Off = the game's own skin shaders (no mod shadows or lighting on skin).
+
+

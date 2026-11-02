@@ -1,0 +1,50 @@
+[_Shaders.Sky.Main]
+AthmosphereThickness = 2.0          # Determins the height of the athmosphere on the horizon
+SunInfluence = 1.0                  # How wide a side of the athmosphere will the sky lit up.
+SunStrength = 1.0                   # How strong is the sun brighness when reflected by athmosphere
+GlareStrength = 1.0                 # How much influence does the Sun have over Glare, inversed
+StarStrength = 1.0                  # Multiplier for stars brightness
+UseSunDiskColor = false             # Uses the color from the sun disk from the game weather to calculate the sky tint. Otherwise uses the sun lighting
+SunsetR = 0.5                       # Color boost for sunset/sunrise sun color (Red)
+SunsetG = 0.0                       # Color boost for sunset/sunrise sun color (Green)
+SunsetB = 0.03                      # Color boost for sunset/sunrise sun color (Blue)
+StarTwinkle = 1.0                   # Speed of the star twinkling
+ColorLook = true                    # UNOFFICIAL (2026-10-28), live: the master switch for the mod's sky colour settings below (TintDay / TintNight, the horizon tints, SaturationDay / SaturationNight) and the sunset colour boost (SunsetR / G / B). Off = all of them stand aside (on the sky, the sky light on objects and the fog's sky colours) and the sky is the weather's own (or the physical sky's). For checking whether a colour on the sky comes from these settings. true = as before.
+TintDayR = 1.0                      # UNOFFICIAL (2026-10-25), live: colour of the sky by day (a colour wheel in the menu). The sky, the sky the clouds blend into, and the sky light on objects are multiplied by it. White = no change. Fades into TintNight over dusk on the same curve as SkyMultiplier.
+TintDayG = 1.0
+TintDayB = 1.0
+TintNightR = 1.0                    # UNOFFICIAL (2026-10-25), live: colour of the sky at night (a colour wheel in the menu), e.g. a little blue for moonlit nights. White = no change.
+TintNightG = 1.0
+TintNightB = 1.0
+TintKeepsBrightness = true          # UNOFFICIAL (2026-10-26), live: the sky colour wheels (TintDay, TintNight and the horizon ones) change only the sky's colour, not how bright it is: a paler or deeper colour on the wheel no longer makes the whole sky brighter or darker. false = the colour multiplies the sky as it is (a pale colour brightens it, a dark one darkens it).
+TintHorizonDayR = 1.0               # UNOFFICIAL (2026-10-26), live: an extra colour for the sky near the horizon by day (a colour wheel in the menu), fading out going up to TintGradientHeight, on top of TintDay; e.g. a pale grey-blue for a hazy desert horizon under a deeper blue overhead. White = no change.
+TintHorizonDayG = 1.0
+TintHorizonDayB = 1.0
+TintHorizonNightR = 1.0             # UNOFFICIAL (2026-10-26), live: the same at night. White = no change.
+TintHorizonNightG = 1.0
+TintHorizonNightB = 1.0
+TintGradientHeight = 0.3            # UNOFFICIAL (2026-10-26), live [0.01-1.0]: how high up the horizon colour reaches before it has faded out (0.3 = about 17 degrees above the horizon, 1 = all the way overhead).
+SaturationDay = 1.0                 # UNOFFICIAL (2026-10-26), live [0.0-2.0]: how colourful the sky is by day, without changing its brightness. 1 = no change, lower = paler and greyer (e.g. 0.6 tones down a strong weather blue), higher = more colourful. Also the sky the clouds blend into and the sky light on objects.
+SaturationNight = 1.0               # UNOFFICIAL (2026-10-26), live [0.0-2.0]: the same at night.
+MoonBrightness = 1.0                # UNOFFICIAL (2026-10-25), live [0.0-4.0]: how bright the moon is at night: the moon disc in the sky and the moonlight on the world (the game's night light, and the mod's effects that use it). 1 = no change, 0.5 half as bright, 2 twice. Outdoors only; the sun is untouched.
+
+
+[_Shaders.Sky.Physical]
+Enabled = true                      # UNOFFICIAL: a physical sky. The sky's colours come from the air itself (blue overhead, pale near the horizon, a bright glow round the sun, red and gold as it sets) instead of the weather's painted gradient. The weather still sets how bright the sky is, and WeatherTint keeps some of its colour; the game's own twilight and night sky take over once the sun is down. The sky light on objects follows the sky on screen. Switching it on or off needs a restart (off, the sky shader is exactly as before).
+Brightness = 1.0                    # [0.0-4.0] Brightness against the weather's sky (1 = the same overall brightness).
+WeatherTint = 0.35                  # [0.0-1.0] How much of the weather's own sky colour to keep (0 = the air's colours only, 1 = the weather's colours with the air's light and shade).
+Haze = 1.0                          # [0.0-10.0] Dust and haze in the air: a wider, whiter glow round the sun and a paler horizon. Desert air is dusty: 1.5-3 looks hazier.
+ExactSunlight = false               # UNOFFICIAL, off by default (a precision fix that moves the picture at a low sun). The sun's light through the air is worked out exactly (a table) instead of by the closed-form estimate the physical sky started with, which is 5-17% short in air at a low sun (Hillaire 2020 / Bruneton 2008 method): sunsets and sunrises get redder at the horizon (blue-to-red ratio about -25% at 5 degrees of sun, -5% at 15), the brightness at 15 degrees and above changes under 1% and a high sun not at all to the eye. Live switch, a few ms once when it is turned on. Needs the physical sky on.
+MultipleScattering = false          # UNOFFICIAL, off by default (a look change). Adds the light that has scattered more than once in the air (Hillaire, EGSR 2020) and the light the ground sends back into it: the horizon is brighter and the sky bluer and softer, the zenith relatively darker; the weather's overall sky brightness is kept. Includes ExactSunlight. Live switch; the tables behind it are drawn once (and again when Haze or GroundAlbedo change). Needs the physical sky on.
+GroundAlbedo = 0.3                  # [0.0-1.0] With MultipleScattering: how much sunlight the ground reflects back into the air (0.3 = desert and soil, 0.1 dark rock, 0.8 fresh snow). Lifts the horizon most at a high sun.
+LightsObjects = false               # UNOFFICIAL (2026-10-25), live, off by default (the physical sky's light on surfaces double-dipped with the terrain / PBR sky settings): the physical sky also lights the world (the sky-colour light on objects, terrain, skin, hair and grass). false (default) = they take the game's own sky light, as without the physical sky, while the sky itself, the fog and the clouds keep it: for setups whose terrain / PBR sky settings already tint the surfaces (the light would otherwise count twice).
+
+[_Shaders.Sky.Clouds]
+UseNormals = false                  # EXPERIMENTAL-Uses the R & G channels of the clouds texture to calculate normals for lighting. Requires special textures
+SphericalNormals = false            # EXPERIMENTAL-Uses this setting if the normals of the clouds point to the center of the panoramic texture
+Transparency = 1.0                  # Clouds base transparency
+Brightness = 1.0                    # Clouds base brightness
+
+[_Shaders.Sky.Status]
+Enabled = true                      # Replaces the sky and cloud shaders to add more subtle sky shading.
+

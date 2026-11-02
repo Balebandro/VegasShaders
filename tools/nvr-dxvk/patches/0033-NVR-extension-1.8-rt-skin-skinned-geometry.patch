@@ -1,0 +1,393 @@
+From b88d6bc94780995afcdb21f2b0e598cc3e4aba2a Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 18:34:32 -0400
+Subject: [PATCH] NVR extension 1.8-rt-skin:
+ ID3D9NvrExtRtSkin::StageSkinnedGeometry poses skinned vertices by a bone
+ palette (actors in the ray tracing scene)
+
+---
+ src/d3d9/d3d9_nvr_ext.cpp                 |  8 ++
+ src/d3d9/d3d9_nvr_ext_api.h               | 47 ++++++++++++
+ src/d3d9/d3d9_nvr_rt.cpp                  | 91 ++++++++++++++++++++++-
+ src/d3d9/d3d9_nvr_rt.h                    | 23 +++++-
+ src/d3d9/shaders/d3d9_nvr_rt_convert.comp | 49 +++++++++++-
+ 5 files changed, 210 insertions(+), 8 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 19f0012..9c8a5c4 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -178,6 +178,14 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    // 1.8-rt-skin: skinned geometry for the helper (the same object)
++    if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtRtSkin)) {
++      if (!m_rt)
++        m_rt = std::make_unique<D3D9NvrRt>(m_device);
++      *ppvObject = ref(static_cast<ID3D9NvrExtRtSkin*>(m_rt.get()));
++      return S_OK;
++    }
++
+     // 1.7-dlss: images and semaphores shared with another process
+     if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtShare)) {
+       *ppvObject = ref(static_cast<ID3D9NvrExtShare*>(this));
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 736d773..31abf92 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -1171,3 +1171,50 @@ __CRT_UUID_DECL(ID3D9NvrExtRt,         0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0
+ __CRT_UUID_DECL(ID3D9NvrExtRtGeometry, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x31);
+ __CRT_UUID_DECL(ID3D9NvrExtRtScene,    0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x32);
+ #endif
++
++/**
++ * UNOFFICIAL 2026-10-29 (1.8-rt-skin, patch 0033): skinned geometry (actors) for the ray tracing helper, found with
++ * QueryInterface(__uuidof(ID3D9NvrExtRtSkin)) (a fork without it answers E_NOINTERFACE). StageSkinnedGeometry is
++ * StageGeometry with the vertices posed: each position (float3 / float4) is blended from up to 4 bones of pPalette (3 x 4
++ * row-major matrices, p' = M (x, y, z, 1): straight into scene space) by the vertex's blend weights and indices, which sit
++ * in the position's stream at the given byte deltas. Texels and layout as StageGeometry (positions, then the triangle
++ * list, then the texcoords when NVR_EXT_RT_TEXCOORD_FLAGS asks: they are not posed). Stage it again every frame the actor moves;
++ * the palette is copied at the call.
++ */
++#define NVR_EXT_RT_SKIN_MAX_BONES 256u
++
++enum NVR_EXT_RT_SKIN_WEIGHTS {
++  NVR_EXT_RT_SKIN_WEIGHTS_FLOAT  = 0,   // WeightCount floats (FLOAT1..FLOAT4)
++  NVR_EXT_RT_SKIN_WEIGHTS_HALF   = 1,   // WeightCount halfs (FLOAT16_2 / FLOAT16_4)
++  NVR_EXT_RT_SKIN_WEIGHTS_UBYTE4N = 2,  // 4 bytes / 255
++};
++
++enum NVR_EXT_RT_SKIN_INDICES {
++  NVR_EXT_RT_SKIN_INDICES_UBYTE4  = 0,  // bytes 0..3 = bones 0..3
++  NVR_EXT_RT_SKIN_INDICES_D3DCOLOR = 1, // D3DCOLOR (stored b, g, r, a): bones 0..3 = r, g, b, a
++};
++
++struct NVR_EXT_RT_SKIN_DESC {
++  INT                         WeightsDelta;     // bytes from the position element to the blend weights (same stream)
++  NVR_EXT_RT_SKIN_WEIGHTS     WeightsFormat;
++  UINT                        WeightCount;      // weights stored (0..4); fewer than BonesPerVertex: the last bone gets 1 - their sum
++  UINT                        BonesPerVertex;   // 1..4
++  INT                         IndicesDelta;     // bytes from the position element to the blend indices (same stream)
++  NVR_EXT_RT_SKIN_INDICES     IndicesFormat;
++  UINT                        PaletteCount;     // 1..NVR_EXT_RT_SKIN_MAX_BONES
++  const FLOAT*                pPalette;         // PaletteCount x 12 floats (row-major 3 x 4)
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d333")
++ID3D9NvrExtRtSkin : public IUnknown {
++  virtual HRESULT STDMETHODCALLTYPE StageSkinnedGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++    const NVR_EXT_RT_SKIN_DESC*           pSkin,
++          ID3D9NvrExtSharedImage*         pArena,
++          UINT                            DstTexel,
++          NVR_EXT_RT_GEOMETRY_INFO*       pInfo) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtRtSkin,     0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x33);
++#endif
+diff --git a/src/d3d9/d3d9_nvr_rt.cpp b/src/d3d9/d3d9_nvr_rt.cpp
+index 939f5fe..277f68e 100644
+--- a/src/d3d9/d3d9_nvr_rt.cpp
++++ b/src/d3d9/d3d9_nvr_rt.cpp
+@@ -27,6 +27,8 @@ namespace dxvk {
+       uint32_t dstOffset;
+       uint32_t vertexCount;
+       uint32_t pad;
++      uint64_t palette;   // 1.8-rt-skin: the bone palette (12 floats a bone)
++      uint32_t pad2[2];
+     };
+ 
+     constexpr uint32_t ModePositionsFloat = 0u;
+@@ -35,6 +37,7 @@ namespace dxvk {
+     constexpr uint32_t ModeStrip          = 3u;
+     constexpr uint32_t ModeUvFloat2       = 4u;   // 1.8-rt-uv
+     constexpr uint32_t ModeUvHalf2        = 5u;
++    constexpr uint32_t ModeSkin           = 6u;   // 1.8-rt-skin
+ 
+     constexpr size_t   MaxPendingJobs      = 512u;
+     constexpr uint64_t MaxPendingTriangles = 4u << 20;
+@@ -529,7 +532,7 @@ namespace dxvk {
+   }
+ 
+ 
+-  void D3D9NvrRt::RecordConversions(DxvkContext* ctx, const Rc<DxvkShader>& convert, const std::vector<D3D9NvrRtJob>& jobs) {
++  void D3D9NvrRt::RecordConversions(DxvkContext* ctx, const Rc<DxvkShader>& convert, const std::vector<D3D9NvrRtJob>& jobs, uint64_t palettes) {
+     DxvkPushDataState savedPushData = ctx->nvrGetPushDataState();
+     ctx->bindShader<VK_SHADER_STAGE_COMPUTE_BIT>(Rc<DxvkShader>(convert));
+ 
+@@ -539,10 +542,17 @@ namespace dxvk {
+       D3D9NvrRtConvertPush push = { };
+       push.src       = job.vertexBuffer->getSliceInfo().gpuAddress;
+       push.dst       = dst + job.dstPositions;
+-      push.mode      = job.half ? ModePositionsHalf4 : ModePositionsFloat;
++      push.mode      = job.skin ? ModeSkin : job.half ? ModePositionsHalf4 : ModePositionsFloat;
+       push.count     = job.vertexCount;
+       push.srcOffset = job.positionOffset;
+       push.stride    = job.stride;
++      if (job.skin) {   // 1.8-rt-skin: baseVertex / dstOffset / vertexCount carry the weights, the indices and the formats
++        push.baseVertex  = int32_t(job.weightsOffset);
++        push.dstOffset   = job.indicesOffset;
++        push.vertexCount = job.skinBits;
++        push.palette     = palettes + job.paletteOffset;
++        push.pad         = uint32_t(job.palette.size() / 12u);
++      }
+       ctx->pushData(VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
+       ctx->dispatch((job.vertexCount + 63u) / 64u, 1u, 1u);
+ 
+@@ -616,6 +626,28 @@ namespace dxvk {
+           ID3D9NvrExtSharedImage*         pArena,
+           UINT                            DstTexel,
+           NVR_EXT_RT_GEOMETRY_INFO*       pInfo) {
++    return StageImpl(pDesc, nullptr, pArena, DstTexel, pInfo);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::StageSkinnedGeometry(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++    const NVR_EXT_RT_SKIN_DESC*           pSkin,
++          ID3D9NvrExtSharedImage*         pArena,
++          UINT                            DstTexel,
++          NVR_EXT_RT_GEOMETRY_INFO*       pInfo) {
++    if (pSkin == nullptr)
++      return D3DERR_INVALIDCALL;
++    return StageImpl(pDesc, pSkin, pArena, DstTexel, pInfo);
++  }
++
++
++  HRESULT D3D9NvrRt::StageImpl(
++    const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++    const NVR_EXT_RT_SKIN_DESC*           pSkin,
++          ID3D9NvrExtSharedImage*         pArena,
++          UINT                            DstTexel,
++          NVR_EXT_RT_GEOMETRY_INFO*       pInfo) {
+     if (pInfo != nullptr)
+       *pInfo = NVR_EXT_RT_GEOMETRY_INFO();
+ 
+@@ -641,6 +673,27 @@ namespace dxvk {
+     if (FAILED(hr))
+       return hr;
+ 
++    // 1.8-rt-skin: the posing (positions float3 / float4 only; the weights and indices in the position's stream)
++    if (pSkin != nullptr) {
++      const char* name = pDesc->pDebugName ? pDesc->pDebugName : "(unnamed)";
++      const uint64_t vbSize = job.vertexBuffer->info().size;
++      const int64_t weights = int64_t(job.positionOffset) + pSkin->WeightsDelta;
++      const int64_t indices = int64_t(job.positionOffset) + pSkin->IndicesDelta;
++      const uint64_t last = uint64_t(job.vertexCount - 1u) * job.stride;
++      if (job.half || pSkin->BonesPerVertex < 1u || pSkin->BonesPerVertex > 4u || pSkin->WeightCount > 4u ||
++          pSkin->PaletteCount == 0u || pSkin->PaletteCount > NVR_EXT_RT_SKIN_MAX_BONES || pSkin->pPalette == nullptr ||
++          weights < 0 || (weights & 3) || indices < 0 || (indices & 3) ||
++          uint64_t(weights) + last + 4u > vbSize || uint64_t(indices) + last + 4u > vbSize) {
++        Logger::warn(str::format("NVR ext rt: skinned geometry ", name, " refused: the skin description is out of range"));
++        return D3DERR_INVALIDCALL;
++      }
++      job.skin = true;   // texcoords (Flags) still welcome: posed positions + the static texcoords (textured actors, 2026-10-30)
++      job.weightsOffset = uint32_t(weights);
++      job.indicesOffset = uint32_t(indices);
++      job.skinBits = pSkin->WeightCount | (pSkin->BonesPerVertex << 4u) | (uint32_t(pSkin->WeightsFormat) << 8u) | (uint32_t(pSkin->IndicesFormat) << 12u);
++      job.palette.assign(pSkin->pPalette, pSkin->pPalette + size_t(pSkin->PaletteCount) * 12u);
++    }
++
+     const uint64_t texels = 3ull * (uint64_t(job.vertexCount) + job.triangles) + (job.uv ? 2ull * job.vertexCount : 0ull);
+     const uint64_t capacity = uint64_t(arena.Width) * arena.Height;
+ 
+@@ -699,7 +752,28 @@ namespace dxvk {
+     const uint32_t rowFirst = m_stagedMin / size.width;
+     const uint32_t rowEnd = std::min<uint32_t>((m_stagedMax + size.width - 1u) / size.width, size.height);
+ 
++    // 1.8-rt-skin: the skinned jobs' palettes, packed into one buffer (refilled at this flush)
++    std::vector<float> paletteData;
++    for (auto& job : m_staged) {
++      if (!job.skin)
++        continue;
++      job.paletteOffset = VkDeviceSize(paletteData.size()) * 4u;
++      paletteData.insert(paletteData.end(), job.palette.begin(), job.palette.end());
++      while (paletteData.size() & 3u)
++        paletteData.push_back(0.0f);
++    }
++    const VkDeviceSize paletteBytes = VkDeviceSize(paletteData.size()) * 4u;
++    if (paletteBytes && (m_palettes == nullptr || m_palettes->info().size < paletteBytes))
++      m_palettes = CreateRtBuffer(std::max<VkDeviceSize>(paletteBytes * 2u, 64u << 10),
++        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, "NVR rt bone palettes");
++    if (paletteBytes && m_palettes == nullptr) {
++      m_staged.erase(std::remove_if(m_staged.begin(), m_staged.end(), [] (const D3D9NvrRtJob& j) { return j.skin; }), m_staged.end());
++      paletteData.clear();
++    }
++
+     m_device->EmitCs([
++      cPalettes    = paletteData.empty() ? Rc<DxvkBuffer>() : m_palettes,
++      cPaletteData = std::move(paletteData),
+       cJobs    = std::move(m_staged),
+       cConvert = m_convert,
+       cStaging = m_staging,
+@@ -708,10 +782,19 @@ namespace dxvk {
+       cRows    = rowEnd - rowFirst,
+       cWidth   = size.width
+     ] (DxvkContext* ctx) {
+-      // Everything earlier (the game's uploads of these buffers, the last copy out of the staging) before the conversions
++      // 1.8-rt-skin: the palettes first (DXVK orders this write after the last flush's reads: tracked below)
++      if (cPalettes != nullptr) {
++        const VkDeviceSize bytes = VkDeviceSize(cPaletteData.size()) * 4u;
++        for (VkDeviceSize at = 0u; at < bytes; at += 65536u)
++          ctx->updateBuffer(cPalettes, at, std::min<VkDeviceSize>(65536u, bytes - at), reinterpret_cast<const char*>(cPaletteData.data()) + at);
++      }
++
++      // Everything earlier (the game's uploads of these buffers, the last copy out of the staging, the palettes) before the conversions
+       ctx->nvrBeginRawCommands();
+ 
+-      RecordConversions(ctx, cConvert, cJobs);
++      RecordConversions(ctx, cConvert, cJobs, cPalettes != nullptr ? cPalettes->getSliceInfo().gpuAddress : 0u);
++      if (cPalettes != nullptr)
++        ctx->nvrTrackResource(cPalettes, DxvkAccess::Read);
+ 
+       // The conversions' writes before the copy reads them (DXVK does not see writes by address)
+       ctx->nvrBeginRawCommands();
+diff --git a/src/d3d9/d3d9_nvr_rt.h b/src/d3d9/d3d9_nvr_rt.h
+index 0a0f713..808d593 100644
+--- a/src/d3d9/d3d9_nvr_rt.h
++++ b/src/d3d9/d3d9_nvr_rt.h
+@@ -127,6 +127,10 @@ namespace dxvk {
+     bool                    half = false;
+     bool                    uv = false, uvHalf = false;   // 1.8-rt-uv: also the texcoords (float2 array after the indices)
+     uint32_t                uvOffset = 0u;                // bytes from the buffer's start to vertex 0's texcoord
++    bool                    skin = false;                 // 1.8-rt-skin: positions posed by the palette
++    uint32_t                weightsOffset = 0u, indicesOffset = 0u, skinBits = 0u;   // bytes; weight count | bones << 4 | formats
++    std::vector<float>      palette;                      // 12 floats a bone
++    VkDeviceSize            paletteOffset = 0u;           // in the flush's palette buffer
+     std::vector<Range>      ranges;
+     uint32_t                triangles = 0u;
+     Rc<DxvkBuffer>          dst;            // where the conversion writes: float3 positions at dstPositions, the uint list at dstIndices
+@@ -137,7 +141,7 @@ namespace dxvk {
+     Rc<D3D9NvrRtAccel>      accel;              // in-process build only
+   };
+ 
+-  class D3D9NvrRt final : public ID3D9NvrExtRt {
++  class D3D9NvrRt final : public ID3D9NvrExtRt, public ID3D9NvrExtRtSkin {
+ 
+   public:
+ 
+@@ -184,6 +188,20 @@ namespace dxvk {
+     HRESULT STDMETHODCALLTYPE FlushStagedGeometry(
+             ID3D9NvrExtSharedImage*         pArena);
+ 
++    HRESULT StageImpl(
++      const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++      const NVR_EXT_RT_SKIN_DESC*           pSkin,
++            ID3D9NvrExtSharedImage*         pArena,
++            UINT                            DstTexel,
++            NVR_EXT_RT_GEOMETRY_INFO*       pInfo);
++
++    HRESULT STDMETHODCALLTYPE StageSkinnedGeometry(
++      const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
++      const NVR_EXT_RT_SKIN_DESC*           pSkin,
++            ID3D9NvrExtSharedImage*         pArena,
++            UINT                            DstTexel,
++            NVR_EXT_RT_GEOMETRY_INFO*       pInfo);
++
+     /** Object bookkeeping (stats) */
+     void OnGeometryGone(uint32_t triangles, VkDeviceSize bytes);
+     void OnSceneGone(VkDeviceSize bytes, const Rc<D3D9NvrRtSceneState>& state, const Rc<D3D9NvrRtAccel>& tlas);
+@@ -204,6 +222,7 @@ namespace dxvk {
+     // Helper geometry (StageGeometry): the conversions queued for the arena, into a staging copy of it
+     std::vector<D3D9NvrRtJob> m_staged;
+     Rc<DxvkBuffer>            m_staging;
++    Rc<DxvkBuffer>            m_palettes;     // 1.8-rt-skin: the staged jobs' bone palettes (refilled every flush)
+     VkDeviceSize              m_stagingBytes = 0u;
+     uint32_t                  m_stagedMin = ~0u;    // texels touched since the last flush
+     uint32_t                  m_stagedMax = 0u;
+@@ -224,7 +243,7 @@ namespace dxvk {
+     HRESULT PrepareJob(const NVR_EXT_RT_GEOMETRY_DESC* pDesc, D3D9NvrRtJob& job, bool Upload);
+ 
+     /** CS thread: the conversion dispatches of jobs into their dst (the caller puts the barriers around them). */
+-    static void RecordConversions(DxvkContext* ctx, const Rc<DxvkShader>& convert, const std::vector<D3D9NvrRtJob>& jobs);
++    static void RecordConversions(DxvkContext* ctx, const Rc<DxvkShader>& convert, const std::vector<D3D9NvrRtJob>& jobs, uint64_t palettes = 0u);
+ 
+     Rc<DxvkBuffer> CreateRtBuffer(VkDeviceSize size, VkBufferUsageFlags usage, const char* name);
+ 
+diff --git a/src/d3d9/shaders/d3d9_nvr_rt_convert.comp b/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
+index ff6a644..f7f0632 100644
+--- a/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
++++ b/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
+@@ -14,6 +14,7 @@ layout(local_size_x = 64) in;
+ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint w[]; };
+ layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Floats { float f[]; };
+ layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Uints { uint u[]; };
++layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Bones { vec4 rows[]; };
+ 
+ #define MODE_POSITIONS_FLOAT  0u   // float3 or float4
+ #define MODE_POSITIONS_HALF4  1u
+@@ -21,6 +22,7 @@ layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Ui
+ #define MODE_STRIP            3u
+ #define MODE_UV_FLOAT2        4u   // 1.8-rt-uv: texcoords (any stride and offset) into a packed float2 array
+ #define MODE_UV_HALF2         5u
++#define MODE_SKIN             6u   // 1.8-rt-skin: positions blended by up to 4 bones of the palette (straight into scene space)
+ 
+ layout(push_constant) uniform Push {
+   uvec2 src;          // the D3D9 buffer (vertex or index buffer) at offset 0
+@@ -31,9 +33,12 @@ layout(push_constant) uniform Push {
+   uint  stride;       // positions: vertex stride in bytes; indices: index size in bytes (2 or 4), 0 = no index buffer
+   int   baseVertex;   // indices: added to each index
+   uint  dstOffset;    // indices: first uint written
+-  uint  vertexCount;  // indices: the vertices available
+-  uint  pad;
++  uint  vertexCount;  // indices: the vertices available; skin: weight count | bones a vertex << 4 | weights format << 8 | indices format << 12
++  uint  pad;          // skin: the palette's bone count
++  uvec2 palette;      // skin: 3 vec4 rows a bone
++  uint  pad2[2];
+ } p;
++// skin: baseVertex = the blend weights' byte offset (vertex 0), dstOffset = the blend indices' byte offset (vertex 0)
+ 
+ uint readU16(Words b, uint byteOffset) {
+   uint word = b.w[byteOffset >> 2u];
+@@ -53,6 +58,46 @@ void main() {
+   if (id >= p.count)
+     return;
+ 
++  if (p.mode == MODE_SKIN) {
++    Words b = Words(p.src);
++    uint at = (p.srcOffset + id * p.stride) >> 2u;
++    vec4 pos = vec4(uintBitsToFloat(b.w[at]), uintBitsToFloat(b.w[at + 1u]), uintBitsToFloat(b.w[at + 2u]), 1.0);
++    uint weightCount = p.vertexCount & 15u, bones = (p.vertexCount >> 4u) & 15u, weightsFormat = (p.vertexCount >> 8u) & 15u;
++    uint indicesFormat = (p.vertexCount >> 12u) & 15u;
++    uint wAt = (uint(p.baseVertex) + id * p.stride) >> 2u;
++    float w[4] = float[4](0.0, 0.0, 0.0, 0.0);
++    for (uint k = 0u; k < 4u; k++) {
++      if (k >= weightCount) break;
++      if (weightsFormat == 0u) w[k] = uintBitsToFloat(b.w[wAt + k]);
++      else if (weightsFormat == 1u) w[k] = unpackHalf2x16(b.w[wAt + (k >> 1u)])[k & 1u];
++      else w[k] = float((b.w[wAt] >> (8u * k)) & 255u) / 255.0;
++    }
++    if (weightCount < bones) {
++      float sum = 0.0;
++      for (uint k = 0u; k < 3u; k++) if (k < bones - 1u) sum += w[k];
++      w[bones - 1u] = 1.0 - sum;
++    }
++    uint packedIndices = b.w[(p.dstOffset + id * p.stride) >> 2u];
++    Bones palette = Bones(p.palette);
++    vec3 posed = vec3(0.0);
++    float total = 0.0;
++    for (uint k = 0u; k < 4u; k++) {
++      if (k >= bones) break;
++      uint byteIndex = indicesFormat == 1u ? (k == 0u ? 2u : k == 2u ? 0u : k) : k;   // D3DCOLOR keeps b, g, r, a
++      uint bone = min((packedIndices >> (8u * byteIndex)) & 255u, max(p.pad, 1u) - 1u);
++      posed += w[k] * vec3(dot(palette.rows[bone * 3u], pos), dot(palette.rows[bone * 3u + 1u], pos), dot(palette.rows[bone * 3u + 2u], pos));
++      total += w[k];
++    }
++    if (total > 1.0e-4) posed /= total;
++    if (any(isnan(posed)) || any(isinf(posed)))
++      posed = vec3(0.0);
++    Floats o = Floats(p.dst);
++    o.f[id * 3u + 0u] = posed.x;
++    o.f[id * 3u + 1u] = posed.y;
++    o.f[id * 3u + 2u] = posed.z;
++    return;
++  }
++
+   if (p.mode == MODE_UV_FLOAT2 || p.mode == MODE_UV_HALF2) {
+     Words b = Words(p.src);
+     uint at = (p.srcOffset + id * p.stride) >> 2u;
+-- 
+2.40.0.windows.1
+

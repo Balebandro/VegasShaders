@@ -1,0 +1,96 @@
+#version 460
+// UNOFFICIAL 2026-10-29 RT lamp shadows, the soft-shadow filter ([Shaders.ShadowsInteriors.RT] Filter; core\RtLampShadows.h;
+// docs\next\FORK-RT-LAMPS.md). Runs in the RT helper right after RtLampTrace.comp (the helper puts a full barrier between passes).
+// The shared denoiser (core\RtDenoise.h) filters one value a pixel; this result holds three lamps a pixel (cube slot + visibility,
+// RtLampTrace.comp's encoding), and neighbours rank their lamps differently. So the filter is lamp-aware: for each of the pixel's
+// entries it averages the visibility of the SAME cube slot found among the neighbours' entries (a 5 x 5 tap pattern at Step texels),
+// weighted by a Gaussian, the depth (relative, against the local slope) and the view normal, as SVGF's a-trous taps. The slots and
+// the depth code stay the pixel's own; only the visibility (16 steps) is smoothed. With Jitter the frames' noise differs too, for TAA.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampFilter.spv RtLampFilter.comp
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 size;          // x width, y height, z step (texels between taps), w depth sigma
+	vec4 params;        // x normal power, yzw -
+} p;
+layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // view z / farZ
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;  // view-space normal * 0.5 + 0.5
+layout(set = 0, binding = 4, rg32f) uniform readonly image2D rawImage;       // RtLampTrace.comp's result
+layout(set = 0, binding = 5, rg32f) uniform writeonly image2D resultImage;   // the same encoding, visibility filtered
+
+const float kernel[3] = float[3](3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
+
+// r = e0 + 1024 e1, g = e2 + 1024 depthCode -> the three entries (slot + 64 x visibility)
+vec3 entries(vec2 v) {
+	float hi = floor(v.x / 1024.0);
+	float code = floor(v.y / 1024.0);
+	return vec3(v.x - 1024.0 * hi, hi, v.y - 1024.0 * code);
+}
+
+void main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 size = ivec2(p.size.xy);
+	if (pixel.x >= size.x || pixel.y >= size.y)
+		return;
+
+	vec2 raw = imageLoad(rawImage, pixel).xy;
+	float z = imageLoad(depthImage, pixel).r;
+	if (!(z > 0.0) || z >= 0.9999) {
+		imageStore(resultImage, pixel, vec4(raw, 0.0, 0.0));
+		return;
+	}
+	vec3 e = entries(raw);
+	vec3 vis = floor(e / 64.0);
+	vec3 slots = e - 64.0 * vis;
+	vec3 n = normalize(imageLoad(normalImage, pixel).xyz * 2.0 - 1.0);
+	int step = max(int(p.size.z), 1);
+	// Flat answer: the pixel and its four neighbours one step away hold the same entries (all lit or all blocked, the common case):
+	// nothing to smooth, keep it (most of the screen; the filter's cost is then the edges only)
+	bool same = true;
+	for (int i = 0; i < 4 && same; i++) {
+		ivec2 q = clamp(pixel + ivec2(i == 0 ? step : i == 1 ? -step : 0, i == 2 ? step : i == 3 ? -step : 0), ivec2(0), size - 1);
+		same = all(equal(imageLoad(rawImage, q).xy, raw));
+	}
+	if (same) {
+		imageStore(resultImage, pixel, vec4(raw, 0.0, 0.0));
+		return;
+	}
+	// the local depth slope (one texel), so taps on a slanted floor are not counted as another surface; the smaller of the two
+	// one-sided differences each way, so a silhouette (a rail in front of the wall) does not open the weight to the background
+	float zr = imageLoad(depthImage, clamp(pixel + ivec2(1, 0), ivec2(0), size - 1)).r - z;
+	float zl = z - imageLoad(depthImage, clamp(pixel - ivec2(1, 0), ivec2(0), size - 1)).r;
+	float zd = imageLoad(depthImage, clamp(pixel + ivec2(0, 1), ivec2(0), size - 1)).r - z;
+	float zu = z - imageLoad(depthImage, clamp(pixel - ivec2(0, 1), ivec2(0), size - 1)).r;
+	float slope = max(min(abs(zr), abs(zl)), min(abs(zd), abs(zu))) * float(step) + 0.002 * z;
+
+	vec3 sum = vec3(0.0), weights = vec3(0.0);
+	for (int y = -2; y <= 2; y++) {
+		for (int x = -2; x <= 2; x++) {
+			ivec2 tapPixel = pixel + ivec2(x, y) * step;
+			if (any(lessThan(tapPixel, ivec2(0))) || any(greaterThanEqual(tapPixel, size))) continue;
+			float tz = imageLoad(depthImage, tapPixel).r;
+			if (!(tz > 0.0) || tz >= 0.9999) continue;
+			vec3 tn = normalize(imageLoad(normalImage, tapPixel).xyz * 2.0 - 1.0);
+			float w = kernel[abs(x)] * kernel[abs(y)];
+			w *= exp(-abs(tz - z) / (p.size.w * slope * length(vec2(x, y)) + 1.0e-6));
+			w *= pow(max(dot(n, tn), 0.0), p.params.x);
+			if (!(w > 1.0e-5)) continue;
+			vec3 te = entries(imageLoad(rawImage, tapPixel).xy);
+			vec3 tvis = floor(te / 64.0);
+			vec3 tslots = te - 64.0 * tvis;
+			// each of this pixel's lamps takes the tap's visibility of the same lamp, if the tap traced it
+			for (int k = 0; k < 3; k++) {
+				if (slots[k] > 62.5) continue;
+				for (int j = 0; j < 3; j++) {
+					if (abs(tslots[j] - slots[k]) < 0.5) { sum[k] += w * tvis[j]; weights[k] += w; break; }
+				}
+			}
+		}
+	}
+	for (int k = 0; k < 3; k++)
+		if (slots[k] < 62.5 && weights[k] > 0.0) vis[k] = floor(sum[k] / weights[k] + 0.5);
+	e = slots + 64.0 * vis;
+	float code = floor(raw.y / 1024.0);
+	imageStore(resultImage, pixel, vec4(e.x + 1024.0 * e.y, e.z + 1024.0 * code, 0.0, 0.0));
+}

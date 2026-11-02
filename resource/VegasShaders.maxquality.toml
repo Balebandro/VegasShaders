@@ -1,0 +1,134 @@
+# Vegas Shaders -- Max Quality settings.
+#
+# Used only while Max Quality is on ([Main.Main.Quality] MaxQuality = true, the MAX QUALITY button next to FX at the top of
+# the menu; needs a restart). Each value here is used IN PLACE OF yours while it is on. Your own settings file is never
+# changed: turn Max Quality off, restart, and everything is exactly as you had it.
+#
+# Like an Ultra preset: every setting that lowers image quality to save time is at its best, except the few that would
+# need far more video memory (noted below). Effects also reach twice as far as the defaults before they fade out or stop
+# (the Distance, DrawDistance, MaxDistance, DistanceFade, ShadowRange and OrthoRadius lines); distances that set a look
+# (depth of field, heat haze, fog, the flashlight's own light) stay yours.
+#
+# On top of these, every effect normally worked out at half or a quarter of the screen size runs at the full size
+# (ambient occlusion, ambient light, bounce light, god rays, volumetric fog and light, reflections, specular, the
+# flashlight beam). Meant for screenshots: expect a much lower frame rate.
+#
+# You can edit this file: remove a line to keep your own value for it, or change a value. Use the same names and the
+# same kind of value (true/false, whole number, or number with a decimal point) as in VegasShaders.defaults.toml.
+
+# Every "reduced quality" shortcut off.
+[_Main.Main.ReducedQuality]
+GodRaysLowRes = false
+AOLowRes = false
+PointShadowInterval = 1
+CheapReflections = false
+CheapUnderwaterTerrain = false
+ParallaxLite = false
+NearCascadeInterval = 1
+StaggeredSunShadows = false
+CachedDistantShadows = false
+FXAA = false
+
+# Hidden-object culling can leave an object's extra lamp light a few frames late.
+[_Main.Main.Performance]
+HiddenObjectCulling = false
+
+[_Main.GunFX.Main]
+VolumetricSmokeHalfRes = false
+VolumetricSmokeLowRes = false
+
+[_Shaders.BounceLight.Main]
+QuarterResolution = false
+HalfSamples = false
+DrawDistance = 12000.0
+
+# More samples. The volumetric light traces every pixel (full size, 48 steps) instead of using the coarse light grid,
+# which shows as blocky shafts; the fog volume needs that grid, so it is off while Max Quality is on.
+[_Shaders.VolumetricLight.Main]
+Steps = 48
+Froxels = false
+MaxDistance = 10000.0
+
+[_Shaders.Reflections.Main]
+Steps = 64
+MaxDistance = 8000.0
+DrawDistance = 16000.0
+
+[_Shaders.AmbientLight.Main]
+GridSteps = 16
+DrawDistance = 12000.0
+
+[_Shaders.SMAA.Main]
+MaxSearchSteps = 112
+
+[_Shaders.VolumetricClouds.Main]
+Resolution = 2
+Steps = 128
+FineDetail = 1.0
+ShadowResolution = 2048
+MaxDistance = 160000.0
+ShadowRange = 60000.0
+
+[_Shaders.Terrain.Parallax]
+HighQuality = true
+ShadowsAtNight = true
+MaxDistance = 4096
+IsoHeightTaps = false
+
+[_Shaders.BloodFlow.Main]
+MaxSplats = 96
+MaxPools = 32
+MaxDistance = 6000.0
+
+# Sharper, steadier shadows: 32-bit sun shadow maps, every cascade and the ortho map redrawn every frame, the contact
+# shadows' even 16-step trace, the lamp shadows' blurred darkening. Lamp shadow cube maps stay at your size (1024 per face
+# would need about 600 MB more video memory), and so does how many lamps cast shadows at once (LightPoints: 64 would need
+# about 300-600 MB more).
+[_Shaders.ShadowsExteriors.ShadowMaps]
+CascadeResolution = 6
+SmoothFilter = true
+Format = 1
+LimitFrequency = false
+Distance = 12000
+
+[_Shaders.ShadowsExteriors.Ortho]
+Resolution = 4
+LimitFrequency = false
+Distance = 6000
+
+[_Shaders.ShadowsExteriors.ScreenSpace]
+Sharp = true
+
+[_Shaders.ShadowsInteriors.Forward]
+Quality = 3
+DarkeningBlur = true
+SmoothEdges = true
+
+[_Shaders.ContactHardening.Main]
+Smooth = true
+AtNight = true
+
+# Twice the default reach of the effects not listed above.
+[_Shaders.ShadowsExteriors.Main]
+OrthoRadius = 16000
+
+[_Shaders.ShadowsInteriors.Main]
+DrawDistance = 8000
+
+[_Shaders.Specular.Exterior]
+DistanceFade = 60000
+
+[_Shaders.Specular.Rain]
+DistanceFade = 60000
+
+[_Shaders.PBR.Metal]
+FadeDistance = 0.0
+
+[_Shaders.VolumetricLight.Night]
+MaxDistance = 10000.0
+
+[_Shaders.FlashlightBeam.Main]
+MaxDistance = 3000.0
+
+[_Shaders.Terrain.Blending]
+MaxDistance = 8192.0

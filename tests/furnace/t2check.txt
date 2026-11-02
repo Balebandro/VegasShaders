@@ -1,0 +1,2 @@
+A2c test mode, strength 0 vs OFF: 0 of 4000000 results differ (must be 0) -> PASS
+A2c test mode, strength 1 vs mode 1: largest relative difference 2.89e-07 (float rounding expected)

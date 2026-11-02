@@ -1,0 +1,33 @@
+// FSR 3.1 upscaler (AMD FidelityFX SDK 1.1.4, MIT; see LICENSE-FidelityFX-SDK.txt) pass for NVR DXVK: AMD's
+// ffx_fsr3upscaler_luma_pyramid_pass.glsl with NVR's callbacks header (fsr3upscaler/ffx_fsr3upscaler_callbacks_nvr.h). AMD's binding numbers are
+// kept; the ones NVR has no resource for (exposure, transparency mask) declare nothing there.
+#version 450
+
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
+
+// NVR: SPD's LDS path (no subgroup quad operations), as AMD's FFX_SPD_NO_WAVE_OPERATIONS build.
+#define FFX_SPD_NO_WAVE_OPERATIONS
+#define FSR3UPSCALER_BIND_SRV_CURRENT_LUMA                      0
+#define FSR3UPSCALER_BIND_SRV_FARTHEST_DEPTH                    1
+#define FSR3UPSCALER_BIND_UAV_SPD_GLOBAL_ATOMIC                 2
+#define FSR3UPSCALER_BIND_UAV_FRAME_INFO                        3
+#define FSR3UPSCALER_BIND_UAV_SPD_MIPS_LEVEL_0                  4
+#define FSR3UPSCALER_BIND_UAV_SPD_MIPS_LEVEL_1                  5
+#define FSR3UPSCALER_BIND_UAV_SPD_MIPS_LEVEL_2                  6
+#define FSR3UPSCALER_BIND_UAV_SPD_MIPS_LEVEL_3                  7
+#define FSR3UPSCALER_BIND_UAV_SPD_MIPS_LEVEL_4                  8
+#define FSR3UPSCALER_BIND_UAV_SPD_MIPS_LEVEL_5                  9
+#define FSR3UPSCALER_BIND_UAV_FARTHEST_DEPTH_MIP1               10
+#define FSR3UPSCALER_BIND_CB_FSR3UPSCALER                       11
+#define FSR3UPSCALER_BIND_CB_SPD                                12  // NVR: in the push block
+
+#include "fsr3upscaler/ffx_fsr3upscaler_callbacks_nvr.h"
+#include "fsr3upscaler/ffx_fsr3upscaler_common.h"
+#include "fsr3upscaler/ffx_fsr3upscaler_luma_pyramid.h"
+
+layout (local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+void main()
+{
+    ComputeAutoExposure(gl_WorkGroupID, gl_LocalInvocationIndex);
+}

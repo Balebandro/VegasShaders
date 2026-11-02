@@ -1,0 +1,201 @@
+From 4d15a297db9afdc428c8e1cbe361b126d1b09cb3 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 05:59:21 -0400
+Subject: [PATCH] NVR extension 1.8-rt-seq: the arena copy stays after the
+ conversions (staging + arena tracked as written before the copy: DXVK moved
+ it to the init command buffer, before them, and the helper built from the
+ previous flush's data: GPU fault on RTX), and FlushStagedGeometrySeq writes a
+ sequence texel right after the conversions for the helper to check
+
+---
+ src/d3d9/d3d9_nvr_ext.cpp   |  8 +++++
+ src/d3d9/d3d9_nvr_ext_api.h | 20 ++++++++++++
+ src/d3d9/d3d9_nvr_rt.cpp    | 62 ++++++++++++++++++++++++++++++++-----
+ src/d3d9/d3d9_nvr_rt.h      | 12 ++++++-
+ 4 files changed, 93 insertions(+), 9 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 9c8a5c4..3ac922d 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -186,6 +186,14 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    // 1.8-rt-seq: the flush with a sequence texel (the same object)
++    if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtRtSeq)) {
++      if (!m_rt)
++        m_rt = std::make_unique<D3D9NvrRt>(m_device);
++      *ppvObject = ref(static_cast<ID3D9NvrExtRtSeq*>(m_rt.get()));
++      return S_OK;
++    }
++
+     // 1.7-dlss: images and semaphores shared with another process
+     if (ppvObject != nullptr && riid == __uuidof(ID3D9NvrExtShare)) {
+       *ppvObject = ref(static_cast<ID3D9NvrExtShare*>(this));
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 31abf92..21b6ea0 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -1218,3 +1218,23 @@ ID3D9NvrExtRtSkin : public IUnknown {
+ #ifndef _MSC_VER
+ __CRT_UUID_DECL(ID3D9NvrExtRtSkin,     0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x33);
+ #endif
++
++/**
++ * UNOFFICIAL 2026-10-30 (1.8-rt-seq, patch 0034): FlushStagedGeometry with a sequence number, found with
++ * QueryInterface(__uuidof(ID3D9NvrExtRtSeq)) (a fork without it answers E_NOINTERFACE). Records the queued conversions as
++ * FlushStagedGeometry does and, in the same command stream right after them, writes Sequence (as raw 32 bits) into texel
++ * SequenceTexel of the arena. The helper reads that texel before it builds: a value other than the one NVR handed in means
++ * the arena holds an earlier flush's data (the copy ran before the conversions), and it skips those builds instead of reading
++ * stale indices. SequenceTexel must lie in the arena and outside every staged geometry. Sequence 0 = no sequence texel.
++ */
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d334")
++ID3D9NvrExtRtSeq : public IUnknown {
++  virtual HRESULT STDMETHODCALLTYPE FlushStagedGeometrySeq(
++          ID3D9NvrExtSharedImage*         pArena,
++          UINT                            Sequence,
++          UINT                            SequenceTexel) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtRtSeq,      0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x34);
++#endif
+diff --git a/src/d3d9/d3d9_nvr_rt.cpp b/src/d3d9/d3d9_nvr_rt.cpp
+index 277f68e..cf88a25 100644
+--- a/src/d3d9/d3d9_nvr_rt.cpp
++++ b/src/d3d9/d3d9_nvr_rt.cpp
+@@ -707,7 +707,7 @@ namespace dxvk {
+       if (!m_staged.empty())
+         FlushStagedGeometry(pArena);
+ 
+-      m_staging = CreateRtBuffer(capacity * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, "NVR rt arena staging");
++      m_staging = CreateRtBuffer(capacity * 4u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, "NVR rt arena staging");
+       m_stagingBytes = m_staging != nullptr ? capacity * 4u : 0u;
+ 
+       if (m_staging == nullptr)
+@@ -735,6 +735,22 @@ namespace dxvk {
+ 
+   HRESULT STDMETHODCALLTYPE D3D9NvrRt::FlushStagedGeometry(
+           ID3D9NvrExtSharedImage*         pArena) {
++    return FlushImpl(pArena, 0u, 0u);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrRt::FlushStagedGeometrySeq(
++          ID3D9NvrExtSharedImage*         pArena,
++          UINT                            Sequence,
++          UINT                            SequenceTexel) {
++    return FlushImpl(pArena, Sequence, SequenceTexel);
++  }
++
++
++  HRESULT D3D9NvrRt::FlushImpl(
++          ID3D9NvrExtSharedImage*         pArena,
++          uint32_t                        sequence,
++          uint32_t                        sequenceTexel) {
+     if (m_convert == nullptr)
+       return D3DERR_NOTAVAILABLE;
+ 
+@@ -743,14 +759,26 @@ namespace dxvk {
+ 
+     D3D9DeviceLock lock = m_device->LockDevice();
+ 
+-    if (m_staged.empty())
+-      return D3D_OK;
+-
+     Rc<DxvkImage> image = static_cast<D3D9NvrExtSharedImage*>(pArena)->GetImage();
+     const VkExtent3D size = image->info().extent;
+ 
+-    const uint32_t rowFirst = m_stagedMin / size.width;
+-    const uint32_t rowEnd = std::min<uint32_t>((m_stagedMax + size.width - 1u) / size.width, size.height);
++    // 1.8-rt-seq: the sequence texel (in the staging and the arena; a flush with nothing staged still writes it, so the helper
++    // never mistakes an earlier internal flush for a stale one)
++    if (sequence != 0u && (m_staging == nullptr || uint64_t(sequenceTexel) >= uint64_t(size.width) * size.height
++     || uint64_t(sequenceTexel) * 4u >= m_stagingBytes))
++      sequence = 0u;
++
++    if (m_staged.empty() && sequence == 0u)
++      return D3D_OK;
++
++    uint32_t stagedMin = m_stagedMin, stagedMax = m_stagedMax;
++    if (sequence != 0u) {
++      stagedMin = std::min<uint32_t>(stagedMin, sequenceTexel);
++      stagedMax = std::max<uint32_t>(stagedMax, sequenceTexel + 1u);
++    }
++
++    const uint32_t rowFirst = stagedMin / size.width;
++    const uint32_t rowEnd = std::min<uint32_t>((stagedMax + size.width - 1u) / size.width, size.height);
+ 
+     // 1.8-rt-skin: the skinned jobs' palettes, packed into one buffer (refilled at this flush)
+     std::vector<float> paletteData;
+@@ -780,8 +808,19 @@ namespace dxvk {
+       cImage   = std::move(image),
+       cRow     = rowFirst,
+       cRows    = rowEnd - rowFirst,
+-      cWidth   = size.width
++      cWidth   = size.width,
++      cSeq     = sequence,
++      cSeqAt   = VkDeviceSize(sequenceTexel) * 4u,
++      cVkd     = m_device->GetDXVKDevice()->vkd()
+     ] (DxvkContext* ctx) {
++      // 2026-10-30 (Conor's RTX GPU fault): DXVK never sees the conversions write the staging (they write by address), so to
++      // its hazard tracking the staging and the arena were unused in this command list, and copyBufferToImage below moved the
++      // copy to the init command buffer, which runs BEFORE this one: the arena got the PREVIOUS flush's data and the helper
++      // built from stale indices. Both are marked written here, before anything is recorded: the copy stays in the exec command
++      // buffer, after the conversions and the barrier between them.
++      ctx->nvrTrackResource(cStaging, DxvkAccess::Write);
++      ctx->nvrTrackResource(cImage, DxvkAccess::Write);
++
+       // 1.8-rt-skin: the palettes first (DXVK orders this write after the last flush's reads: tracked below)
+       if (cPalettes != nullptr) {
+         const VkDeviceSize bytes = VkDeviceSize(cPaletteData.size()) * 4u;
+@@ -797,7 +836,14 @@ namespace dxvk {
+         ctx->nvrTrackResource(cPalettes, DxvkAccess::Read);
+ 
+       // The conversions' writes before the copy reads them (DXVK does not see writes by address)
+-      ctx->nvrBeginRawCommands();
++      VkCommandBuffer raw = ctx->nvrBeginRawCommands();
++
++      // 1.8-rt-seq: the sequence texel, in the same command stream right after the conversions (the helper checks it)
++      if (cSeq != 0u) {
++        const auto slice = cStaging->getSliceInfo();
++        cVkd->vkCmdFillBuffer(raw, slice.buffer, slice.offset + cSeqAt, 4u, cSeq);
++        ctx->nvrEndRawCommands(raw);
++      }
+ 
+       VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u };
+       ctx->copyBufferToImage(cImage, layers, VkOffset3D { 0, int32_t(cRow), 0 }, VkExtent3D { cWidth, cRows, 1u },
+diff --git a/src/d3d9/d3d9_nvr_rt.h b/src/d3d9/d3d9_nvr_rt.h
+index 808d593..1a15f22 100644
+--- a/src/d3d9/d3d9_nvr_rt.h
++++ b/src/d3d9/d3d9_nvr_rt.h
+@@ -141,7 +141,7 @@ namespace dxvk {
+     Rc<D3D9NvrRtAccel>      accel;              // in-process build only
+   };
+ 
+-  class D3D9NvrRt final : public ID3D9NvrExtRt, public ID3D9NvrExtRtSkin {
++  class D3D9NvrRt final : public ID3D9NvrExtRt, public ID3D9NvrExtRtSkin, public ID3D9NvrExtRtSeq {
+ 
+   public:
+ 
+@@ -188,6 +188,16 @@ namespace dxvk {
+     HRESULT STDMETHODCALLTYPE FlushStagedGeometry(
+             ID3D9NvrExtSharedImage*         pArena);
+ 
++    HRESULT STDMETHODCALLTYPE FlushStagedGeometrySeq(
++            ID3D9NvrExtSharedImage*         pArena,
++            UINT                            Sequence,
++            UINT                            SequenceTexel);
++
++    HRESULT FlushImpl(
++            ID3D9NvrExtSharedImage*         pArena,
++            uint32_t                        sequence,
++            uint32_t                        sequenceTexel);
++
+     HRESULT StageImpl(
+       const NVR_EXT_RT_GEOMETRY_DESC*       pDesc,
+       const NVR_EXT_RT_SKIN_DESC*           pSkin,
+-- 
+2.40.0.windows.1
+

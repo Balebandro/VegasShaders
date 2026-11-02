@@ -1,0 +1,105 @@
+# fork1026-hiz diag (2026-10-26, deep/fork-hiz): lucky22. DebugView 2 off/HiZ (forced indoors with the test-only HiZInteriorsTest),
+# DebugView 9 (walk end rule) and 10 (skips: red facing, green own plane, blue behind by more than the thickness) twice; HiZ true
+# alone off/on pairs (outdoors-only rule: must equal the old picture indoors); then HiZ + HiZSafeCells (the pyramid-channel fix, test
+# only): DebugView 9 / 10 / 2 and the reflection alone (DebugView 1) old vs fix. Vulkan passes on, InteriorFloors 1.
+frames 300
+shot hizdiagsettle
+wait 900
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizdiag2off-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 2
+shot hizdiag2on-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 2
+shot hizdiag9-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 9
+shot hizdiag10-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 10
+shot hizdiag9-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 9
+shot hizdiag10-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 10
+shot hizdiagoff-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizdiagout-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+shot hizdiagoff-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+shot hizdiagout-2
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+shot hizdiag9fix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 9
+shot hizdiag10fix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 10
+shot hizdiag2fix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 2
+shot hizdiag1off-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main DebugView 1
+shot hizdiag1fix-1
+set Main.Main.Performance NvrDxvkPasses true
+effect Reflections 1
+set Shaders.Reflections.Main InteriorFloors 1.0
+set Shaders.Reflections.Main HiZ true
+set Shaders.Reflections.Main HiZSafeCells true
+set Shaders.Reflections.Main HiZInteriorsTest true
+set Shaders.Reflections.Main DebugView 1

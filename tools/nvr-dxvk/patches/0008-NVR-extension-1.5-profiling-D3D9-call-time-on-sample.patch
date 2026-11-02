@@ -1,0 +1,310 @@
+From d6ab92741b52554f25957ac57af26914c91990ca Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 16:11:49 -0400
+Subject: [PATCH] NVR extension 1.5: profiling (D3D9 call time on sampled
+ frames, the Present wait, DXVK stat counters)
+
+---
+ src/d3d9/d3d9_multithread.h | 71 ++++++++++++++++++++++++++++++++++++-
+ src/d3d9/d3d9_nvr_ext.cpp   | 52 +++++++++++++++++++++++++++
+ src/d3d9/d3d9_nvr_ext.h     |  8 +++++
+ src/d3d9/d3d9_nvr_ext_api.h | 33 ++++++++++++++++-
+ src/d3d9/d3d9_swapchain.cpp |  3 ++
+ 5 files changed, 165 insertions(+), 2 deletions(-)
+
+diff --git a/src/d3d9/d3d9_multithread.h b/src/d3d9/d3d9_multithread.h
+index ad3473f..3fc7d55 100644
+--- a/src/d3d9/d3d9_multithread.h
++++ b/src/d3d9/d3d9_multithread.h
+@@ -2,10 +2,52 @@
+ 
+ #include "d3d9_include.h"
+ 
++#ifdef _MSC_VER
++#include <intrin.h>
++#else
++#include <x86intrin.h>
++#endif
++
+ namespace dxvk {
+ 
+   class D3D9Multithread;
+ 
++  /**
++   * \brief NVR profiling (NVR extension 1.5)
++   *
++   * While NVR asks for it (ID3D9NvrExt::SetProfiling), every 8th frame times the
++   * calling thread's outermost D3D9 calls with the CPU's time stamp counter (the
++   * device lock every API entry point takes is the hook, nesting counted once),
++   * and every frame times the frame-latency wait in Present. Off: one relaxed
++   * load per API call.
++   */
++  struct NvrApiClock {
++    static inline std::atomic<uint32_t> enabled     = { 0u };
++    static inline std::atomic<uint32_t> sampling    = { 0u };
++    static inline std::atomic<uint64_t> apiTicks    = { 0u };
++    static inline std::atomic<uint64_t> apiCalls    = { 0u };
++    static inline std::atomic<uint64_t> timedFrames = { 0u };
++    static inline std::atomic<uint64_t> frames      = { 0u };
++    static inline std::atomic<uint64_t> waitTicks   = { 0u };
++    static inline std::atomic<uint64_t> timedWait   = { 0u };
++    static inline thread_local uint32_t depth = 0u;
++    static inline thread_local uint64_t start = 0u;
++
++    static uint64_t now() { return __rdtsc(); }
++
++    /** Present: the frame-latency wait took Ticks; the next frame starts. */
++    static void FrameEnd(uint64_t Ticks) {
++      waitTicks.fetch_add(Ticks, std::memory_order_relaxed);
++      if (sampling.load(std::memory_order_relaxed))
++        timedWait.fetch_add(Ticks, std::memory_order_relaxed);
++      uint64_t frame = frames.fetch_add(1u, std::memory_order_relaxed) + 1u;
++      bool sample = enabled.load(std::memory_order_relaxed) && (frame & 7u) == 0u;
++      sampling.store(sample ? 1u : 0u, std::memory_order_relaxed);
++      if (sample)
++        timedFrames.fetch_add(1u, std::memory_order_relaxed);
++    }
++  };
++
+   /**
+    * \brief Scoped device lock
+    */
+@@ -19,18 +61,28 @@ namespace dxvk {
+     : m_mutex(&mutex) { }
+ 
+     D3D9DeviceLock(D3D9DeviceLock&& other)
+-    : m_mutex(other.m_mutex) {
++    : m_mutex(other.m_mutex), m_timed(other.m_timed) {
+       other.m_mutex = nullptr;
++      other.m_timed = false;
+     }
+ 
+     D3D9DeviceLock& operator = (D3D9DeviceLock&& other) {
+       Unlock();
+ 
+       m_mutex = other.m_mutex;
++      m_timed = other.m_timed;
+       other.m_mutex = nullptr;
++      other.m_timed = false;
+       return *this;
+     }
+ 
++    /// NVR profiling: this lock times its API call (the outermost one of the thread)
++    void BeginTimed() {
++      m_timed = true;
++      if (NvrApiClock::depth++ == 0u)
++        NvrApiClock::start = NvrApiClock::now();
++    }
++
+     ~D3D9DeviceLock() {
+       Unlock();
+     }
+@@ -38,6 +90,7 @@ namespace dxvk {
+   private:
+ 
+     D3D9Multithread* m_mutex = nullptr;
++    bool             m_timed = false;
+ 
+     void Unlock();
+ 
+@@ -64,6 +117,15 @@ namespace dxvk {
+      * \returns Lock guard
+      */
+     D3D9DeviceLock AcquireLock() {
++      D3D9DeviceLock lock = AcquireLockUntimed();
++      if (unlikely(NvrApiClock::sampling.load(std::memory_order_relaxed)))
++        lock.BeginTimed();
++      return lock;
++    }
++
++  private:
++
++    D3D9DeviceLock AcquireLockUntimed() {
+       if (likely(!m_protected))
+         return D3D9DeviceLock();
+ 
+@@ -94,6 +156,13 @@ namespace dxvk {
+   };
+ 
+   inline void D3D9DeviceLock::Unlock() {
++    if (unlikely(m_timed)) {
++      m_timed = false;
++      if (--NvrApiClock::depth == 0u) {
++        NvrApiClock::apiTicks.fetch_add(NvrApiClock::now() - NvrApiClock::start, std::memory_order_relaxed);
++        NvrApiClock::apiCalls.fetch_add(1u, std::memory_order_relaxed);
++      }
++    }
+     if (m_mutex)
+       m_mutex->Unlock();
+   }
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 6cf234b..df04481 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -885,6 +885,58 @@ namespace dxvk {
+   }
+ 
+ 
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::SetProfiling(BOOL Enable) {
++    if (Enable && !NvrApiClock::enabled.load()) {
++      // The timer's own cost: a begin / end pair as a lock pays it (two counter reads, the atomic adds).
++      std::atomic<uint64_t> sink = { 0u };
++      uint64_t t0 = NvrApiClock::now();
++      for (uint32_t i = 0; i < 20000u; i++) {
++        uint64_t s = NvrApiClock::now();
++        sink.fetch_add(NvrApiClock::now() - s, std::memory_order_relaxed);
++        sink.fetch_add(1u, std::memory_order_relaxed);
++      }
++      m_profileOverhead100 = (NvrApiClock::now() - t0) * 100u / 20000u;
++      Logger::info(str::format("NVR ext: profiling on (timer cost ", m_profileOverhead100, " ticks x 100 per call)"));
++    }
++    NvrApiClock::enabled.store(Enable ? 1u : 0u);
++    if (!Enable)
++      NvrApiClock::sampling.store(0u);
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::GetProfile(NVR_EXT_PROFILE* pProfile) {
++    if (unlikely(pProfile == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    DxvkStatCounters counters = m_device->GetDXVKDevice()->getStatCounters();
++    auto now = dxvk::high_resolution_clock::now();
++
++    NVR_EXT_PROFILE p = { };
++    p.TimeUs            = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
++    p.Tsc               = NvrApiClock::now();
++    p.Frames            = NvrApiClock::frames.load();
++    p.TimedFrames       = NvrApiClock::timedFrames.load();
++    p.ApiTicks          = NvrApiClock::apiTicks.load();
++    p.ApiCalls          = NvrApiClock::apiCalls.load();
++    p.OverheadTicks100  = m_profileOverhead100;
++    p.PresentWaitTicks  = NvrApiClock::waitTicks.load();
++    p.TimedWaitTicks    = NvrApiClock::timedWait.load();
++    p.CsSyncUs          = counters.getCtr(DxvkStatCounter::CsSyncTicks);
++    p.CsIdleUs          = counters.getCtr(DxvkStatCounter::CsIdleTicks);
++    p.GpuSyncUs         = counters.getCtr(DxvkStatCounter::GpuSyncTicks);
++    p.GpuIdleUs         = counters.getCtr(DxvkStatCounter::GpuIdleTicks);
++    p.Draws             = counters.getCtr(DxvkStatCounter::CmdDrawCalls);
++    p.RenderPasses      = counters.getCtr(DxvkStatCounter::CmdRenderPassCount);
++    p.Barriers          = counters.getCtr(DxvkStatCounter::CmdBarrierCount);
++    p.Submits           = counters.getCtr(DxvkStatCounter::QueueSubmitCount);
++    p.CsChunks          = counters.getCtr(DxvkStatCounter::CsChunkCount);
++    p.GraphicsPipelines = counters.getCtr(DxvkStatCounter::PipeCountGraphics);
++    *pProfile = p;
++    return D3D_OK;
++  }
++
++
+   HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY) {
+     D3D9DeviceLock lock = m_device->LockDevice();
+ 
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index 73c9ac6..a361463 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -229,6 +229,12 @@ namespace dxvk {
+             FLOAT                           ShiftX,
+             FLOAT                           ShiftY);
+ 
++    HRESULT STDMETHODCALLTYPE SetProfiling(
++            BOOL                            Enable);
++
++    HRESULT STDMETHODCALLTYPE GetProfile(
++            NVR_EXT_PROFILE*                pProfile);
++
+   private:
+ 
+     struct TextureRef {
+@@ -243,6 +249,8 @@ namespace dxvk {
+ 
+     bool ValidateBufferRange(ID3D9NvrExtBuffer* pBuffer, UINT Offset, UINT& Size, UINT Align) const;
+ 
++    uint64_t m_profileOverhead100 = 0u;   // NVR profiling: the timer's own cost per call x 100 (SetProfiling)
++
+     /** Draw and DrawShifted. */
+     HRESULT DrawImpl(
+       const NVR_EXT_DRAW_DESC*              pDesc,
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index f251a16..f7ad6f0 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -45,7 +45,7 @@
+ #include <unknwn.h>
+ 
+ #define NVR_EXT_VERSION_MAJOR 1
+-#define NVR_EXT_VERSION_MINOR 4
++#define NVR_EXT_VERSION_MINOR 5
+ 
+ #define NVR_EXT_MAX_SLOTS       32
+ #define NVR_EXT_MAX_BINDINGS    32
+@@ -236,6 +236,29 @@ struct NVR_EXT_SHADER_REPLACEMENT_DESC {
+   const char*                 pDebugName;
+ };
+ 
++/** Profiling counters since SetProfiling(TRUE) (since 1.5). Ticks: the CPU's time stamp counter (Tsc, the same clock). */
++struct NVR_EXT_PROFILE {
++  UINT64  TimeUs;             // steady clock now (microseconds)
++  UINT64  Tsc;                // time stamp counter now (with TimeUs: its rate)
++  UINT64  Frames;             // presents
++  UINT64  TimedFrames;        // frames whose D3D9 calls were timed (every 8th)
++  UINT64  ApiTicks;           // the game thread's outermost D3D9 calls on timed frames (ticks; waits included)
++  UINT64  ApiCalls;           // those calls
++  UINT64  OverheadTicks100;   // the timer's own cost per timed call, x 100 (subtract ApiCalls x this / 100)
++  UINT64  PresentWaitTicks;   // the frame-latency wait in Present, every frame (ticks)
++  UINT64  TimedWaitTicks;     // that wait on the timed frames (it is inside ApiTicks)
++  UINT64  CsSyncUs;           // the game thread waiting for DXVK's command thread (microseconds)
++  UINT64  CsIdleUs;           // DXVK's command thread idle
++  UINT64  GpuSyncUs;          // the game thread waiting for the GPU
++  UINT64  GpuIdleUs;          // the GPU idle
++  UINT64  Draws;
++  UINT64  RenderPasses;
++  UINT64  Barriers;
++  UINT64  Submits;
++  UINT64  CsChunks;
++  UINT64  GraphicsPipelines;
++};
++
+ struct NVR_EXT_INFO {
+   UINT  ExtVersionMajor;
+   UINT  ExtVersionMinor;
+@@ -390,6 +413,14 @@ ID3D9NvrExt : public IUnknown {
+     const NVR_EXT_DRAW_DESC*              pDesc,
+           FLOAT                           ShiftX,
+           FLOAT                           ShiftY) = 0;
++
++  /** Profiling on / off (since 1.5): on, every 8th frame times the game thread's D3D9 calls. */
++  virtual HRESULT STDMETHODCALLTYPE SetProfiling(
++          BOOL                            Enable) = 0;
++
++  /** The profiling counters (since 1.5); cumulative, read twice and subtract. */
++  virtual HRESULT STDMETHODCALLTYPE GetProfile(
++          NVR_EXT_PROFILE*                pProfile) = 0;
+ };
+ 
+ #ifndef _MSC_VER
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 30f905c..fe34af8 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -921,6 +921,7 @@ namespace dxvk {
+         m_latencyTracker->discardTimings();
+     }
+ 
++    uint64_t nvrWait0 = NvrApiClock::now();   // NVR profiling (extension 1.5): the frame-latency wait
+     SyncFrameLatency();
+ 
+     DxvkLatencyStats latencyStats = { };
+@@ -932,6 +933,8 @@ namespace dxvk {
+       m_parent->BeginFrame(m_latencyTracker, m_wctx->frameId + 1u);
+     }
+ 
++    NvrApiClock::FrameEnd(NvrApiClock::now() - nvrWait0);
++
+     if (m_latencyHud)
+       m_latencyHud->accumulateStats(latencyStats);
+ 
+-- 
+2.43.0
+

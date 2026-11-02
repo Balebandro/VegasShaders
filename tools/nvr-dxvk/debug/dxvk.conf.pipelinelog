@@ -1,0 +1,19 @@
+# NVR DXVK measurement template: which pipelines are compiled while the game waits (arrival hitches).
+# Copy this file next to the fork's d3d9.dll and rename it to dxvk.conf (a test slot: put both in the FORK_D3D9 folder).
+# Needs a fork d3d9.dll built with patch 0017 (nvr.pipelineLog). Results go to DXVK's log (FalloutNV_d3d9.log next to the
+# game exe, or DXVK_LOG_PATH), lines starting "NVR pipeline:". Guide: docs/next/FORK-1027-ASYNC-WARMUP.md
+
+# Log every pipeline that is compiled or linked at its first use on DXVK's recording thread (the frame waits for it).
+# Background compiles on DXVK's worker threads are not counted. No cost while off; tiny while on (one clock read per new pipeline).
+nvr.pipelineLog = True
+
+# Smallest wait (microseconds) that gets its own line; every wait still counts in the session totals on each line.
+nvr.pipelineLogMinUs = 1000
+
+# A/B for the 32-bit pipeline-library lifetime tracking (stock DXVK option; Auto = on for 32-bit NVIDIA/AMD-PRO):
+# with it on, libraries compiled at load are freed and re-created at first use ("graphics linked" lines). False keeps
+# them (no re-create wait) but costs 32-bit address space: watch for out-of-memory crashes in long sessions.
+# dxvk.trackPipelineLifetime = False
+
+# Depth on NVIDIA with a fork WITHOUT the RESZ-on-every-vendor patch (0007-NVR-RESZ...): uncomment.
+# d3d9.customVendorId = 1002

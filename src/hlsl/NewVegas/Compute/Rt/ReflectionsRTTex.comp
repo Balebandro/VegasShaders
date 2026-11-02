@@ -1,0 +1,7 @@
+#version 460
+// UNOFFICIAL 2026-10-29 RT reflections: the helper's pass with hit textures (the core's [Main.Main.RayTracing] HitTextures: the albedo
+// atlas on binding 6, Rt/RtHit.glsl): ReflectionsRTBody.glsl with RT_TEX.
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#define RT_TEX 1
+#include "ReflectionsRTBody.glsl"

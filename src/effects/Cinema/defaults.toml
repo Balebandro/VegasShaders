@@ -1,0 +1,13 @@
+[_Shaders.Cinema.Main]
+AspectRatio = 2.35                      # Letterbox/black bars effect. Use the value of Width/Height of the visible window (1 to disable).
+ChromaticAberration = 1.0               # Lens distortion effect that separates the red/green and blue channels slightly as a real lens would.
+FilmGrainAmount = 0.3                   # Animated cinema grain at 24fps like film.
+Mode = 3                                # Chose when the letterbox effect is activated 0: always, 1: not during dialog, 2: only during dialog.
+OverlayStrength = 0.1                   # Overlays the screen image onto itself to increase color intensity and contrast.
+VignetteDarkness = 1.2                  # Darkening of the edges of the screen.
+VignetteRadius = 0.6                    # Distance to the center for the start of the Vignette effect.
+LetterBoxDepth = 0.0                    # Depth of the letter box bars
+
+[_Shaders.Cinema.Status]
+Enabled = true                           # A collection of tweaks to give a more cinematic post processing feel.
+

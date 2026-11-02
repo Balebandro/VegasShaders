@@ -1,0 +1,179 @@
+From 7416b4d1406bfee29c2ad0782eef72cf7f3645f5 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 16:25:23 -0400
+Subject: [PATCH] NVR extension 1.8-rt-uv: StageGeometry can also write the
+ texcoords (float2 after the triangle list) for alpha-tested ray tracing
+
+---
+ src/d3d9/d3d9_nvr_ext_api.h               | 10 ++++++-
+ src/d3d9/d3d9_nvr_rt.cpp                  | 35 +++++++++++++++++++++--
+ src/d3d9/d3d9_nvr_rt.h                    |  3 ++
+ src/d3d9/shaders/d3d9_nvr_rt_convert.comp | 14 +++++++++
+ 4 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 905263d..736d773 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -1040,10 +1040,18 @@ struct NVR_EXT_RT_GEOMETRY_DESC {
+   IDirect3DIndexBuffer9*      pIndexBuffer;     // null: non-indexed ranges; 16 or 32 bit from the buffer's format
+   UINT                        RangeCount;       // 1..NVR_EXT_RT_MAX_RANGES
+   const NVR_EXT_RT_RANGE*     pRanges;
+-  UINT                        Flags;            // reserved, 0 (1.8: every geometry is opaque, no any-hit; alpha testing is later work)
++  UINT                        Flags;            // 0, or NVR_EXT_RT_TEXCOORD_FLAGS(...): also stage the texcoords (1.8-rt-uv, below)
+   const char*                 pDebugName;
+ };
+ 
++/** UNOFFICIAL 2026-10-29 (1.8-rt-uv, alpha-tested casters): NVR_EXT_RT_GEOMETRY_DESC::Flags asks StageGeometry to write each vertex's
++ *  texture coordinate as a float2 array right after the triangle list (2 x VertexCount more texels: MeasureGeometry's Texels says so;
++ *  a fork without this ignores Flags and reports 3 x (vertices + triangles)). The texcoord is in the position's stream at
++ *  PositionOffset + Delta bytes (Delta = texcoord element offset - position element offset, -512..511), float2 or half2. */
++#define NVR_EXT_RT_GEOMETRY_TEXCOORD       0x1u
++#define NVR_EXT_RT_GEOMETRY_TEXCOORD_HALF2  0x2u
++#define NVR_EXT_RT_TEXCOORD_FLAGS(Delta, Half2)   (NVR_EXT_RT_GEOMETRY_TEXCOORD | ((Half2) ? NVR_EXT_RT_GEOMETRY_TEXCOORD_HALF2 : 0u) | ((((UINT)(INT)(Delta)) & 0x3FFu) << 8))
++
+ /** Instance flags (VkGeometryInstanceFlagBitsKHR's values). */
+ enum NVR_EXT_RT_INSTANCE_FLAGS {
+   NVR_EXT_RT_INSTANCE_CULL_DISABLE = 0x1,   // both faces count whatever the ray flags say
+diff --git a/src/d3d9/d3d9_nvr_rt.cpp b/src/d3d9/d3d9_nvr_rt.cpp
+index 888cc26..939f5fe 100644
+--- a/src/d3d9/d3d9_nvr_rt.cpp
++++ b/src/d3d9/d3d9_nvr_rt.cpp
+@@ -33,6 +33,8 @@ namespace dxvk {
+     constexpr uint32_t ModePositionsHalf4 = 1u;
+     constexpr uint32_t ModeList           = 2u;
+     constexpr uint32_t ModeStrip          = 3u;
++    constexpr uint32_t ModeUvFloat2       = 4u;   // 1.8-rt-uv
++    constexpr uint32_t ModeUvHalf2        = 5u;
+ 
+     constexpr size_t   MaxPendingJobs      = 512u;
+     constexpr uint64_t MaxPendingTriangles = 4u << 20;
+@@ -297,6 +299,20 @@ namespace dxvk {
+     job.indexSize      = indexSize;
+     job.half           = pDesc->PositionFormat == NVR_EXT_RT_POSITION_HALF4;
+ 
++    // 1.8-rt-uv: the texcoords, from the position's stream at a signed byte delta
++    if (pDesc->Flags & NVR_EXT_RT_GEOMETRY_TEXCOORD) {
++      int32_t delta = int32_t((pDesc->Flags >> 8u) & 0x3FFu);
++      if (delta & 0x200)
++        delta -= 0x400;
++      const int64_t at = int64_t(pDesc->PositionOffset) + delta;
++      job.uvHalf = (pDesc->Flags & NVR_EXT_RT_GEOMETRY_TEXCOORD_HALF2) != 0u;
++      const uint32_t uvSize = job.uvHalf ? 4u : 8u;
++      if (at < 0 || (at & 3) || uint64_t(at) + uint64_t(vertexCount - 1u) * pDesc->VertexStride + uvSize > vbSize)
++        return refuse(str::format("texcoord at position + ", delta, " bytes is outside the vertex buffer or not 4-aligned"));
++      job.uv = true;
++      job.uvOffset = uint32_t(at);
++    }
++
+     uint64_t triangles = 0u;
+ 
+     for (uint32_t i = 0u; i < pDesc->RangeCount; i++) {
+@@ -366,6 +382,8 @@ namespace dxvk {
+     if (FAILED(hr))
+       return hr;
+ 
++    job.uv = false;   // 1.8-rt-uv: the in-process path builds from positions only
++
+     const uint32_t vertexCount = job.vertexCount;
+     const uint64_t triangles = job.triangles;
+ 
+@@ -528,6 +546,18 @@ namespace dxvk {
+       ctx->pushData(VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
+       ctx->dispatch((job.vertexCount + 63u) / 64u, 1u, 1u);
+ 
++      if (job.uv) {   // 1.8-rt-uv
++        push = D3D9NvrRtConvertPush();
++        push.src       = job.vertexBuffer->getSliceInfo().gpuAddress;
++        push.dst       = dst + job.dstUv;
++        push.mode      = job.uvHalf ? ModeUvHalf2 : ModeUvFloat2;
++        push.count     = job.vertexCount;
++        push.srcOffset = job.uvOffset;
++        push.stride    = job.stride;
++        ctx->pushData(VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
++        ctx->dispatch((job.vertexCount + 63u) / 64u, 1u, 1u);
++      }
++
+       const uint64_t indices = job.indexBuffer != nullptr ? job.indexBuffer->getSliceInfo().gpuAddress : 0u;
+ 
+       for (const auto& range : job.ranges) {
+@@ -576,7 +606,7 @@ namespace dxvk {
+ 
+     pInfo->VertexCount   = job.vertexCount;
+     pInfo->TriangleCount = job.triangles;
+-    pInfo->Texels        = 3u * (job.vertexCount + job.triangles);
++    pInfo->Texels        = 3u * (job.vertexCount + job.triangles) + (job.uv ? 2u * job.vertexCount : 0u);
+     return D3D_OK;
+   }
+ 
+@@ -611,7 +641,7 @@ namespace dxvk {
+     if (FAILED(hr))
+       return hr;
+ 
+-    const uint64_t texels = 3ull * (uint64_t(job.vertexCount) + job.triangles);
++    const uint64_t texels = 3ull * (uint64_t(job.vertexCount) + job.triangles) + (job.uv ? 2ull * job.vertexCount : 0ull);
+     const uint64_t capacity = uint64_t(arena.Width) * arena.Height;
+ 
+     if (uint64_t(DstTexel) + texels > capacity) {
+@@ -634,6 +664,7 @@ namespace dxvk {
+     job.dst = m_staging;
+     job.dstPositions = VkDeviceSize(DstTexel) * 4u;
+     job.dstIndices = (VkDeviceSize(DstTexel) + 3u * job.vertexCount) * 4u;
++    job.dstUv = (VkDeviceSize(DstTexel) + 3ull * job.vertexCount + 3ull * job.triangles) * 4u;
+ 
+     m_stagedMin = std::min<uint32_t>(m_stagedMin, DstTexel);
+     m_stagedMax = std::max<uint32_t>(m_stagedMax, uint32_t(DstTexel + texels));
+diff --git a/src/d3d9/d3d9_nvr_rt.h b/src/d3d9/d3d9_nvr_rt.h
+index e7ba508..0a0f713 100644
+--- a/src/d3d9/d3d9_nvr_rt.h
++++ b/src/d3d9/d3d9_nvr_rt.h
+@@ -125,11 +125,14 @@ namespace dxvk {
+     Rc<DxvkBuffer>          indexBuffer;    // the game's (null: non-indexed)
+     uint32_t                positionOffset = 0u, stride = 0u, vertexCount = 0u, indexSize = 0u;
+     bool                    half = false;
++    bool                    uv = false, uvHalf = false;   // 1.8-rt-uv: also the texcoords (float2 array after the indices)
++    uint32_t                uvOffset = 0u;                // bytes from the buffer's start to vertex 0's texcoord
+     std::vector<Range>      ranges;
+     uint32_t                triangles = 0u;
+     Rc<DxvkBuffer>          dst;            // where the conversion writes: float3 positions at dstPositions, the uint list at dstIndices
+     VkDeviceSize            dstPositions = 0u;
+     VkDeviceSize            dstIndices = 0u;
++    VkDeviceSize            dstUv = 0u;
+     VkDeviceSize            scratchSize = 0u;   // in-process build only
+     Rc<D3D9NvrRtAccel>      accel;              // in-process build only
+   };
+diff --git a/src/d3d9/shaders/d3d9_nvr_rt_convert.comp b/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
+index f8199c9..ff6a644 100644
+--- a/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
++++ b/src/d3d9/shaders/d3d9_nvr_rt_convert.comp
+@@ -19,6 +19,8 @@ layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer Ui
+ #define MODE_POSITIONS_HALF4  1u
+ #define MODE_LIST             2u
+ #define MODE_STRIP            3u
++#define MODE_UV_FLOAT2        4u   // 1.8-rt-uv: texcoords (any stride and offset) into a packed float2 array
++#define MODE_UV_HALF2         5u
+ 
+ layout(push_constant) uniform Push {
+   uvec2 src;          // the D3D9 buffer (vertex or index buffer) at offset 0
+@@ -51,6 +53,18 @@ void main() {
+   if (id >= p.count)
+     return;
+ 
++  if (p.mode == MODE_UV_FLOAT2 || p.mode == MODE_UV_HALF2) {
++    Words b = Words(p.src);
++    uint at = (p.srcOffset + id * p.stride) >> 2u;
++    vec2 uv = p.mode == MODE_UV_FLOAT2 ? vec2(uintBitsToFloat(b.w[at]), uintBitsToFloat(b.w[at + 1u])) : unpackHalf2x16(b.w[at]);
++    if (any(isnan(uv)) || any(isinf(uv)))
++      uv = vec2(0.0);
++    Floats o = Floats(p.dst);
++    o.f[id * 2u + 0u] = uv.x;
++    o.f[id * 2u + 1u] = uv.y;
++    return;
++  }
++
+   if (p.mode <= MODE_POSITIONS_HALF4) {
+     Words b = Words(p.src);
+     uint at = p.srcOffset + id * p.stride;   // bytes, 4-aligned (checked on the host)
+-- 
+2.40.0.windows.1
+

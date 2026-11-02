@@ -1,0 +1,201 @@
+[_Shaders.ShadowsExteriors.Main]
+TwoSidedCasters = false                # UNOFFICIAL: sun shadows (and the volumetric light, which reads them) are cast by both sides of every object. Fixes sunlight and light shafts shining through one-sided walls (the game uses them where you never see the other side). Same picture for closed objects; a little more shadow-map drawing.
+Quality = 4                          # Quality preset - 0: Low, 1: Medium, 2: High, 3: Full, 4: Custom (UNOFFICIAL 2026-10-27: every preset uses PCF sun shadow maps; the presets set distance and resolution; the old VSM / EVSM modes and their Mode, Format, Prefilter and MSAA settings are gone)
+Enabled = true                       # Enable sun shadows using rendered shadow maps.
+ForwardShadows = true                # Evaluate sun shadows per-object in the lighting shaders
+                                     # instead of as a screen-space composite. Scales only the
+                                     # sun term, so shadowed surfaces keep correct ambient/sky
+                                     # light. Takes effect immediately: turning it off hands the
+                                     # cascades back to the deferred pass in the same frame.
+                                     # Starting the game with it false compiles the forward path
+                                     # out entirely, so turning it on then needs a restart.
+SmoothCharacterShadows = true        # UNOFFICIAL (2026-10-20), live, on by default (user 2026-10-20): sun and lamp shadows on faces and skin follow the smooth shape of the head instead of its triangles. Fixes blocky, jagged shadow edges on faces close up, nose and brow shadows that come and go triangle by triangle as a head turns, and triangle-shaped light and dark patches on the shaded side of faces (old skin shader); sun shadow edges on skin also fade over a few millimetres (CharacterShadowSoftness) instead of cutting off hard. Off = as before.
+CharacterShadowSoftness = 0.4       # UNOFFICIAL (2026-10-20), live, with SmoothCharacterShadows: how far a sun shadow edge on skin fades, in world units (about 70 = 1 m; 0.4 is about 6 mm), as light carried under real skin softens it. Hides the shadow map's stair steps and the head's triangle edges close up. 0 = hard edges (as before). Needs contact hardening switched on at game start (the default).
+CharacterShadowReach = 0.5          # UNOFFICIAL (2026-10-22), live, with ForwardShadows and PCF (Mode 3): how close to the skin a thing may be and still cast its sun shadow on it, in world units on the nearest shadow cascade (0.5 is about 7 mm; 70 = 1 m), measured from the skin (since 2026-10-27: before, it was measured along the sun's ray, which at a low sun let a face shadow itself in grains). The shadow lookups give the skin's own surface a few shadow-map texels of slack, and on the coarser cascades (past about 3 m at CascadeLambda 0.9, past 1 m at 0.997) that is 2-5 cm: hair, nose and collar shadows on a face vanished there while the face was still big on screen in third person. With this, the slack on the nearest cascade is capped at this distance and the coarser cascades keep the same cap in their map's depth units (so it grows with their texels, never below what a flat face needs). Skin only: armour, clothes and the world keep their texel slack (the 2026-10-14 stripes on the power armour at a low sun). Close up (within the nearest cascade) the face already had its shadows; they look lighter than the deferred path's because forward shadows take away only the sun's light and leave the sky's and the ambient. 0 = off (as before).
+CasterReachEverywhere = false        # UNOFFICIAL (2026-10-22), a TEST switch, needs a restart: CharacterShadowReach's limit on every forward shader (armour, clothes, ground, walls), not only skin. Expect fine stripes on flat surfaces at a low sun; here for A/B checks only.
+CharacterObjectReach = false         # UNOFFICIAL (2026-10-23), needs a restart to switch on (live after that): CharacterShadowReach's limit also on the parts of a character drawn with the ordinary object shaders that sit on the head: hair, face masks, eyes, hats and helmets (any mesh skinned to head and neck bones only, or hung under the head bone). Fixes a face mask losing the hair's and nose's shadow sooner than the skin face next to it as the camera zooms out. Body armour and clothes keep their normal limit (no stripes at a low sun). Off = as before.
+CharacterObjectReachLog = false      # UNOFFICIAL (2026-10-23), diagnostic: with CharacterObjectReach, log which meshes count as head parts (the first 400).
+Darkness = 0.75                      # Darkness of shadows.
+NightMinDarkness = 0.35              # Darkness of shadows during dark moon phase. Set to 0 to disable shadows completely when there is no moon.
+SkipWhenFaded = true                 # UNOFFICIAL: around sunrise and sunset the sun's shadows are faded out completely; while they are, the lit shaders skip their shadow lookups, and the screen-space contact shadows and the shadow maps are not drawn when nothing reads them (the volumetric fog's sun glow reads the shadow maps, so with the fog on they are kept). The picture is the same. false: everything runs anyway.
+SkipWhenFadedCheck = 0               # UNOFFICIAL, DIAGNOSTIC (development builds only, release builds ignore it): leave 0. 1 = what SkipWhenFaded skips is filled with "full shadow", so anything still reading it would show; 2 = the same, skipping even what is still read (a test that the checks matter: the picture changes); 3 = the lit shaders' sun shadow lookups off at any hour (to measure their cost: by day the sun shadows disappear); 4 = the shadow maps filled with 'full shadow' at any hour, nothing skipped (shows that 1 and 2 reach the shaders).
+SunCascadeStats = 0                  # UNOFFICIAL, DIAGNOSTIC (development builds only, release builds ignore it): leave 0. Every 240 frames (or per auto-test shot) the log gets 'SUN CASCADE STATS' lines: 1 = the sun shadow cascades' CPU time per frame; 2 = also how it splits into walking the loaded cells and drawing, with counts of objects tested and drawn and of state changes between draws (the timers themselves add a little).
+SunCascadeVerify = 0                 # UNOFFICIAL, DIAGNOSTIC (development builds only, release builds ignore it): leave 0. 1 = every sun shadow cascade drawn with SunCascadeOneWalk is also walked the old way and both lists of shadow casters are compared ("SUN CASCADE VERIFY" lines in the log); 2 = also each cascade is drawn both ways and the two shadow maps compared texel by texel (stalls the GPU: slow).
+SunCascadeSkipFlat = true            # UNOFFICIAL (2026-10-21), the same picture for less CPU time: while the sun stands straight overhead (with QuantizeSun, any sun within 7.5 degrees of the zenith is rounded to exactly overhead), the sun shadow maps are built with a camera whose up direction is the sun's own, which flattens them: nothing can be drawn into them and they stay empty. Until now every object in the loaded cells was still sent to all four of them (about 7 ms of CPU time per frame on the Strip at midday on a fast PC). On: those maps are only cleared. Off: as before. Applies immediately.
+SunCascadeOneWalk = true             # UNOFFICIAL (2026-10-21), the same picture for less CPU time: the sun shadow cascades drawn in a frame share one walk through the loaded cells instead of each walking all of them again; every cascade still gets exactly the same objects in the same order. Off: as before. Applies immediately.
+SunCascadeLeanDraws = true           # UNOFFICIAL (2026-10-21), the same picture for less CPU time: each object drawn into the sun shadow maps sends the graphics card only the settings that changed since the object before it (before, every setting again), and the cloth and plant wind checks are skipped for objects whose texture is neither cloth nor plant (they never moved them). Off: as before. Applies immediately.
+OverheadSunFix = true                # UNOFFICIAL (2026-10-21), changes the picture: while the sun stands straight overhead (with QuantizeSun, any sun within 7.5 degrees of the zenith is rounded to exactly overhead; on the Strip that is around 13:00) the sun shadow maps stayed empty, so the sun cast no shadows at all from those maps. On: they are built facing north instead and the sun casts its normal shadows then, for the normal cost of sun shadows (about 1 ms of CPU time per frame) instead of almost nothing. Any other sun position: nothing changes. Off: as before. Applies immediately.
+FitToDepth = false                   # UNOFFICIAL (2026-10-27), live, every Quality: fit the four sun shadow cascades to what is really on screen, so the same shadow-map size covers less ground and the shadows there are sharper. Each frame the depth on screen is measured on the graphics card (a small grid of blocks, counted by queries that come back a few frames later without waiting; native D3D9 and DXVK alike) and, when everything you see ends sooner than the shadow Distance (looking down, a street of buildings, under a canopy, a canyon) or starts later, the cascades past that point are re-split over the depths you can see. A new layout is only used when no visible spot gets a coarser cascade (never more than 5 %), some get at least 25 % finer and the whole view finer on average, so open views to the horizon and your own character's shadows stay as they are. While the camera turns or moves fast the normal split is used at once, and the fit comes back about a tenth of a second after it stops; with sky in view and the volumetric light on, the last cascade still reaches the full Distance for the light shafts. Costs about 0.05 ms of GPU time a frame (F10 profile: "Sun depth fit"); fewer objects are drawn into the shadow maps while a fit is in use. false = exactly as before (nothing is measured).
+FitToDepthDebug = 0                  # UNOFFICIAL (2026-10-27), diagnostic view, live, works with FitToDepth on or off: 1 = each sun shadow cascade coloured over the picture as the lit shaders pick it (red nearest, green, blue, yellow farthest, grey none; stripes where one hands over to the next), with a bar along the top: the thick bar is the layout in use, the thin one under it the layout without the fit (depth on a square-root scale up to the shadow Distance; the white mark is the nearest visible depth used). 2 = the measured block grid (grey: how far each block reaches, magenta: past the cascades, orange: nearer than the nearest depth used, cyan: shows sky). 0 = off.
+FitToDepthLog = false                # UNOFFICIAL (2026-10-27), diagnostic: with FitToDepth, a log line whenever the cascade layout changes (the splits, what was measured, why).
+OrthoMapResolution = 256             # Resolution of the texture used to store the ortho map.
+OrthoRadius = 8000                   # Max distance for rendering of ortho map.
+UsePointShadowsDay = false           # Whether to cast shadows from point lights. Requires a slight darkening of the entire screen.
+UsePointShadowsNight = false         # Whether to cast shadows from point lights during Nights. Requires a slight darkening of the entire screen.
+
+[_Shaders.ShadowsExteriors.RT]
+SunAngle = 0.0                       # UNOFFICIAL (2026-10-29): soft RT sun shadows: the sun's disc in degrees (the real sun 0.53; more = softer, wider penumbrae). 0 = one hard ray (the old look). Above 0 each pixel traces toward a different point of the disc every frame and the shared RT denoiser (temporal + edge-stopping a-trous) smooths it. Live.
+Denoise = true                       # UNOFFICIAL (2026-10-29): with SunAngle above 0, run the shared RT denoiser over the traced sun visibility (off: the raw one-ray noise, for comparison). Live.
+DenoiseKernel = 5                    # UNOFFICIAL (2026-10-29): the shared RT denoiser's spatial kernel for the soft RT sun shadows: 5 (5 x 5 taps, smoother) or 3 (3 x 3, about 2.5 times cheaper). Live.
+HalfResolution = false               # UNOFFICIAL (2026-10-29): trace the RT sun shadows at half resolution (a quarter of the rays; the trace is the cost: 8 ms hard / 15 ms soft at 720p on an iGPU), denoise at half size and upsample bilinearly. Softer shadow edges. Live.
+Enabled = false                      # UNOFFICIAL (2026-10-28), needs the DXVK fork (fork patch 0028), a GPU whose 64-bit Vulkan driver has ray tracing (RTX 20 / RX 6000 or newer, or a Ryzen 7000+ integrated GPU) and NvrRtHelper.exe in Data\NVSE\Plugins\NvrRt\: ray-traced sun shadows. One ray per pixel toward the sun against the real geometry (the ray tracing core's scene: [Main.Main.RayTracing]), so small and thin casters, contact and long shadows are exact where the cascades blur, miss or acne. Without any of those, or off: the shadow maps exactly as before. Live. docs\next\FORK-RT-SUN.md.
+Mode = 0                             # UNOFFICIAL (2026-10-28), with Enabled: 0 = combine (the cascades and contact shadows stay; the traced shadow is multiplied in: nothing is lost, the rays add what the maps miss), 1 = replace (inside Range the traced shadow replaces the cascades, which fade in only over the last 15% of Range; the object shaders' own cascade lookups are switched off meanwhile). Alpha-tested casters (leaves, fences) and actors are not traced yet: in Mode 1 they cast no sun shadow inside Range. Live.
+Strength = 1.0                       # [0-1] UNOFFICIAL (2026-10-28), Mode 0: how strongly the traced shadow darkens (1 = fully). Live.
+Range = 6000                         # UNOFFICIAL (2026-10-28): the view distance (units) the rays are traced to; they fade out over its last 15% (Mode 1: the cascades fade in there). Live.
+NormalBias = 2.0                     # UNOFFICIAL (2026-10-28): how far (units) each ray starts off the surface along its normal, against a surface shadowing itself (acne). Live.
+NormalBiasPerUnit = 0.0005           # UNOFFICIAL (2026-10-28): extra normal offset per unit of view distance (the depth and normals are coarser far away). Live.
+StartBias = 1.0                      # UNOFFICIAL (2026-10-28): how far (units) each ray also starts toward the sun. Live.
+CloudShadows = false                 # UNOFFICIAL (2026-10-30), with the volumetric clouds' shadows on (Volumetric Clouds, Shadows): the clouds' shadow goes into the traced sun visibility (the clouds' shadow map where the sun ray from each pixel meets the cloud base, as strong as the clouds' own shadows), so it darkens only the sunlight, exactly like the shadows of things. The clouds' own shadow pass (through SunFar, or the clouds' composite) then leaves the clouds out in those frames, so they are never applied twice. Off: the clouds' shadows as before. Live.
+Penumbra = false                     # UNOFFICIAL (2026-10-31): physically sized soft RT sun shadows that harden at contact, as in current ray-traced games. The sun is a disc (SunAngle; 0 here = the real sun, 0.53 degrees), each pixel traces one ray to a point of it a frame, the history averages them, and then each shadow edge is softened by its own penumbra width: the distance to what casts it times the sun's size (a foot on the ground stays sharp, a roof's shadow far below gets a wide soft edge). Replaces the denoiser's fixed-size smoothing for the sun. Needs Denoise. Live.
+PenumbraMaxRadius = 32.0             # UNOFFICIAL (2026-10-31), with Penumbra: the widest soft edge in screen pixels (the cost is the same at any size). Live.
+RayLength = 30000                    # UNOFFICIAL (2026-10-28): how far (units) a ray looks for a caster (a caster beyond the scene's SceneRadius is not there anyway). Live.
+DebugView = 0                        # UNOFFICIAL (2026-10-28), diagnostic: 1 = the traced shadow alone (the cascades and contact shadows left out of the sun shadow), 2 = traced but not applied (the cascades alone; the cost of the rays stays, for A/B), 3 = the distance to the caster (white = free or 4096+ units), 4 = the traced visibility alone as grey over the whole finished picture (white = sun reaches the pixel, black = a traced caster blocks it). 7 (with HitTextures) = the hit's colour at each camera ray's hit as grey; 8 (2026-10-30, with [Main.Main.RayTracing] GlowTextures) = the hit's glow as grey (black no glow; white nothing hit). Live. 9 / 10 (2026-10-30, with CloudShadows): the clouds' transmittance at each pixel alone / the clouds' shadow map as the trace gets it, stretched over the screen (grey). 11 (2026-10-31, with Penumbra): each pixel's penumbra width as grey (black = sharp, white = PenumbraMaxRadius). 12: the penumbra pass' own output as a flat grey (a check that it runs). 13 / 14 (2026-10-31, with [Main.Main.RayTracing] DenoiseBackbone): newly seen pixels (white) / how far each pixel moved on screen since last frame (grey, white = 1 % of the screen or more).
+
+[_Shaders.ShadowsExteriors.SunSmoothing]
+SmoothSun = 1						 # Smooth the sun rotation by interpolating between positions.
+QuantizeSun = 1						 # Quantize the sun rotation by making sure the sun moves in constant size increments, instead of constantly.
+SmoothingFactor = 0.174			 # [0.0-1.0] Lower number means slower smoothing between positions, higher means more instantenous.
+YawStepSize = 15.0					 # [0.0-15.0] Step size for changes in the horizontal rotation of the sun, angle in degrees.
+PitchStepSize = 15.0				 # [0.0-15.0] Step size for changes in the vertical rotation of the sun, angle in degrees.
+MaxJumpAngle = 5.0					 # [5.0-30.0] A maximum angle difference for which smoothing works, if higher the jump is instaneous. Required for time jumps / waiting.
+GlideSeconds = 3.0                   # [0.0-10.0] UNOFFICIAL: real seconds each step of the sun slides over, instead of all sun shadows jumping at once about every in-game hour. Bigger jumps (waiting, sleeping, loading) stay instant. 0 = the original behaviour.
+CrossFade = false                    # UNOFFICIAL, needs a game restart: instead of turning the shadows over GlideSeconds, fade from the old shadows to the new ones over that time, so shadow edges never crawl while the sun moves. Costs a second copy of the shadow maps in video memory (about 72 MB at the default CascadeResolution) and a little GPU time during each fade only. Needs ForwardShadows (the default).
+
+[_Shaders.ShadowsExteriors.FormsNear]
+Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
+Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
+AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
+Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
+Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
+Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
+Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
+Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
+Lod = false                          # Whether to include objects with "Lod" flag when rendering shadowmaps.
+MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps.
+Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
+Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
+Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
+Trees = true                         # Whether to include Trees when rendering shadowmaps.
+
+[_Shaders.ShadowsExteriors.FormsMiddle]
+Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
+Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
+AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
+Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
+Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
+Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
+Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
+Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
+Lod = false                          # Whether to include objects with "Lod" flag when rendering shadowmaps.
+MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps.
+Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
+Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
+Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
+Trees = true                         # Whether to include Trees when rendering shadowmaps.
+
+[_Shaders.ShadowsExteriors.FormsFar]
+Activators = true                    # Whether to include objects with "Activator" flag when rendering shadowmaps.
+Actors = true                        # Whether to include objects with "Actors" flag when rendering shadowmaps.
+AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
+Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
+Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
+Containers = true                    # Whether to include objects with "Containers" flag when rendering shadowmaps.
+Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
+Furniture = true                     # Whether to include objects with "Furniture" flag when rendering shadowmaps.
+Lod = true                           # Whether to include objects with "Lod" flag when rendering shadowmaps.
+MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps. UNOFFICIAL 2026-10-27: 1 (was 10): small objects 25-80 m away keep their sun shadow; no measurable GPU cost (desert, Goodsprings).
+Misc = true                          # Whether to include objects with misc flags when rendering shadowmaps.
+Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
+Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
+Trees = true                         # Whether to include Trees when rendering shadowmaps.
+
+[_Shaders.ShadowsExteriors.FormsLod]
+Activators = false                   # Whether to include objects with "Activator" flag when rendering shadowmaps.
+Actors = false                       # Whether to include objects with "Actors" flag when rendering shadowmaps.
+AlphaEnabled = true                  # Whether to take into account alpha of objects when rendering shadowmaps.
+Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering shadowmaps.
+Books = false                        # Whether to include objects with "Books" flag when rendering shadowmaps.
+Containers = false                   # Whether to include objects with "Containers" flag when rendering shadowmaps.
+Doors = true                         # Whether to include objects with "Doors" flag when rendering shadowmaps.
+Furniture = false                    # Whether to include objects with "Furniture" flag when rendering shadowmaps.
+Lod = true                           # Whether to include objects with "Lod" flag when rendering shadowmaps.
+MinRadius = 1.0                      # Whether to include objects with a radius of less than x pixels on the screen in the shadowmaps. UNOFFICIAL 2026-10-27: 1 (was 10): small objects 25-80 m away keep their sun shadow; no measurable GPU cost (desert, Goodsprings).
+Misc = false                         # Whether to include objects with misc flags when rendering shadowmaps.
+Statics = true                       # Whether to include objects with "Statics" flag when rendering shadowmaps.
+Terrain = true                       # Whether to include Terrain when rendering shadowmaps.
+Trees = true                         # Whether to include Trees when rendering shadowmaps.
+
+[_Shaders.ShadowsExteriors.FormsOrtho]
+Activators = false                   # Whether to include objects with "Activator" flag when rendering ortho map.
+Actors = false                       # Whether to include objects with "Actors" flag when rendering ortho map.
+AlphaEnabled = false                 # Whether to take into account alpha of objects when rendering ortho map.
+Apparatus = false                    # Whether to include objects with "Apparatus" flag when rendering ortho map.
+Books = false                        # Whether to include objects with "Books" flag when rendering ortho map.
+Containers = false                   # Whether to include objects with "Containers" flag when rendering ortho map.
+Doors = false                        # Whether to include objects with "Doors" flag when rendering ortho map.
+Furniture = false                    # Whether to include objects with "Furniture" flag when rendering ortho map.
+Lod = false                          # Whether to include objects with "Lod" flag when rendering ortho map.
+MinRadius = 1.0						 # Whether to include objects with a radius of less than x pixels on the screen in the ortho map.
+Misc = true                          # Whether to include objects with misc flags when rendering ortho map.
+Statics = true                       # Whether to include objects with "Statics" flag when rendering ortho map.
+Terrain = true                       # Whether to include Terrain when rendering ortho map.
+Trees = true                         # Whether to include Trees when rendering ortho map.
+
+[_Shaders.ShadowsExteriors.ScreenSpace]
+BlurRadius = 1.0                     # Blur strength for denoising screenspace shadows. Keep low, otherwise a lot of pixelation will occur.
+Enabled = true                       # Wether to render screen space contact/detail shadows
+RenderDistance = 180000              # Max distance at which to compute screen space shadows
+Intensity = 0.315                    # Rescale the intensity of screenspace shadows, to combat jitter and blur making them very faint even at maximum brightness.
+NearFade = 400.0                     # UNOFFICIAL (2026-10-27), applies immediately: contact shadows fade in with distance from the camera, none nearer than half of this, full from this (game units, 70 = 1 m). Up close the sharp sun shadows already show the real shapes, and the contact shadows drew low-poly noses, brows and collars as hard triangles on characters (the 'facets', worst with Sharp). 0 = everywhere, as before.
+Sharp = false                        # UNOFFICIAL: sharper, steadier contact shadows for less: the ray toward the sun followed in 16 even steps instead of 4 random ones smoothed by two big blurs (about a third of the cost). With forward shadows (the default). BlurRadius is not used with it on.
+FastPaths = true                     # UNOFFICIAL (2026-10-17): the same contact shadows for less GPU time: the march's early exits (too far, surface turned away from the sun) really skip work (the shader compiler had turned them into work every pixel did). Off = the original pass. Applies immediately
+
+[_Shaders.ShadowsExteriors.ShadowMaps]
+CascadeResolution = 1				 # Resolution used for shadow cascades. 0: 1024, 1: 1536, 2: 2048, 3: 2560, 4: 3072, 5: 3584, 6: 4096 (UNOFFICIAL; 6 needs about 256 MB of video memory with PCF shadows, Max Quality uses it).
+                                     # 3: 2560, 4: 3072, 5: 3584. The atlas holds 2x2 cascades, so
+                                     # VRAM and shadow-pass bandwidth scale with the square of this:
+                                     # 3 is ~2.6x the cost of 2, and 5 is ~5x. Clamped down if it
+                                     # exceeds the device's maximum texture size.
+Mipmaps = false						 # DISABLED. Enable mipmaps for the shadow maps.
+Anisotropy = 0						 # DISABLED. Anisotropic filteric for mipmaps, 0: disabled, 1: 8x, 2: 16x
+Distance = 6000                      # Distance to render shadows for. The unit is the same as the game uses for i.e. fog values. 
+CascadeLambda = 0.9					 # [0.0-1.0] Controls how cascades are split, higher value means nearer cascades get higher resolution.
+HandoverBlend = 70                   # UNOFFICIAL (2026-10-21), live, every Quality: how far inside each sun shadow cascade's edge the hand-over to the next (coarser) cascade is blended, in world units (70 is about 1 m). Fixes shadows on your character popping as the third-person camera zooms in and out (the hair's shadow on the brow appearing and vanishing at one distance), worst with a high CascadeLambda, where the old blend was a few centimetres wide: now both cascades read the same spot across the band, so only their mix changes. Never wider than the cascade, never narrower than the old tenth of it. 0 = the old blend (the outer tenth of each cascade).
+PlayerInNear = 0                     # UNOFFICIAL (2026-10-23), live: in third person, keep your character's head in the sharpest sun shadow cascade while the camera is within this distance of it, in world units (420 is about 6 m; 70 = 1 m). Fixes the hair's, nose's and brow's shadows on your face showing only once the camera zooms in close (about 1.5-2 m): further out the head was in the next, coarser cascade, which blurs shadows that thin away. The sharp cascade grows to reach the head, so its shadows get a little softer everywhere while the camera is far back. 0 = off (as before).
+PlayerInNearLog = false              # UNOFFICIAL (2026-10-23), diagnostic: with PlayerInNear, log the camera-to-head distance and the sharp cascade's size once a second.
+CharacterShadowMap = true            # UNOFFICIAL (2026-10-23), ON by default since P82 v4, needs a restart to switch on or off (live after that): a small extra sun shadow map of your own character alone, fitted round the head and upper body (1-3 mm texels instead of the 4-10 mm of the sun cascades), read by the skin and clothing shaders where your character is on screen. Keeps the hair's, nose's and hat brim's shadows on the face sharp and steady at any third-person zoom. The sun cascades are drawn exactly as before (your shadow on the ground, and the world's shadows on you, stay theirs); this map only adds back the fine self-shadow they blur away. Third person only. Costs one small shadow map per frame (measured about 0.04 ms to draw; F10 profile: "Character shadow map").
+CharacterShadowMapResolution = 1024  # UNOFFICIAL (2026-10-23), live: the map's size in texels (256-4096, rounded to 256). 1024 = about 1.4 mm texels round the head; 2048 = half that, four times the memory (16 MB) and fill.
+CharacterShadowMapFit = 0            # UNOFFICIAL (2026-10-23), live: what the map is fitted round. 0 = the head and upper body (the Spine2 bone to the head bone, plus the margin): the sharpest. 1 = the whole character (its bound sphere): the arms' and weapon's shadows on the body too, about twice the texel size.
+CharacterShadowMapMargin = 24        # UNOFFICIAL (2026-10-23), live: world units added round the fit (70 = 1 m), for hat brims, hair and shoulders; the sun is at an angle, so the box needs room on every side. Larger = coarser texels.
+CharacterShadowMapBlend = 12         # UNOFFICIAL (2026-10-23), live: world units inside the map's edge over which it hands over to the sun cascades, so the border never shows as a line.
+CharacterShadowMapBias = 0.15        # UNOFFICIAL (2026-10-23), live: constant depth bias of the lookup, world units (0.15 = 2 mm). Raise it if the skin shows fine stripes or speckles (acne) with the map on; lower it if shadows detach from what casts them.
+CharacterShadowMapOthers = false     # UNOFFICIAL (2026-10-23), live: other characters standing inside the map's box are drawn into it too, so their shadow on you is as sharp as your own. A little CPU per frame (the loaded cells' references are scanned for them).
+CharacterShadowMapTarget = 0         # UNOFFICIAL (2026-10-31), live, off (root plan A2): 1 = in first person (where the map had nothing to do) it is fitted round the nearest person whose head is in front of you within CharacterShadowMapNpcDistance, so the faces you talk to keep their sharp sun self-shadow (hair, nose, hat brim) too. 0 = your own character in third person only, as before.
+CharacterShadowMapNpcDistance = 400.0 # UNOFFICIAL (2026-10-31), live: world units (70 = 1 m) from the camera to that person's head.
+CharacterShadowMapLog = false        # UNOFFICIAL (2026-10-23), diagnostic: log the fit, texel size and caster count once a second.
+CharacterShadowMapDebug = 0          # UNOFFICIAL (2026-10-24), diagnostic view, live: inside the map's box the sun shadow is replaced by 1 = the map's own verdict alone (white lit, black shadowed), 2 = the depth the map holds there (black = the map is empty or not bound, white = nothing drawn there, gray = a caster), 3 = the point's own depth in the box. 0 = off.
+SmoothFilter = false					 # UNOFFICIAL (2026-10-15), PCF shadows (Mode 3): a smoother, slightly wider filter on the sun shadow maps (a 4 x 4 cubic B-spline instead of 3 x 3). Rounds off the stair steps that show where one shadow-map texel covers several pixels: shadows on your character in third person, a low sun across steep surfaces. Costs a little (16 compares per lookup instead of 9).
+LimitFrequency = true				 # Limit the update frequency of the furthest cascade (once per four frames).
+CasterFadeMin = 0.75                 # UNOFFICIAL (2026-10-28) [0-1], live: things the game is fading (in or out with distance) cast their sun shadow only from this much of their fade on. 0.75 = as before. Found with CasterView: distant trees' leaves sit at fade 0 while drawn on screen, so they never cast, and their shadow snaps on as you come nearer. 0 = they always cast (more shadow-map draws in tree-heavy places).
+LodSkipLoaded = true				 # Distant-object LOD inside the loaded cells casts no shadow: the full objects there already do. Removes doubled shadows and ghost shadows of swapped or removed objects, and saves drawing them twice. false: the old behaviour.
+
+[_Shaders.ShadowsExteriors.Ortho]
+Resolution = 2						 # Resolution of the texture used to store the ortho map. 0: 128, 1: 256, 2: 512, 3: 1024, 4: 2048
+Distance = 3000                      # Distance to render ortho for. The unit is the same as the game uses for i.e. fog values.
+LimitFrequency = true				 # Limit the update frequency of the ortho map (one per four frames).
+ProbeDump = 0                        # UNOFFICIAL, development builds only: a new non-zero value writes one dump of the ortho map with the object that drew each texel (for diagnosis; does nothing in release builds).
+
+[_Shaders.ShadowsExteriors.TerrainShadows]
+Enabled = false                      # UNOFFICIAL (2026-10-19) Mountain shadows: hills and mountains shade the land and everything on it far past the sun-shadow maps (about 85 m), so at sunrise and sunset ranges cast long shadows across the valleys. Only the sunlight is taken away: shaded land keeps its sky and ambient light. Reads the land's heights from your plugins in load order (about a second, on a spare core, when you enter a worldspace), or an xLODGen height map if you made one (UseHeightMapFile). Worked out on a spare CPU core when the sun moves; about 0.1 ms a frame on the GPU. Ported from Conor's (mrfury97) fork, after Community Shaders' Terrain Shadows (both GPL-3.0).
+MaxResolution = 1                    # [0-2] (2026-10-19) The land's height map is shrunk to at most 0: 1024, 1: 2048, 2: 4096 texels on its longer side (applied on the next worldspace change or a moment after you change it). Larger: sharper shadow edges, more video memory (16 MB at 2048) and CPU per update.
+Bias = 64.0                          # [0-4096] (2026-10-19) Shadow heights are lowered by this many units, so slopes do not shadow themselves. Higher: fewer, deeper shadows only; lower: more shadow on gentle slopes.
+Softness = 1.0                       # [0.1-10] (2026-10-19) Degrees either side of the sun's height over which the shadow's edge fades.
+Strength = 1.0                       # [0-1] (2026-10-19) How much of the sun the land's shadow takes.
+Darkness = 0.0                       # [0-0.95] (2026-10-19) How much of the sky and ambient light the land's shadow also takes. 0: only the sun (physically right: a valley still sees the sky); higher: darker, more contrasted shadows (Conor's fork uses 0.5).
+Contrast = 1.5                       # [0.5-8] (2026-10-19) Sharpens the shadow's edge: 1 as worked out, higher a harder line between lit and shaded land.
+UseHeightMapFile = true              # (2026-10-19) Use an xLODGen height map when one is installed (FNVLODGen: Terrain LOD > Height maps, in Data\Textures\Terrain\<Worldspace>\), otherwise the land read from your plugins. Both give the same shape; the file skips the one-second read.
+DebugView = 0                        # (2026-10-19) 1: the land's shadow tinted green (and the clouds' blue) over the picture. 2: also tints the area the height map covers.
+
+[_Shaders.ShadowsExteriors.Status]
+Enabled = true                       # Post process sun and pointlights shadows in exteriors.
+

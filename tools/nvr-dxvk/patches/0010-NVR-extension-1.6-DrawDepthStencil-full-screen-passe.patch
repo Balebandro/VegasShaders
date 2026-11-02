@@ -1,0 +1,298 @@
+From 83177b7f58823a7ac2994651e79ed1e67da7c6f6 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 17:40:02 -0400
+Subject: [PATCH] NVR extension 1.6: DrawDepthStencil (full-screen passes with
+ a depth-stencil attachment and depth / stencil tests)
+
+---
+ src/d3d9/d3d9_nvr_ext.cpp   | 105 +++++++++++++++++++++++++++++++++---
+ src/d3d9/d3d9_nvr_ext.h     |  11 +++-
+ src/d3d9/d3d9_nvr_ext_api.h |  54 ++++++++++++++++++-
+ 3 files changed, 159 insertions(+), 11 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index df04481..8a485c7 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -871,7 +871,7 @@ namespace dxvk {
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9NvrExt::Draw(const NVR_EXT_DRAW_DESC* pDesc) {
+-    return DrawImpl(pDesc, 0.0f, 0.0f);
++    return DrawImpl(pDesc, 0.0f, 0.0f, nullptr);
+   }
+ 
+ 
+@@ -881,7 +881,20 @@ namespace dxvk {
+       return D3DERR_INVALIDCALL;
+     }
+ 
+-    return DrawImpl(pDesc, ShiftX, ShiftY);
++    return DrawImpl(pDesc, ShiftX, ShiftY, nullptr);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::DrawDepthStencil(const NVR_EXT_DRAW_DESC* pDesc, const NVR_EXT_DEPTH_STENCIL* pDepthStencil, FLOAT ShiftX, FLOAT ShiftY) {
++    if (unlikely(pDepthStencil == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(!(ShiftX > -1.0f && ShiftX < 1.0f && ShiftY > -1.0f && ShiftY < 1.0f))) {
++      Logger::err("NVR ext: DrawDepthStencil: the shift must be within (-1, 1) pixels");
++      return D3DERR_INVALIDCALL;
++    }
++
++    return DrawImpl(pDesc, ShiftX, ShiftY, pDepthStencil);
+   }
+ 
+ 
+@@ -937,7 +950,7 @@ namespace dxvk {
+   }
+ 
+ 
+-  HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY) {
++  HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY, const NVR_EXT_DEPTH_STENCIL* pDepthStencil) {
+     D3D9DeviceLock lock = m_device->LockDevice();
+ 
+     if (unlikely(pDesc == nullptr || pDesc->pPipeline == nullptr))
+@@ -1032,6 +1045,75 @@ namespace dxvk {
+       return D3DERR_INVALIDCALL;
+     }
+ 
++    // Depth-stencil attachment (1.6): the targets' size, single-sample; the tests as given, both faces alike
++    Rc<DxvkImageView> dsView;
++    DxvkDepthStencilState dsState = { };
++    float depthMin = 0.0f, depthMax = 1.0f;
++    uint32_t stencilRef = 0u;
++
++    if (pDepthStencil) {
++      const auto& d = *pDepthStencil;
++
++      if (unlikely(uint32_t(d.DepthCompare) > 7u || uint32_t(d.StencilCompare) > 7u || uint32_t(d.StencilPassOp) > 7u
++                || uint32_t(d.StencilFailOp) > 7u || uint32_t(d.StencilDepthFailOp) > 7u || !(d.Depth >= 0.0f && d.Depth <= 1.0f))) {
++        Logger::err("NVR ext: DrawDepthStencil: a compare function, stencil operation or depth out of range");
++        return D3DERR_INVALIDCALL;
++      }
++
++      TextureRef ref;
++      if (unlikely(!ResolveTexture(d.pResource, 0u, 0u, ref))) {
++        Logger::err("NVR ext: DrawDepthStencil: not a D3D9 texture or surface");
++        return D3DERR_INVALIDCALL;
++      }
++
++      Rc<DxvkImage> image = ref.texture->GetImage();
++
++      if (unlikely(image == nullptr || !(image->info().usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))) {
++        Logger::err("NVR ext: DrawDepthStencil: not a depth-stencil surface");
++        return D3DERR_INVALIDCALL;
++      }
++
++      VkExtent3D dsExtent = image->mipLevelExtent(ref.mipLevel);
++
++      if (unlikely(image->info().sampleCount != VK_SAMPLE_COUNT_1_BIT
++                || dsExtent.width != extent.width || dsExtent.height != extent.height)) {
++        Logger::err("NVR ext: DrawDepthStencil: the depth-stencil surface is multisampled or has another size than the targets");
++        return D3DERR_INVALIDCALL;
++      }
++
++      bool stencilWrites = d.StencilTest && (d.StencilWriteMask & 0xFFu)
++        && (d.StencilPassOp != NVR_EXT_STENCIL_KEEP || d.StencilFailOp != NVR_EXT_STENCIL_KEEP || d.StencilDepthFailOp != NVR_EXT_STENCIL_KEEP);
++      bool writes = (d.DepthTest && d.DepthWrite) || stencilWrites;
++
++      dsView = ref.texture->CreateView(ref.layer, ref.mipLevel, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
++        writes ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, false);
++
++      if (unlikely(dsView == nullptr)) {
++        Logger::err("NVR ext: DrawDepthStencil: no depth-stencil view of the surface");
++        return D3DERR_INVALIDCALL;
++      }
++
++      dsState.setDepthTest(d.DepthTest);
++      dsState.setDepthWrite(d.DepthTest && d.DepthWrite);
++      dsState.setDepthCompareOp(VkCompareOp(d.DepthCompare));
++      dsState.setStencilTest(d.StencilTest);
++
++      DxvkStencilOp op = { };
++      if (d.StencilTest) {
++        op.setFailOp(VkStencilOp(d.StencilFailOp));
++        op.setPassOp(VkStencilOp(d.StencilPassOp));
++        op.setDepthFailOp(VkStencilOp(d.StencilDepthFailOp));
++        op.setCompareOp(VkCompareOp(d.StencilCompare));
++        op.setCompareMask(d.StencilReadMask & 0xFFu);
++        op.setWriteMask(d.StencilWriteMask & 0xFFu);
++      }
++      dsState.setStencilOpFront(op);
++      dsState.setStencilOpBack(op);
++
++      depthMin = depthMax = d.Depth;
++      stencilRef = d.StencilReference & 0xFFu;
++    }
++
+     small_vector<D3D9NvrExtBound, 8> bound;
+ 
+     HRESULT hr = ResolveBindings(pipeline, pDesc->BindingCount, pDesc->pBindings, bound);
+@@ -1052,6 +1134,11 @@ namespace dxvk {
+       cRect        = rect,
+       cShiftX      = ShiftX,
+       cShiftY      = ShiftY,
++      cDsView      = std::move(dsView),
++      cDsState     = dsState,
++      cDepthMin    = depthMin,
++      cDepthMax    = depthMax,
++      cStencilRef  = stencilRef,
+       cBound       = std::move(bound),
+       cPush        = push,
+       cPushSize    = pipeline->GetPushSize()
+@@ -1071,12 +1158,13 @@ namespace dxvk {
+       DxvkRenderTargets rts;
+       for (uint32_t i = 0; i < cTargetCount; i++)
+         rts.color[i].view = cTargets[i].image->createView(cTargets[i].key);
++      rts.depth.view = cDsView;
+       ctx->bindRenderTargets(std::move(rts), 0u);
+ 
+       DxvkViewport viewport = { };
+       viewport.viewport = VkViewport {
+         float(cRect.offset.x) + cShiftX, float(cRect.offset.y) + cShiftY,
+-        float(cRect.extent.width), float(cRect.extent.height), 0.0f, 1.0f };
++        float(cRect.extent.width), float(cRect.extent.height), cDepthMin, cDepthMax };
+       viewport.scissor = cRect;
+       ctx->setViewports(1u, &viewport);
+ 
+@@ -1096,12 +1184,13 @@ namespace dxvk {
+       ms.setAlphaToCoverage(false);
+       ctx->setMultisampleState(ms);
+ 
+-      DxvkDepthStencilState ds = { };
+-      ds.setDepthTest(false);
+-      ds.setDepthWrite(false);
+-      ds.setStencilTest(false);
++      DxvkDepthStencilState ds = cDsState;   // all tests off without a depth-stencil attachment
++      ds.normalize();
+       ctx->setDepthStencilState(ds);
+ 
++      if (cDsView != nullptr)
++        ctx->setStencilReference(cStencilRef);
++
+       DxvkLogicOpState lo = { };
+       lo.setLogicOp(false, VK_LOGIC_OP_NO_OP);
+       ctx->setLogicOpState(lo);
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index a361463..5c3c57e 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -235,6 +235,12 @@ namespace dxvk {
+     HRESULT STDMETHODCALLTYPE GetProfile(
+             NVR_EXT_PROFILE*                pProfile);
+ 
++    HRESULT STDMETHODCALLTYPE DrawDepthStencil(
++      const NVR_EXT_DRAW_DESC*              pDesc,
++      const NVR_EXT_DEPTH_STENCIL*          pDepthStencil,
++            FLOAT                           ShiftX,
++            FLOAT                           ShiftY);
++
+   private:
+ 
+     struct TextureRef {
+@@ -251,11 +257,12 @@ namespace dxvk {
+ 
+     uint64_t m_profileOverhead100 = 0u;   // NVR profiling: the timer's own cost per call x 100 (SetProfiling)
+ 
+-    /** Draw and DrawShifted. */
++    /** Draw, DrawShifted and DrawDepthStencil (pDepthStencil null: none). */
+     HRESULT DrawImpl(
+       const NVR_EXT_DRAW_DESC*              pDesc,
+             float                           ShiftX,
+-            float                           ShiftY);
++            float                           ShiftY,
++      const NVR_EXT_DEPTH_STENCIL*          pDepthStencil);
+ 
+     /** Validates a binding list and resolves it for the CS thread (shared by Dispatch and Draw). */
+     HRESULT ResolveBindings(
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index f7ad6f0..8748f7f 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -45,7 +45,7 @@
+ #include <unknwn.h>
+ 
+ #define NVR_EXT_VERSION_MAJOR 1
+-#define NVR_EXT_VERSION_MINOR 5
++#define NVR_EXT_VERSION_MINOR 6
+ 
+ #define NVR_EXT_MAX_SLOTS       32
+ #define NVR_EXT_MAX_BINDINGS    32
+@@ -96,6 +96,30 @@ enum NVR_EXT_BLEND {
+ 
+ #define NVR_EXT_MAX_TARGETS 4
+ 
++/** Depth and stencil compare functions (since 1.6; the values are Vulkan's, D3DCMPFUNC minus 1). */
++enum NVR_EXT_COMPARE {
++  NVR_EXT_COMPARE_NEVER         = 0,
++  NVR_EXT_COMPARE_LESS          = 1,
++  NVR_EXT_COMPARE_EQUAL         = 2,
++  NVR_EXT_COMPARE_LESS_EQUAL    = 3,
++  NVR_EXT_COMPARE_GREATER       = 4,
++  NVR_EXT_COMPARE_NOT_EQUAL     = 5,
++  NVR_EXT_COMPARE_GREATER_EQUAL = 6,
++  NVR_EXT_COMPARE_ALWAYS        = 7,
++};
++
++/** Stencil operations (since 1.6; the values are Vulkan's, D3DSTENCILOP minus 1). */
++enum NVR_EXT_STENCIL_OP {
++  NVR_EXT_STENCIL_KEEP       = 0,
++  NVR_EXT_STENCIL_ZERO       = 1,
++  NVR_EXT_STENCIL_REPLACE    = 2,
++  NVR_EXT_STENCIL_INCR_CLAMP = 3,
++  NVR_EXT_STENCIL_DECR_CLAMP = 4,
++  NVR_EXT_STENCIL_INVERT     = 5,
++  NVR_EXT_STENCIL_INCR_WRAP  = 6,
++  NVR_EXT_STENCIL_DECR_WRAP  = 7,
++};
++
+ /** One descriptor the SPIR-V declares. */
+ struct NVR_EXT_BINDING_DESC {
+   UINT              Set;        // as in the SPIR-V
+@@ -183,6 +207,27 @@ struct NVR_EXT_TARGET {
+   BOOL      Srgb;       // write through the sRGB view of a sRGB-capable format
+ };
+ 
++/**
++ * A depth-stencil attachment for a full-screen pass, with its tests (since 1.6, DrawDepthStencil): e.g. a pass that runs
++ * only where an earlier pass left a stencil mark, as a D3D9 technique with StencilEnable does. Clear it with D3D9's Clear
++ * (it stays in order with the passes). Both faces use the same stencil state; the triangle's depth is Depth.
++ */
++struct NVR_EXT_DEPTH_STENCIL {
++  IUnknown*           pResource;          // a D3D9 depth-stencil surface (or depth texture) of the targets' size, single-sample
++  FLOAT               Depth;              // the full-screen triangle's depth, 0-1
++  BOOL                DepthTest;
++  BOOL                DepthWrite;
++  NVR_EXT_COMPARE     DepthCompare;
++  BOOL                StencilTest;
++  NVR_EXT_COMPARE     StencilCompare;
++  NVR_EXT_STENCIL_OP  StencilPassOp;      // the stencil and depth tests passed
++  NVR_EXT_STENCIL_OP  StencilFailOp;
++  NVR_EXT_STENCIL_OP  StencilDepthFailOp;
++  UINT                StencilReference;
++  UINT                StencilReadMask;
++  UINT                StencilWriteMask;
++};
++
+ struct NVR_EXT_DRAW_DESC {
+   struct ID3D9NvrExtPipeline*     pPipeline;
+   UINT                            TargetCount;      // = the pipeline's ColorTargetCount; all the same size
+@@ -421,6 +466,13 @@ ID3D9NvrExt : public IUnknown {
+   /** The profiling counters (since 1.5); cumulative, read twice and subtract. */
+   virtual HRESULT STDMETHODCALLTYPE GetProfile(
+           NVR_EXT_PROFILE*                pProfile) = 0;
++
++  /** Draw (or DrawShifted, a shift of 0 for none) with a depth-stencil attachment and its tests (since 1.6). */
++  virtual HRESULT STDMETHODCALLTYPE DrawDepthStencil(
++    const NVR_EXT_DRAW_DESC*              pDesc,
++    const NVR_EXT_DEPTH_STENCIL*          pDepthStencil,
++          FLOAT                           ShiftX,
++          FLOAT                           ShiftY) = 0;
+ };
+ 
+ #ifndef _MSC_VER
+-- 
+2.43.0
+

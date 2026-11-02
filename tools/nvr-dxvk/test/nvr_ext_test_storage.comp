@@ -1,0 +1,15 @@
+// Test-only: storage image + uniform buffer through the NVR extension.
+// Writes value + (x, y, 0, 0) into every texel of an RGBA16F D3D9 render-target texture.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D i_dst;
+layout(set = 1, binding = 1, std140) uniform Params { vec4 value; };
+
+layout(push_constant) uniform Push { uint width; uint height; } pc;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    if (pos.x >= int(pc.width) || pos.y >= int(pc.height)) return;
+    imageStore(i_dst, pos, value + vec4(float(pos.x), float(pos.y), 0.0, 0.0));
+}

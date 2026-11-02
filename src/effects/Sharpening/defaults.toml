@@ -1,0 +1,13 @@
+[_Shaders.Sharpening.Main]
+Clamp = 0.1
+Offset = 2.0
+Strength = 0.75
+
+[_Shaders.Sharpening.Interiors]
+Clamp = 0.1                         # UNOFFICIAL: the same settings for interiors (Main is outdoors).
+Offset = 2.0
+Strength = 0.75
+
+[_Shaders.Sharpening.Status]
+Enabled = false                     # Edge contrast shader to increase detail sharpness.
+

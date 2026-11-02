@@ -1,0 +1,167 @@
+// GPU grass: one thread per clump (effects/GpuGrass.cpp). A clump is a game grass tuft (the position, slope, size step and brightness
+// the game placed and packed into its instance table) or, with Density above 1, an extra clump of the same plant beside it on the
+// same slope. The thread keeps the game's own rule for which tufts the early grass draw shows (GrassFirst part 1: only those before
+// the fade start), culls the clump against the view, picks its strand count by distance (fewer, wider strands far away: the strands
+// together keep covering what the card's opaque texels cover), reserves that many records in the near list (5 triangles a strand)
+// or the far list (1 triangle) with ONE atomic, and writes each strand: root, Bezier control and tip (with the wind), width, colour
+// keys and the game's light amounts. The draw that follows reads the counts straight from the indirect arguments written here.
+//
+// Strand shape after NewGrass (core/NewGrass.h, NewGrass.vso.hlsl round 6): roots near the clump's centre, tips inside the card's own
+// silhouette at their height (its alpha edge per band, read from the card texture), lengths LengthMin..1 of the plant's height, bowed
+// out (Bend), drooping when they lean far (Droop). Ideas credited: Ghost of Tsushima's procedural grass (Eric Wohllaib, GDC 2021:
+// GPU-generated blades, hashed variation, fewer blades with distance), Jahrmann & Wimmer 2017 'Responsive Real-Time Grass
+// Rendering' (compute culling, width grows with distance).
+//
+// Build: glslangValidator -V --target-env vulkan1.1 -o GpuGrassCull.spv GpuGrassCull.comp (tools/nvr-dxvk/compile-compute.sh)
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#include "GpuGrass.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std140) uniform Frame { GG_FRAME_BLOCK } f;
+layout(set = 0, binding = 1, std430) readonly buffer Tufts { vec4 tufts[]; };       // the game's instance records, as uploaded
+layout(set = 0, binding = 2, std430) readonly buffer TuftDraw { uint tuftDraw[]; }; // which draw each tuft came from
+layout(set = 0, binding = 3, std430) readonly buffer Draws { GGDraw draws[]; };
+layout(set = 0, binding = 4, std430) writeonly buffer Blades { GGBlade blades[]; }; // near list [0, cap), far list [cap, 2 cap)
+layout(set = 0, binding = 5, std430) buffer Args {
+    uint nearArgs[4];   // VkDrawIndirectCommand: vertexCount 15, instanceCount (counted here), 0, 0
+    uint farArgs[4];    // vertexCount 3
+    uint stats[8];      // 0 clumps drawn, 1 clumps outside the view, 2 strands written, 3 strands that did not fit, 4 tufts past the fade start
+};
+
+void main() {
+    const uint tuftCount = uint(f.cam.w);
+    const uint maxClumps = max(uint(ceil(f.fade.z)), 1u);
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= tuftCount * maxClumps) return;
+    const uint t = id / maxClumps;
+    const uint c = id - t * maxClumps;
+
+    const vec4 inst = tufts[t];
+    const uint di = tuftDraw[t];
+    const GGDraw d = draws[di];
+    uint seed = ggSeed(inst.xy, c * 7919u + 13u);
+
+    // a fractional Density: the last extra clump of a tuft exists with the fraction's chance
+    if (c > 0u && ggRand(seed) >= f.fade.z - float(c)) return;
+
+    vec3 rel = inst.xyz - f.cam.xyz;
+
+    // the early grass draw shows only the tufts before the fade start (the game's metric: length(clip.x, clip.y, clip.w) with the
+    // reversed depth buffer; NVR's GRASS23x00*.vso): the fading ones stay the game's cards, drawn after the land
+    vec4 clip = vec4(dot(f.rows[0].xyz, rel) + f.rows[0].w, dot(f.rows[1].xyz, rel) + f.rows[1].w,
+                     dot(f.rows[2].xyz, rel) + f.rows[2].w, dot(f.rows[3].xyz, rel) + f.rows[3].w);
+    const uint flags = uint(d.scaleMask.w + 0.5);
+    if ((flags & 1u) != 0u && length(vec3(clip.xy, clip.w)) > f.fade.x) {
+        if (c == 0u) atomicAdd(stats[4], 1u);
+        return;
+    }
+
+    // packed per tuft: the slope normal (frac of xyz) and the light scale (frac of w), as the game's grass VS reads them
+    const vec4 fr = fract(inst);
+    const float lightScale = fr.w * 0.75 + 0.25;
+    const vec3 orient = normalize((fr.xyz - 0.5) * 2.0 + vec3(0.0, 0.0, 1e-4));
+    const vec3 up = (flags & 2u) != 0u ? normalize(vec3(0.0, 0.0, 1.0) + orient) : vec3(0.0, 0.0, 1.0);
+    const vec3 scale = (0.01 * inst.w) * d.scaleMask.xyz + 1.0;
+
+    // an extra clump stands beside its tuft, on the tuft's slope (the ground's tangent plane there)
+    if (c > 0u) {
+        float r = f.fade.w * sqrt(ggRand(seed));
+        float a = ggRand(seed) * 6.2831853;
+        vec2 o = vec2(cos(a), sin(a)) * r;
+        rel += vec3(o, -(orient.x * o.x + orient.y * o.y) / max(orient.z, 0.3));
+    }
+
+    const float plantH = d.shape.x * scale.z * f.shape.x * (c > 0u ? 0.8 + 0.4 * ggRand(seed) : 1.0);
+    const float halfW = d.shape.y * scale.x;
+
+    // outside the view (the side planes; a margin for the sway): nothing
+    const vec3 centre = rel + up * (plantH * 0.5);
+    const float radius = max(plantH, halfW * f.shape2.x) + 64.0;
+    for (int i = 0; i < 4; i++) {
+        if (dot(f.planes[i].xyz, centre) + f.planes[i].w < -radius) {
+            atomicAdd(stats[1], 1u);
+            return;
+        }
+    }
+
+    // strands: all of them up to LodNear, falling to the far count at LodFar; the share for a sparse card; 5 triangles each nearer
+    // than DetailDistance (the near list), 1 farther (the far list)
+    const float dist = length(rel);
+    const float s = clamp((dist - f.lod.x) * f.lod.y, 0.0, 1.0);
+    const float kf = max(mix(f.lod.z, f.lod.w, s) * d.sun.w, 1.0);
+    const uint k = uint(ceil(kf));
+    const bool far = dist >= f.shape3.w;
+    const uint cap = uint(f.misc.y);
+
+    uint base = far ? atomicAdd(farArgs[1], k) : atomicAdd(nearArgs[1], k);
+    atomicAdd(stats[0], 1u);
+    if (base >= cap) { atomicAdd(stats[3], k); return; }
+    const uint count = min(k, cap - base);
+    if (count < k) atomicAdd(stats[3], k - count);
+    atomicAdd(stats[2], count);
+    base += far ? cap : 0u;
+
+    // Width: the strands of a clump together cover Coverage x the card's opaque area (so fewer strands far away are wider and the
+    // field keeps its density), never thinner than the narrowest strand in pixels at this distance (no shimmer of sub-pixel strands).
+    const float meanLen = 0.5 * (1.0 + f.shape.z);
+    const float area = d.ambient.w * scale.x * scale.z * f.shape.y;
+    const float coverWidth = area / max(kf * plantH * meanLen * 0.66, 1.0);
+    const float pixelWidth = f.shape3.y * dist * f.shape3.z;
+
+    // the game's sway for this tuft: its phase from the tuft's place, its size from the weather (WindData), the card's weight by height
+    float phase = (inst.x + inst.y) * 0.0078125 + f.wind.w;
+    phase = fract(phase * 0.159154937 + 0.5) * 6.28318548 - 3.14159274;
+    const bool fieldWind = dot(f.lanes.xy, f.lanes.xy) > 0.0;
+
+    // the sun term exactly as the game lights its cards (the packed slope normal, the light scale, the grass dimmer)
+    const float sunAmount = clamp(dot(orient, f.sunDir.xyz), 0.0, 1.0) * lightScale * f.sunDir.w;
+    const uint lightPacked = packHalf2x16(vec2(lightScale, sunAmount));
+
+    for (uint i = 0u; i < count; i++) {
+        uint bs = ggSeed(inst.xy + vec2(float(c) * 3.7, float(c) * 1.9), i * 2654435761u + 1u);
+        const float h1 = ggRand(bs), h2 = ggRand(bs), h3 = ggRand(bs), h4 = ggRand(bs), h5 = ggRand(bs);
+        const float keep = clamp(kf - float(i), 0.0, 1.0);   // the last strand of a fractional count shrinks away (no popping)
+
+        const float len = mix(f.shape.z, 1.0, h1);
+        const float height = max(plantH * len * keep, 0.5);
+        // the tip lands inside the card's silhouette at that height: between half of and TipReach x its alpha edge
+        const float hb = len * 4.0 - 0.5;
+        const float rsil = hb < 1.0 ? mix(d.ramp[0].w, d.ramp[1].w, clamp(hb, 0.0, 1.0))
+                         : hb < 2.0 ? mix(d.ramp[1].w, d.ramp[2].w, hb - 1.0)
+                                    : mix(d.ramp[2].w, d.ramp[3].w, clamp(hb - 2.0, 0.0, 1.0));
+        const float rTip = halfW * rsil * f.shape2.x * (0.5 + 0.5 * h3);
+        const float ang = h2 * 6.2831853;
+        const vec3 away = vec3(cos(ang), sin(ang), 0.0);
+        const vec3 outDir = normalize(away - up * dot(away, up));
+        const vec3 side = normalize(cross(up, outDir));
+        const vec3 root = rel + outDir * (halfW * f.shape.w * h4);
+
+        // wind at the tip, as the card moves at that height (the game's sway, or the field wind), plus a flutter across
+        const float weight = clamp(d.shape.z + d.shape.w * height / scale.z, 0.0, 1.0);
+        const vec3 flutter = side * (sin(phase * 2.3 + h2 * 6.2831853) * f.wind.z * f.shape3.x * weight);
+        vec3 wind = fieldWind
+            ? ggWindMove(inst, f.lanes, f.misc.x, sin(phase), f.wind, weight, height)
+            : vec3(f.wind.xy * (sin(phase + h1 * 1.5) * f.wind.z * weight), 0.0);
+        wind += flutter;
+
+        // the Bezier: up and out to the tip on the silhouette, bowed (Bend), a far-leaning strand dropping its tip (Droop)
+        const float droop = f.shape2.z * clamp(rTip / height - 0.5, 0.0, 1.0) * height;
+        const vec3 tip = up * (height - droop) + outDir * rTip + wind;
+        const vec3 ctrl = up * (height * 0.6) + outDir * (rTip * f.shape2.w) + wind * 0.3;
+        const float width = max(coverWidth * (0.6 + 0.8 * h4) * keep, pixelWidth);
+
+        const uint angleQ = uint(h2 * 63.0 + 0.5) & 63u;
+        const uint seedQ = uint(h5 * 63.0 + 0.5) & 63u;
+        const uint lenQ = uint(len * 255.0 + 0.5) & 255u;
+
+        GGBlade b;
+        b.a = vec4(root, width);
+        b.tip = tip;
+        b.packed = (di & 0xFFFu) | (angleQ << 12) | (seedQ << 18) | (lenQ << 24);
+        b.ctrl = ctrl;
+        b.light = lightPacked;
+        blades[base + i] = b;
+    }
+}

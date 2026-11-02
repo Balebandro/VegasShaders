@@ -1,0 +1,336 @@
+#include "MenuSkin.h"
+#include "imgui.h"
+#include "imgui_internal.h"	// ImClamp
+#include <filesystem>
+#include <vector>
+#include <algorithm>
+#include <string>
+
+// 2026-11-02 menu skins (MenuSkin.h). A skin file, Data\VegasShaders\Skins\<anything>.toml (Paths::DataRoot):
+//
+//   Name = "Desert Night"          # shown in the dropdown (the file name if missing)
+//   Background = "22,23,26"        # the window, as R,G,B (0-255)
+//   Panel = "27,29,33"             # the sidebar and the settings list
+//   Field = "36,39,45"             # sliders, boxes, buttons
+//   Accent = "217,164,65"          # ticks, slider handles, the selected entry
+//   Text = "230,227,220"
+//   Rounding = 6.0                 # corner radius in pixels (0 = square)
+//   Opacity = 0.97                 # the window's opacity (0.5-1)
+//   Image = "dunes.png"            # optional background picture, next to the file (png, jpg, dds, bmp)
+//   ImageOpacity = 0.25            # how strongly it shows (0-1)
+//   ImageFit = "cover"             # cover (fill, crop the overflow), contain (whole picture, bars) or stretch
+//
+// Every ImGui colour is mixed from those five, so the menu stays readable whatever the colours.
+
+namespace MenuSkin {
+namespace {
+	struct Skin {
+		std::string name, file, image, fit = "cover";
+		ImVec4 background, panel, field, accent, text;
+		float rounding = 6.0f, opacity = 0.97f, imageOpacity = 0.25f;
+	};
+
+	std::string SkinDir() { return std::string(Paths::DataRoot()) + "Skins\\"; }	// Data\VegasShaders\Skins\ (or the old Data\NVR\Skins\)
+	constexpr const char* Section = "Main.Menu.Style";
+
+	std::vector<Skin> Skins;
+	int Current = 0;
+	IDirect3DTexture9* Picture = nullptr;
+	ImVec2 PictureSize;
+
+	ImVec4 Rgb(int r, int g, int b, float a = 1.0f) { return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a); }
+	ImVec4 Mix(const ImVec4& a, const ImVec4& b, float t) { return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t); }
+	ImVec4 Alpha(ImVec4 c, float a) { c.w = a; return c; }
+
+	void BuiltIns() {
+		Skins.clear();
+		// Default: charcoal with a muted amber, the desert at dusk rather than a neon sign.
+		Skins.push_back({ "Default", "", "", "cover", Rgb(22, 23, 26), Rgb(27, 29, 33), Rgb(37, 40, 46), Rgb(214, 162, 72), Rgb(228, 225, 218), 6.0f, 0.97f });
+		Skins.push_back({ "Pip-Boy", "", "", "cover", Rgb(6, 16, 9), Rgb(9, 22, 12), Rgb(14, 34, 19), Rgb(88, 230, 128), Rgb(170, 245, 190), 2.0f, 0.96f });
+		Skins.push_back({ "Vault-Tec", "", "", "cover", Rgb(14, 26, 46), Rgb(18, 33, 58), Rgb(27, 46, 78), Rgb(242, 194, 48), Rgb(232, 238, 248), 4.0f, 0.97f });
+	}
+
+	bool ParseColour(const std::string& s, ImVec4& out) {
+		int r, g, b;
+		if (sscanf_s(s.c_str(), "%d , %d , %d", &r, &g, &b) != 3) return false;
+		out = Rgb(ImClamp(r, 0, 255), ImClamp(g, 0, 255), ImClamp(b, 0, 255));
+		return true;
+	}
+
+	std::string Str(const tomlValue& doc, const char* key, const std::string& fallback) {
+		return doc.contains(key) && doc.at(key).is_string() ? doc.at(key).as_string().str : fallback;
+	}
+	float Num(const tomlValue& doc, const char* key, float fallback) {
+		if (!doc.contains(key)) return fallback;
+		const tomlValue& v = doc.at(key);
+		return v.is_floating() ? (float)v.as_floating() : v.is_integer() ? (float)v.as_integer() : fallback;
+	}
+
+	// The built-ins, then every readable file in the skin folder (a file whose Name matches a built-in replaces it).
+	void Scan() {
+		BuiltIns();
+		std::error_code ec;
+		for (const auto& entry : std::filesystem::directory_iterator(SkinDir(), ec)) {
+			if (entry.path().extension() != ".toml") continue;
+			try {
+				tomlValue doc = toml::parse<toml::preserve_comments, std::map>(entry.path().string());
+				Skin s = Skins[0];
+				s.file = entry.path().string();
+				s.name = Str(doc, "Name", entry.path().stem().string());
+				ParseColour(Str(doc, "Background", ""), s.background);
+				ParseColour(Str(doc, "Panel", ""), s.panel);
+				ParseColour(Str(doc, "Field", ""), s.field);
+				ParseColour(Str(doc, "Accent", ""), s.accent);
+				ParseColour(Str(doc, "Text", ""), s.text);
+				s.rounding = ImClamp(Num(doc, "Rounding", s.rounding), 0.0f, 16.0f);
+				s.opacity = ImClamp(Num(doc, "Opacity", s.opacity), 0.5f, 1.0f);
+				s.image = Str(doc, "Image", "");
+				s.imageOpacity = ImClamp(Num(doc, "ImageOpacity", s.imageOpacity), 0.0f, 1.0f);
+				s.fit = Str(doc, "ImageFit", "cover");
+				bool replaced = false;
+				for (auto& existing : Skins) if (_stricmp(existing.name.c_str(), s.name.c_str()) == 0) { existing = s; replaced = true; }
+				if (!replaced) Skins.push_back(s);
+			}
+			catch (const std::exception& err) {
+				Logger::Log("MenuSkin: cannot read %s: %s", entry.path().string().c_str(), err.what());
+			}
+		}
+	}
+
+	void LoadPicture(const Skin& s) {
+		if (Picture) { Picture->Release(); Picture = nullptr; }
+		if (s.image.empty() || s.file.empty()) return;
+		const std::string path = (std::filesystem::path(s.file).parent_path() / s.image).string();
+		D3DXIMAGE_INFO info = {};
+		if (FAILED(D3DXCreateTextureFromFileExA(TheRenderManager->device, path.c_str(), D3DX_DEFAULT_NONPOW2, D3DX_DEFAULT_NONPOW2, 1, 0,
+				D3DFMT_UNKNOWN, D3DPOOL_MANAGED, D3DX_DEFAULT, D3DX_DEFAULT, 0, &info, nullptr, &Picture))) {
+			Logger::Log("MenuSkin: cannot load the background picture %s", path.c_str());
+			Picture = nullptr;
+			return;
+		}
+		PictureSize = ImVec2((float)info.Width, (float)info.Height);
+	}
+
+	void ApplySkin(const Skin& s) {
+		ImGuiStyle& style = ImGui::GetStyle();
+		style = ImGuiStyle();	// the stock sizes, then ours
+
+		style.WindowPadding = ImVec2(14.0f, 12.0f);
+		style.FramePadding = ImVec2(10.0f, 4.0f);
+		style.CellPadding = ImVec2(8.0f, 5.0f);
+		style.ItemSpacing = ImVec2(8.0f, 7.0f);
+		style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+		style.IndentSpacing = 0.0f;			// the settings list indents its own groups
+		style.ScrollbarSize = 11.0f;
+		style.GrabMinSize = 9.0f;
+		style.WindowBorderSize = 1.0f;
+		style.ChildBorderSize = 1.0f;
+		style.PopupBorderSize = 1.0f;
+		style.FrameBorderSize = 0.0f;
+		style.TabBorderSize = 0.0f;
+		style.WindowTitleAlign = ImVec2(0.5f, 0.5f);
+		style.WindowMenuButtonPosition = ImGuiDir_None;
+		style.ColorButtonPosition = ImGuiDir_Right;
+		style.DisabledAlpha = 0.5f;
+
+		const float r = s.rounding;
+		style.WindowRounding = r;
+		style.ChildRounding = r;
+		style.PopupRounding = r;
+		style.FrameRounding = r * 0.6f;
+		style.GrabRounding = r * 0.6f;
+		style.TabRounding = r * 0.6f;
+		style.ScrollbarRounding = r;
+
+		const ImVec4 bg = s.background, panel = s.panel, field = s.field, acc = s.accent, text = s.text;
+		const ImVec4 black(0.0f, 0.0f, 0.0f, 1.0f), white(1.0f, 1.0f, 1.0f, 1.0f);
+		const float childAlpha = Picture ? 0.55f : 1.0f;	// a background picture shows through the panels
+		ImVec4* c = style.Colors;
+		c[ImGuiCol_Text] = text;
+		c[ImGuiCol_TextDisabled] = Mix(text, bg, 0.5f);
+		c[ImGuiCol_WindowBg] = Alpha(bg, s.opacity);
+		c[ImGuiCol_ChildBg] = Alpha(panel, childAlpha);
+		c[ImGuiCol_PopupBg] = Alpha(Mix(bg, white, 0.03f), 0.98f);
+		c[ImGuiCol_Border] = Alpha(Mix(bg, text, 0.12f), 1.0f);
+		c[ImGuiCol_BorderShadow] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+		c[ImGuiCol_FrameBg] = field;
+		c[ImGuiCol_FrameBgHovered] = Mix(field, acc, 0.15f);
+		c[ImGuiCol_FrameBgActive] = Mix(field, acc, 0.25f);
+		c[ImGuiCol_TitleBg] = Mix(bg, black, 0.25f);
+		c[ImGuiCol_TitleBgActive] = Mix(bg, acc, 0.12f);
+		c[ImGuiCol_TitleBgCollapsed] = Alpha(Mix(bg, black, 0.25f), 0.75f);
+		c[ImGuiCol_MenuBarBg] = panel;
+		c[ImGuiCol_ScrollbarBg] = Alpha(bg, 0.0f);
+		c[ImGuiCol_ScrollbarGrab] = Mix(field, text, 0.12f);
+		c[ImGuiCol_ScrollbarGrabHovered] = Mix(field, text, 0.25f);
+		c[ImGuiCol_ScrollbarGrabActive] = Mix(field, acc, 0.6f);
+		c[ImGuiCol_CheckMark] = acc;
+		c[ImGuiCol_SliderGrab] = Mix(acc, field, 0.15f);
+		c[ImGuiCol_SliderGrabActive] = Mix(acc, white, 0.2f);
+		c[ImGuiCol_Button] = Mix(field, text, 0.04f);
+		c[ImGuiCol_ButtonHovered] = Mix(field, acc, 0.3f);
+		c[ImGuiCol_ButtonActive] = Mix(field, acc, 0.5f);
+		c[ImGuiCol_Header] = Mix(panel, acc, 0.14f);
+		c[ImGuiCol_HeaderHovered] = Mix(panel, acc, 0.24f);
+		c[ImGuiCol_HeaderActive] = Mix(panel, acc, 0.34f);
+		c[ImGuiCol_Separator] = Mix(bg, text, 0.12f);
+		c[ImGuiCol_SeparatorHovered] = Mix(bg, acc, 0.6f);
+		c[ImGuiCol_SeparatorActive] = acc;
+		c[ImGuiCol_ResizeGrip] = Alpha(acc, 0.15f);
+		c[ImGuiCol_ResizeGripHovered] = Alpha(acc, 0.5f);
+		c[ImGuiCol_ResizeGripActive] = Alpha(acc, 0.8f);
+		c[ImGuiCol_Tab] = Mix(bg, field, 0.5f);
+		c[ImGuiCol_TabHovered] = Mix(field, acc, 0.3f);
+		c[ImGuiCol_TabActive] = Mix(field, acc, 0.18f);
+		c[ImGuiCol_TabUnfocused] = Mix(bg, field, 0.4f);
+		c[ImGuiCol_TabUnfocusedActive] = Mix(bg, field, 0.8f);
+		c[ImGuiCol_DockingPreview] = Alpha(acc, 0.5f);
+		c[ImGuiCol_DockingEmptyBg] = bg;
+		c[ImGuiCol_PlotLines] = Mix(text, bg, 0.3f);
+		c[ImGuiCol_PlotLinesHovered] = acc;
+		c[ImGuiCol_PlotHistogram] = acc;
+		c[ImGuiCol_PlotHistogramHovered] = Mix(acc, white, 0.2f);
+		c[ImGuiCol_TableHeaderBg] = Mix(panel, field, 0.5f);
+		c[ImGuiCol_TableBorderStrong] = Mix(bg, text, 0.15f);
+		c[ImGuiCol_TableBorderLight] = Mix(bg, text, 0.08f);
+		c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+		c[ImGuiCol_TableRowBgAlt] = Alpha(text, 0.03f);
+		c[ImGuiCol_TextSelectedBg] = Alpha(acc, 0.35f);
+		c[ImGuiCol_DragDropTarget] = acc;
+		c[ImGuiCol_NavHighlight] = acc;
+		c[ImGuiCol_NavWindowingHighlight] = Alpha(acc, 0.7f);
+		c[ImGuiCol_NavWindowingDimBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.4f);
+		c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.45f);
+	}
+
+	void Select(int index) {
+		Current = ImClamp(index, 0, (int)Skins.size() - 1);
+		LoadPicture(Skins[Current]);
+		ApplySkin(Skins[Current]);
+	}
+
+	// The current skin as a file in the skin folder, to edit by hand. Returns the path ("" on failure).
+	std::string Export() {
+		const Skin& s = Skins[Current];
+		std::error_code ec;
+		std::filesystem::create_directories(SkinDir(), ec);
+		std::string base = s.name;
+		for (char& ch : base) if (strchr("\\/:*?\"<>|", ch)) ch = '_';
+		std::string path = SkinDir() + base + " (copy).toml";
+		for (int n = 2; std::filesystem::exists(path); n++) path = SkinDir() + base + " (copy " + std::to_string(n) + ").toml";
+		FILE* f = nullptr;
+		if (fopen_s(&f, path.c_str(), "w") || !f) return "";
+		auto col = [](const ImVec4& v) { char b[32]; sprintf_s(b, "\"%d,%d,%d\"", (int)(v.x * 255 + 0.5f), (int)(v.y * 255 + 0.5f), (int)(v.z * 255 + 0.5f)); return std::string(b); };
+		fprintf(f, "# Menu skin: edit the values, then pick it from the Skin dropdown (it re-reads this folder when opened).\n");
+		fprintf(f, "Name = \"%s (copy)\"\n", s.name.c_str());
+		fprintf(f, "Background = %s     # the window, R,G,B 0-255\n", col(s.background).c_str());
+		fprintf(f, "Panel = %s          # the sidebar and the settings list\n", col(s.panel).c_str());
+		fprintf(f, "Field = %s          # sliders, boxes, buttons\n", col(s.field).c_str());
+		fprintf(f, "Accent = %s         # ticks, slider handles, the selected entry\n", col(s.accent).c_str());
+		fprintf(f, "Text = %s\n", col(s.text).c_str());
+		fprintf(f, "Rounding = %.1f              # corner radius in pixels, 0 = square\n", s.rounding);
+		fprintf(f, "Opacity = %.2f              # the window's opacity, 0.5-1\n", s.opacity);
+		fprintf(f, "Image = \"%s\"                 # optional background picture in this folder (png, jpg, dds, bmp)\n", s.image.c_str());
+		fprintf(f, "ImageOpacity = %.2f         # 0-1\n", s.imageOpacity);
+		fprintf(f, "ImageFit = \"%s\"           # cover, contain or stretch\n", s.fit.c_str());
+		fclose(f);
+		return path;
+	}
+}
+
+void Apply() {
+	Scan();
+	char saved[80] = {};
+	TheSettingManager->GetSettingS(Section, "Skin", saved);
+	int index = 0;
+	for (int i = 0; i < (int)Skins.size(); i++) if (_stricmp(Skins[i].name.c_str(), saved) == 0) index = i;
+	Select(index);
+}
+
+void DrawBackground() {
+	// The saved choice can change without the dropdown (a preset, the console's SetSettingS, a test shot list): follow it.
+	char saved[80] = {};
+	TheSettingManager->GetSettingS(Section, "Skin", saved);
+	if (saved[0] != '"' && !Skins.empty() && _stricmp(saved, Skins[Current].name.c_str()) != 0) {
+		if (std::none_of(Skins.begin(), Skins.end(), [&](const Skin& k) { return _stricmp(k.name.c_str(), saved) == 0; })) Scan();
+		for (int i = 0; i < (int)Skins.size(); i++) if (_stricmp(Skins[i].name.c_str(), saved) == 0) { Select(i); break; }
+	}
+	if (!Picture) return;
+	const Skin& s = Skins[Current];
+	const ImVec2 wpos = ImGui::GetWindowPos(), wsize = ImGui::GetWindowSize();
+	ImVec2 uv0(0.0f, 0.0f), uv1(1.0f, 1.0f), pmin = wpos, pmax(wpos.x + wsize.x, wpos.y + wsize.y);
+	const float winAspect = wsize.x / ImMax(wsize.y, 1.0f), picAspect = PictureSize.x / ImMax(PictureSize.y, 1.0f);
+	if (s.fit == "contain") {
+		if (picAspect > winAspect) { const float h = wsize.x / picAspect; pmin.y += (wsize.y - h) * 0.5f; pmax.y = pmin.y + h; }
+		else { const float w = wsize.y * picAspect; pmin.x += (wsize.x - w) * 0.5f; pmax.x = pmin.x + w; }
+	}
+	else if (s.fit != "stretch") {	// cover: crop the overflow
+		if (picAspect > winAspect) { const float u = winAspect / picAspect; uv0.x = (1.0f - u) * 0.5f; uv1.x = uv0.x + u; }
+		else { const float v = picAspect / winAspect; uv0.y = (1.0f - v) * 0.5f; uv1.y = uv0.y + v; }
+	}
+	ImGui::GetWindowDrawList()->AddImageRounded((ImTextureID)Picture, pmin, pmax, uv0, uv1,
+		ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, s.imageOpacity)), ImGui::GetStyle().WindowRounding);
+}
+
+void DrawPicker() {
+	static std::string exported;
+	ImGui::Text("Skin:");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(ImGui::CalcTextSize("Vault-Tec").x + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 4.0f);
+	if (ImGui::BeginCombo("##skin", Skins.empty() ? "" : Skins[Current].name.c_str())) {
+		if (ImGui::IsWindowAppearing()) {	// pick up files added while the game runs
+			const std::string name = Skins[Current].name;
+			Scan();
+			Current = 0;
+			for (int i = 0; i < (int)Skins.size(); i++) if (Skins[i].name == name) Current = i;
+		}
+		for (int i = 0; i < (int)Skins.size(); i++) {
+			if (ImGui::Selectable(Skins[i].name.c_str(), i == Current)) {
+				Select(i);
+				TheSettingManager->SetSettingS(Section, "Skin", Skins[i].name.substr(0, 79).c_str());
+				TheSettingManager->LoadSettings();
+			}
+			if (ImGui::IsItemHovered() && !Skins[i].file.empty()) ImGui::SetTooltip("%s", Skins[i].file.c_str());
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::SameLine();
+	if (ImGui::SmallButton("Export")) exported = Export();
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(exported.empty() ? "Writes this skin to %s as a file to edit: your own colours and a background picture."
+			: "Written to %s", exported.empty() ? SkinDir().c_str() : exported.c_str());
+}
+
+void DrawMenu() {
+	static std::string exported;
+	if (ImGui::IsWindowAppearing()) {	// the submenu just opened: pick up files added while the game runs
+		const std::string name = Skins.empty() ? std::string() : Skins[Current].name;
+		Scan();
+		Current = 0;
+		for (int i = 0; i < (int)Skins.size(); i++) if (Skins[i].name == name) Current = i;
+	}
+	for (int i = 0; i < (int)Skins.size(); i++) {
+		if (ImGui::MenuItem(Skins[i].name.c_str(), nullptr, i == Current)) {
+			Select(i);
+			TheSettingManager->SetSettingS(Section, "Skin", Skins[i].name.substr(0, 79).c_str());
+			TheSettingManager->LoadSettings();
+		}
+		if (ImGui::IsItemHovered() && !Skins[i].file.empty()) ImGui::SetTooltip("%s", Skins[i].file.c_str());
+	}
+	ImGui::Separator();
+	if (ImGui::MenuItem("Export this skin...")) exported = Export();
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(exported.empty() ? "Writes this skin to %s as a file to edit: your own colours and a background picture."
+			: "Written to %s", exported.empty() ? SkinDir().c_str() : exported.c_str());
+}
+
+ImVec4 Heading(float towardText) {
+	if (Skins.empty()) return ImVec4(1.0f, 0.85f, 0.45f, 1.0f);
+	return Mix(Skins[Current].accent, Skins[Current].text, towardText);
+}
+
+void Release() {
+	if (Picture) { Picture->Release(); Picture = nullptr; }
+}
+
+}

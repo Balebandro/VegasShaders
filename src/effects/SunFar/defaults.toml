@@ -1,0 +1,3 @@
+[_Shaders.SunFar.Status]
+Enabled = true                       # (2026-10-19) The pass that draws the mountain and cloud shadows above. It only runs while one of them is on.
+

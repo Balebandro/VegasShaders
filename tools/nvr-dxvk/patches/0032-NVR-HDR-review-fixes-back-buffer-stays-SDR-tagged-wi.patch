@@ -1,0 +1,199 @@
+From 3d28fd9dc075f67562c3ce2672a33ab0dd6338db Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 16:58:26 -0400
+Subject: [PATCH 32/32] NVR: HDR review fixes: back buffer stays SDR-tagged
+ with NVR HDR on; desktop-only HDR swap chain made without FSE; bounded
+ re-asks
+
+- PresentImage: while NVR's HDR output is on the back buffer keeps its SRGB tag (cColorSpace = SRGB then): with an SDR swap chain
+  from the driver it was re-tagged HDR10 / scRGB and the blit decoded the SDR picture as PQ / linear.
+- HDR offered only without full-screen exclusive: the swap chain is now made without it (Presenter::setFullscreenExclusiveOff:
+  m_fullscreenMode for every query and the swap chain), so it is created from the list that offers HDR; back to dxvk.allowFse
+  when HDR output goes off. Logged.
+- SetHdrOutput checks the surface only on a mode change or an identical re-ask (not for every nits / flags change); a re-ask that
+  cannot help returns S_FALSE without a rebuild; a mode change resets the logged swap format so the next present logs what it got.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 6c0f8051ca7f2dd824198215f4990bba52744614)
+---
+ src/d3d9/d3d9_nvr_hdr.cpp   | 67 +++++++++++++++++++++++++------------
+ src/d3d9/d3d9_nvr_hdr.h     |  1 +
+ src/d3d9/d3d9_swapchain.cpp |  6 ++--
+ src/dxvk/dxvk_presenter.cpp | 15 +++++++++
+ src/dxvk/dxvk_presenter.h   |  7 ++++
+ 5 files changed, 72 insertions(+), 24 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_hdr.cpp b/src/d3d9/d3d9_nvr_hdr.cpp
+index 9b1fd07..b263228 100755
+--- a/src/d3d9/d3d9_nvr_hdr.cpp
++++ b/src/d3d9/d3d9_nvr_hdr.cpp
+@@ -164,31 +164,56 @@ namespace dxvk {
+     if (pOutput->Mode == NVR_EXT_HDR_SCRGB) colorSpace = VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+ 
+     const Rc<Presenter>& presenter = swapchain->m_wctx->presenter;
++    D3D9NvrHdrState& state = swapchain->m_nvrHdr;
++    const bool changed = state.mode != pOutput->Mode || state.paperWhiteNits != paperWhite || state.peakNits != peak;
++    const bool same = !changed && state.hudThreshold == std::clamp(float(pOutput->HudThreshold), 0.0f, 1.0f) && state.flags == pOutput->Flags;
+ 
+-    if (pOutput->Mode != NVR_EXT_HDR_OFF && !presenter->supportsColorSpace(colorSpace)) {
+-      // With full-screen exclusive allowed, the driver's own SDR exclusive picture can hold the display in SDR, and the list may then
+-      // lack HDR although the desktop has it. If the list without full-screen exclusive offers it, try: the swap chain is rebuilt
+-      // (which ends the SDR exclusive picture); an SDR swap chain from the driver is shown as SDR and reported (GetHdrInfo ActiveMode).
+-      const VkColorSpaceKHR partner = colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ? VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT : VK_COLOR_SPACE_HDR10_ST2084_EXT;
+-      bool desktop = false;
++    // Asked again with the same settings while the swap chain the driver gave is SDR (NVR does this a few times, and on alt-tab)
++    const bool reask = same && pOutput->Mode != NVR_EXT_HDR_OFF && !D3D9NvrHdrState::IsHdr(state.swapColorSpace);
++    bool rebuild = false;
++    bool fseOff = state.fseOff;
+ 
+-      if (m_device->GetDXVKDevice()->config().allowFse && m_device->GetDXVKDevice()->features().extFullScreenExclusive) {
+-        for (const auto& f : presenter->listSurfaceFormats(true))
+-          desktop |= f.colorSpace == colorSpace || f.colorSpace == partner;
++    // The surface check runs on a mode change or a re-ask only (not for every nits / flags change, e.g. a slider being dragged)
++    if (pOutput->Mode != NVR_EXT_HDR_OFF && (state.mode != pOutput->Mode || reask)) {
++      if (presenter->supportsColorSpace(colorSpace)) {
++        rebuild = true;
++      } else {
++        // With full-screen exclusive allowed, the driver's own SDR exclusive picture can hold the display in SDR, and the list may
++        // then lack HDR although the desktop has it. If the list without full-screen exclusive offers it, this swap chain is made
++        // without full-screen exclusive (from that list: the desktop compositor shows it in HDR); still SDR is shown as SDR and
++        // reported (GetHdrInfo ActiveMode).
++        const VkColorSpaceKHR partner = colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ? VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT : VK_COLOR_SPACE_HDR10_ST2084_EXT;
++        bool desktop = false;
++
++        if (m_device->GetDXVKDevice()->config().allowFse && m_device->GetDXVKDevice()->features().extFullScreenExclusive) {
++          for (const auto& f : presenter->listSurfaceFormats(true))
++            desktop |= f.colorSpace == colorSpace || f.colorSpace == partner;
++        }
++
++        if (!desktop) {
++          Logger::warn(str::format("NVR ext: HDR: the surface does not offer ", NvrHdrModeName(pOutput->Mode),
++            reask ? " (asked again)" : "; output stays SDR (Windows HDR has to be on for this display)", "; ", NvrHdrSurfaceText(m_device, presenter)));
++          return reask ? S_FALSE : D3DERR_NOTAVAILABLE;   // a re-ask leaves the mode on (shown as SDR while the swap chain is)
++        }
++
++        Logger::info(str::format("NVR ext: HDR: ", NvrHdrModeName(pOutput->Mode), " is offered only without full-screen exclusive: ",
++          "the HDR swap chain is made without it (", NvrHdrSurfaceText(m_device, presenter), ")"));
++        fseOff = true;
++        rebuild = true;
+       }
++    }
+ 
+-      if (!desktop) {
+-        Logger::warn(str::format("NVR ext: HDR: the surface does not offer ", NvrHdrModeName(pOutput->Mode),
+-          "; output stays SDR (Windows HDR has to be on for this display); ", NvrHdrSurfaceText(m_device, presenter)));
+-        return D3DERR_NOTAVAILABLE;
+-      }
++    if (pOutput->Mode == NVR_EXT_HDR_OFF)
++      fseOff = false;
+ 
+-      Logger::info(str::format("NVR ext: HDR: ", NvrHdrModeName(pOutput->Mode), " is offered only without full-screen exclusive: trying (",
+-        NvrHdrSurfaceText(m_device, presenter), ")"));
+-    }
++    if (state.mode != pOutput->Mode)
++      state.swapFormat = VK_FORMAT_UNDEFINED;   // the first present after a mode change logs the swap chain it got
+ 
+-    D3D9NvrHdrState& state = swapchain->m_nvrHdr;
+-    const bool changed = state.mode != pOutput->Mode || state.paperWhiteNits != paperWhite || state.peakNits != peak;
++    if (fseOff != state.fseOff) {
++      state.fseOff = fseOff;
++      presenter->setFullscreenExclusiveOff(fseOff);
++      Logger::info(str::format("NVR ext: HDR: full-screen exclusive ", fseOff ? "off for the HDR swap chain" : "as dxvk.allowFse says again"));
++    }
+ 
+     state.mode           = pOutput->Mode;
+     state.paperWhiteNits = paperWhite;
+@@ -224,8 +249,8 @@ namespace dxvk {
+       state.marked = false;
+     }
+ 
+-    if (!changed && swapchain->m_colorspace == colorSpace && state.mode != NVR_EXT_HDR_OFF && !D3D9NvrHdrState::IsHdr(state.swapColorSpace)) {
+-      // Asked again (same settings) while the driver's swap chain is SDR: rebuild it once more (the display may be back in HDR now)
++    if (reask && rebuild && swapchain->m_colorspace == colorSpace) {
++      // Asked again while the driver's swap chain is SDR, and the surface offers HDR now: rebuild it once more
+       presenter->invalidateSwapChain();
+       Logger::info(str::format("NVR ext: HDR: ", NvrHdrModeName(state.mode), " asked again while the swap chain is ", state.swapColorSpace, ": rebuilt on the next present"));
+     }
+diff --git a/src/d3d9/d3d9_nvr_hdr.h b/src/d3d9/d3d9_nvr_hdr.h
+index fb4b44f..a8165c7 100755
+--- a/src/d3d9/d3d9_nvr_hdr.h
++++ b/src/d3d9/d3d9_nvr_hdr.h
+@@ -36,6 +36,7 @@ namespace dxvk {
+     int32_t           loggedSupport   = -1;      // GetHdrInfo logs the surface's HDR support when it changes
+     VkColorSpaceKHR   swapColorSpace  = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;   // of the swap image last presented to
+     VkFormat          swapFormat      = VK_FORMAT_UNDEFINED;
++    bool              fseOff          = false;   // HDR offered only without full-screen exclusive: this swap chain has none
+ 
+     static bool IsHdr(VkColorSpaceKHR colorSpace) {
+       return colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT || colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT;
+diff --git a/src/d3d9/d3d9_swapchain.cpp b/src/d3d9/d3d9_swapchain.cpp
+index 1da4c64..2bcf8ec 100644
+--- a/src/d3d9/d3d9_swapchain.cpp
++++ b/src/d3d9/d3d9_swapchain.cpp
+@@ -974,7 +974,7 @@ namespace dxvk {
+         cNvrHdr         = std::move(nvrHdr),
+         cCaptureImage   = std::move(nvrCaptureImage),
+         cCaptureBuffer  = std::move(nvrCaptureBuffer),
+-        cColorSpace     = m_colorspace,
++        cColorSpace     = m_nvrHdr.mode != NVR_EXT_HDR_OFF ? VK_COLOR_SPACE_SRGB_NONLINEAR_KHR : m_colorspace,
+         cSrcView        = swapImageView,
+         cSrcRect        = srcRect,
+         cDstView        = backBuffer->createView(viewInfo),
+@@ -983,8 +983,8 @@ namespace dxvk {
+         cFrameId        = m_wctx->frameId,
+         cLatency        = m_latencyTracker
+       ] (DxvkContext* ctx) {
+-        // Update back buffer color space as necessary (not with NVR HDR: the back buffer stays SDR)
+-        if (!cNvrHdr.enabled && cSrcView->image()->info().colorSpace != cColorSpace) {
++        // Update back buffer color space as necessary (with NVR HDR on it stays SDR: cColorSpace is SRGB then)
++        if (cSrcView->image()->info().colorSpace != cColorSpace) {
+           DxvkImageUsageInfo usage = { };
+           usage.colorSpace = cColorSpace;
+ 
+diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+index 55f4c7a..2aeb50a 100644
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -354,6 +354,21 @@ namespace dxvk {
+   }
+ 
+ 
++  void Presenter::setFullscreenExclusiveOff(bool disallow) {
++    std::lock_guard lock(m_surfaceMutex);
++
++    // m_fullscreenMode is chained into every surface query and the swap chain itself, so all of them follow
++    VkFullScreenExclusiveEXT mode = (!disallow && m_device->config().allowFse)
++      ? VK_FULL_SCREEN_EXCLUSIVE_ALLOWED_EXT
++      : VK_FULL_SCREEN_EXCLUSIVE_DISALLOWED_EXT;
++
++    if (m_fullscreenMode != mode) {
++      m_fullscreenMode = mode;
++      m_dirtySwapchain = true;
++    }
++  }
++
++
+   void Presenter::invalidateSurface() {
+     std::lock_guard lock(m_surfaceMutex);
+ 
+diff --git a/src/dxvk/dxvk_presenter.h b/src/dxvk/dxvk_presenter.h
+index a3c496a..f0ec0a0 100644
+--- a/src/dxvk/dxvk_presenter.h
++++ b/src/dxvk/dxvk_presenter.h
+@@ -210,6 +210,13 @@ namespace dxvk {
+      */
+     void invalidateSwapChain();
+ 
++    /**
++     * \brief NVR: swap chains without full-screen exclusive while \c disallow is set (dxvk.allowFse otherwise)
++     *
++     * For an HDR swap chain the driver offers only to the desktop compositor. Recreates the swap chain if it changes.
++     */
++    void setFullscreenExclusiveOff(bool disallow);
++
+     /**
+      * \brief Invalidates Vulkan surface
+      *
+-- 
+2.43.0
+

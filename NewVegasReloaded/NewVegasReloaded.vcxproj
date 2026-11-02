@@ -1,0 +1,447 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>16.0</VCProjectVersion>
+    <ProjectGuid>{202EAF20-2D42-4CBC-9E44-A9677A70B586}</ProjectGuid>
+    <RootNamespace>NewVegasReloaded</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v142</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <LinkIncremental>true</LinkIncremental>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+    <IncludePath>$(IncludePath)</IncludePath>
+    <LibraryPath>$(LibraryPath)</LibraryPath>
+    <OutDir>$(SolutionDir)$(ProjectName)\$(Configuration)\</OutDir>
+    <TargetName>VegasShaders</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <LinkIncremental>false</LinkIncremental>
+    <EnableMicrosoftCodeAnalysis>false</EnableMicrosoftCodeAnalysis>
+    <IncludePath>$(IncludePath)</IncludePath>
+    <LibraryPath>$(LibraryPath)</LibraryPath>
+    <OutDir>$(SolutionDir)$(ProjectName)\$(Configuration)\</OutDir>
+    <TargetName>VegasShaders</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>Disabled</Optimization>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;_USE_MATH_DEFINES;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeaderFile>
+      </PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>$(SolutionDir)\Core;$(SolutionDir)lib\imgui;$(SolutionDir)lib\imgui\backends;$(SolutionDir)lib\reshade;$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles>$(SolutionDir)\src\NewVegas\Framework.h</ForcedIncludeFiles>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <ModuleDefinitionFile>Exports.def</ModuleDefinitionFile>
+      <AdditionalDependencies>dxguid.lib;version.lib;$(SolutionDir)lib\Nvidia\x86\nvapi.lib;$(SolutionDir)lib\Bink\binkw32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PreBuildEvent>
+      <Command>call "$(ProjectDir)..\tools\nvr-build-commit.cmd" "$(ProjectDir).." "$(IntDir)"</Command>
+      <Message>NVR: the git commit for the log (NvrBuildCommit.h)</Message>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <PrecompiledHeader>
+      </PrecompiledHeader>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;_USE_MATH_DEFINES;_CRT_SECURE_NO_WARNINGS;NEWVEGAS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PrecompiledHeaderFile>
+      </PrecompiledHeaderFile>
+      <AdditionalIncludeDirectories>$(SolutionDir)\Core;$(SolutionDir)lib\imgui;$(SolutionDir)lib\imgui\backends;$(SolutionDir)lib\reshade;$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles>$(SolutionDir)\src\NewVegas\Framework.h</ForcedIncludeFiles>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <EnableCOMDATFolding>false</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
+      <EnableUAC>false</EnableUAC>
+      <ModuleDefinitionFile>Exports.def</ModuleDefinitionFile>
+      <AdditionalDependencies>dxguid.lib;version.lib;$(SolutionDir)lib\Nvidia\x86\nvapi.lib;$(SolutionDir)lib\Bink\binkw32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+    <PreBuildEvent>
+      <Command>call "$(ProjectDir)..\tools\nvr-build-commit.cmd" "$(ProjectDir).." "$(IntDir)"</Command>
+      <Message>NVR: the git commit for the log (NvrBuildCommit.h)</Message>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\base\Logger.cpp" />
+    <ClCompile Include="..\src\base\PluginVersion.cpp" />
+    <ClCompile Include="..\src\base\SafeWrite.cpp" />
+    <ClCompile Include="..\src\core\BinkManager.cpp" />
+    <ClCompile Include="..\src\core\TerrainErosion.cpp" />
+    <ClCompile Include="..\src\core\CameraManager.cpp" />
+    <ClCompile Include="..\src\core\CommandManager.cpp" />
+    <ClCompile Include="..\src\core\Device\Device.cpp" />
+    <ClCompile Include="..\src\core\Device\Hook.cpp" />
+    <ClCompile Include="..\src\core\EffectRecord.cpp" />
+    <ClCompile Include="..\src\core\ReShadeIntegration.cpp" />
+    <ClCompile Include="..\src\core\FrameRateManager.cpp" />
+    <ClCompile Include="..\src\core\GameEventManager.cpp" />
+    <ClCompile Include="..\src\core\GameMenuManager.cpp" />
+    <ClCompile Include="..\src\core\ImGuiManager.cpp" />
+    <ClCompile Include="..\src\core\Hooks\FormsCommon.cpp" />
+    <ClCompile Include="..\src\core\Hooks\GameCommon.cpp" />
+    <ClCompile Include="..\src\core\PresetManager.cpp" />
+    <ClCompile Include="..\src\core\RenderManager.cpp" />
+    <ClCompile Include="..\src\core\RenderPass.cpp" />
+    <ClCompile Include="..\src\core\SettingManager.cpp" />
+    <ClCompile Include="..\src\core\ShaderCollection.cpp" />
+    <ClCompile Include="..\src\core\ShaderManager.cpp" />
+    <ClCompile Include="..\src\core\EffectChain.cpp" />
+    <ClCompile Include="..\src\core\ShaderRecord.cpp" />
+    <ClCompile Include="..\src\core\ShadowManager.cpp" />
+    <ClCompile Include="..\src\core\TextureManager.cpp" />
+    <ClCompile Include="..\src\core\TextureRecord.cpp" />
+    <ClCompile Include="..\src\effects\AmbientOcclusion\AmbientOcclusion.cpp" />
+    <ClCompile Include="..\src\effects\Animator.cpp" />
+    <ClCompile Include="..\src\core\Sm6Pass.cpp" />
+    <ClCompile Include="..\src\core\DxvkCompute.cpp" />
+    <ClCompile Include="..\src\core\SessionLog.cpp" />
+    <ClCompile Include="..\src\core\Paths.cpp" />
+    <ClCompile Include="..\src\core\Diagnostics.cpp" />
+    <ClCompile Include="..\src\core\HiZ.cpp" />
+    <ClCompile Include="..\src\core\PixelInspector.cpp" />
+    <ClCompile Include="..\src\core\MenuSkin.cpp" />
+    <ClCompile Include="..\src\core\MenuWidgets.cpp" />
+    <ClCompile Include="..\src\core\MenuTools.cpp" />
+    <ClCompile Include="..\src\effects\AvgLuma\AvgLuma.cpp" />
+    <ClCompile Include="..\src\effects\SkyView\SkyView.cpp" />
+    <ClCompile Include="..\src\effects\AmbientLight\AmbientLight.cpp" />
+    <ClCompile Include="..\src\effects\BloodLens\BloodLens.cpp" />
+    <ClCompile Include="..\src\effects\BarrelHaze\BarrelHaze.cpp" />
+    <ClCompile Include="..\src\effects\Bloom\Bloom.cpp" />
+    <ClCompile Include="..\src\effects\BloomLegacy\BloomLegacy.cpp" />
+    <ClCompile Include="..\src\effects\Cinema\Cinema.cpp" />
+    <ClCompile Include="..\src\effects\DitherBuster\DitherBuster.cpp" />
+    <ClCompile Include="..\src\effects\Coloring\Coloring.cpp" />
+    <ClCompile Include="..\src\effects\LUT\LUT.cpp" />
+    <ClCompile Include="..\src\effects\CombineDepth\CombineDepth.cpp" />
+    <ClCompile Include="..\src\effects\Debug\Debug.cpp" />
+    <ClCompile Include="..\src\effects\DepthOfField\DepthOfField.cpp" />
+    <ClCompile Include="..\src\effects\Exposure\Exposure.cpp" />
+    <ClCompile Include="..\src\effects\Flashlight\Flashlight.cpp" />
+    <ClCompile Include="..\src\effects\FlashlightBeam\FlashlightBeam.cpp" />
+    <ClCompile Include="..\src\effects\GodRays\GodRays.cpp" />
+    <ClCompile Include="..\src\effects\Grass\Grass.cpp" />
+    <ClCompile Include="..\src\effects\Particles\Particles.cpp" />
+    <ClCompile Include="..\src\effects\ImageAdjust\ImageAdjust.cpp" />
+    <ClCompile Include="..\src\effects\Lens\Lens.cpp" />
+    <ClCompile Include="..\src\effects\LowHF\LowHF.cpp" />
+    <ClCompile Include="..\src\effects\MotionBlur\MotionBlur.cpp" />
+    <ClCompile Include="..\src\effects\Normals\Normals.cpp" />
+    <ClCompile Include="..\src\effects\PBR\PBR.cpp" />
+    <ClCompile Include="..\src\effects\POM\POM.cpp" />
+    <ClCompile Include="..\src\effects\PointShadows2\PointShadows2.cpp" />
+    <ClCompile Include="..\src\effects\PointShadows\PointShadows.cpp" />
+    <ClCompile Include="..\src\effects\Precipitations\Rain.cpp" />
+    <ClCompile Include="..\src\effects\GpuParticles\GpuParticles.cpp" />
+    <ClCompile Include="..\src\effects\Grass\GpuGrass.cpp" />
+    <ClCompile Include="..\src\effects\SMAA\SMAA.cpp" />
+    <ClCompile Include="..\src\effects\FXAA\FXAA.cpp" />
+    <ClCompile Include="..\src\effects\TAA\TAA.cpp" />
+    <ClCompile Include="..\src\effects\TAA\TAAFSR.cpp" />
+    <ClCompile Include="..\src\effects\TAA\TAAUpscale.cpp" />
+    <ClCompile Include="..\src\core\Upscaler.cpp" />
+    <ClCompile Include="..\src\core\UpscalerDlss.cpp" />
+    <ClCompile Include="..\src\core\UpscalerFsr31.cpp" />
+    <ClCompile Include="..\src\core\RtCore.cpp" />
+    <ClCompile Include="..\src\core\RtSunShadows.cpp" />
+    <ClCompile Include="..\src\core\RtDenoise.cpp" />
+    <ClCompile Include="..\src\effects\ShadowsExteriors\ShadowsExterior.cpp" />
+    <ClCompile Include="..\src\effects\ShadowsInteriors\ShadowsInteriors.cpp" />
+    <ClCompile Include="..\src\effects\Sharpening\Sharpening.cpp" />
+    <ClCompile Include="..\src\effects\HeatHaze\HeatHaze.cpp" />
+    <ClCompile Include="..\src\effects\Sandstorm\Sandstorm.cpp" />
+    <ClCompile Include="..\src\effects\VolumetricLight\VolumetricLight.cpp" />
+    <ClCompile Include="..\src\effects\SkyDither\SkyDither.cpp" />
+    <ClCompile Include="..\src\effects\Terrain\LandHeights.cpp" />
+    <ClCompile Include="..\src\effects\TerrainShadows\TerrainShadows.cpp" />
+    <ClCompile Include="..\src\effects\SunFar\SunFar.cpp" />
+    <ClCompile Include="..\src\effects\Grass\GrassCollision.cpp" />
+    <ClCompile Include="..\src\effects\Bodycam\Bodycam.cpp" />
+    <ClCompile Include="..\src\effects\Reflections\Reflections.cpp" />
+    <ClCompile Include="..\src\effects\VolumetricClouds\VolumetricClouds.cpp" />
+    <ClCompile Include="..\src\effects\BloodFlow\BloodFlow.cpp" />
+    <ClCompile Include="..\src\effects\BloodFlow\BloodFluid.cpp" />
+    <ClCompile Include="..\src\effects\BounceLight\BounceLight.cpp" />
+    <ClCompile Include="..\src\effects\Skin\Skin.cpp" />
+    <ClCompile Include="..\src\effects\SkinScattering\SkinScattering.cpp" />
+    <ClCompile Include="..\src\effects\Sky\Sky.cpp" />
+    <ClCompile Include="..\src\effects\Snow\Snow.cpp" />
+    <ClCompile Include="..\src\effects\SnowAccumulation\SnowAccumulation.cpp" />
+    <ClCompile Include="..\src\effects\Specular\Specular.cpp" />
+    <ClCompile Include="..\src\effects\SunShadows\SunShadows.cpp" />
+    <ClCompile Include="..\src\effects\Terrain\Terrain.cpp" />
+    <ClCompile Include="..\src\effects\Tonemapping\Tonemapping.cpp" />
+    <ClCompile Include="..\src\effects\Underwater\Underwater.cpp" />
+    <ClCompile Include="..\src\effects\VolumetricFog\VolumetricFog.cpp" />
+    <ClCompile Include="..\src\effects\VolumetricSmoke\VolumetricSmoke.cpp" />
+    <ClCompile Include="..\src\effects\Water\Water.cpp" />
+    <ClCompile Include="..\src\effects\WaterLens\WaterLens.cpp" />
+    <ClCompile Include="..\src\effects\WetWorld\WetWorld.cpp" />
+    <ClCompile Include="..\src\effects\CoverMap\CoverMap.cpp" />
+    <ClCompile Include="..\lib\Detours\detours.cpp" />
+    <ClCompile Include="..\lib\Detours\disasm.cpp" />
+    <ClCompile Include="..\lib\Detours\modules.cpp" />
+    <ClCompile Include="..\lib\imgui\imgui.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_demo.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_draw.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_tables.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_widgets.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\backends\imgui_impl_dx9.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\backends\imgui_impl_win32.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\src\NewVegas\Hooks\FlyCam.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\Game.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\Hooks.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\MaterialPass.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\Render.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\Settings.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\ShaderIO.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\Shaders.cpp" />
+    <ClCompile Include="..\src\NewVegas\Hooks\Shadows.cpp" />
+    <ClCompile Include="..\src\NewVegas\Managers.cpp" />
+    <ClInclude Include="..\src\base\Logger.h" />
+    <ClInclude Include="..\src\base\LogScrub.h" />
+    <ClInclude Include="..\src\core\SessionLog.h" />
+    <ClInclude Include="..\src\core\Diagnostics.h" />
+    <ClInclude Include="..\src\core\EffectStatus.h" />
+    <ClInclude Include="..\src\core\FlashRule.h" />
+    <ClInclude Include="..\src\core\SettingChanges.h" />
+    <ClInclude Include="..\src\base\PluginVersion.h" />
+    <ClInclude Include="..\src\base\SafeWrite.h" />
+    <ClInclude Include="..\src\base\Types.h" />
+    <ClInclude Include="..\src\base\Utils.h" />
+    <ClInclude Include="..\src\core\BinkManager.h" />
+    <ClInclude Include="..\src\core\CameraManager.h" />
+    <ClInclude Include="..\src\core\CommandManager.h" />
+    <ClInclude Include="..\src\core\Device\Device.h" />
+    <ClInclude Include="..\src\core\Device\Hook.h" />
+    <ClInclude Include="..\src\core\EffectRecord.h" />
+    <ClInclude Include="..\src\core\ReShadeIntegration.h" />
+    <ClInclude Include="..\src\core\FrameRateManager.h" />
+    <ClInclude Include="..\src\core\GameEventManager.h" />
+    <ClInclude Include="..\src\core\GameMenuManager.h" />
+    <ClInclude Include="..\src\core\Sm6Pass.h" />
+    <ClInclude Include="..\src\core\DxvkCompute.h" />
+    <ClInclude Include="..\src\core\RtCore.h" />
+    <ClInclude Include="..\src\core\RtSunShadows.h" />
+    <ClInclude Include="..\src\core\RtDenoise.h" />
+    <ClInclude Include="..\src\core\HiZ.h" />
+    <ClInclude Include="..\src\core\Upscaler.h" />
+    <ClInclude Include="..\src\core\PixelInspector.h" />
+    <ClInclude Include="..\src\core\MenuSkin.h" />
+    <ClInclude Include="..\src\core\MenuWidgets.h" />
+    <ClInclude Include="..\src\core\MenuTools.h" />
+    <ClInclude Include="..\src\core\Branding.h" />
+    <ClInclude Include="..\src\core\Paths.h" />
+    <ClInclude Include="..\src\core\ShaderCounters.h" />
+    <ClInclude Include="..\src\core\NvrDxvkExt.h" />
+    <ClInclude Include="..\src\core\GpuProfiler.h" />
+    <ClInclude Include="..\src\core\ImGuiManager.h" />
+    <ClInclude Include="..\src\core\Hooks\FormsCommon.h" />
+    <ClInclude Include="..\src\core\Hooks\GameCommon.h" />
+    <ClInclude Include="..\src\core\PresetManager.h" />
+    <ClInclude Include="..\src\core\RenderManager.h" />
+    <ClInclude Include="..\src\core\RenderPass.h" />
+    <ClInclude Include="..\src\core\SettingManager.h" />
+    <ClInclude Include="..\src\core\ShaderCollection.h" />
+    <ClInclude Include="..\src\core\ShaderManager.h" />
+    <ClInclude Include="..\src\core\EffectChain.h" />
+    <ClInclude Include="..\src\core\ShaderRecord.h" />
+    <ClInclude Include="..\src\core\ShadowManager.h" />
+    <ClInclude Include="..\src\core\TextureManager.h" />
+    <ClInclude Include="..\src\core\TextureRecord.h" />
+    <ClInclude Include="..\src\effects\AmbientOcclusion\AmbientOcclusion.h" />
+    <ClInclude Include="..\src\effects\Animator.h" />
+    <ClInclude Include="..\src\effects\AvgLuma\AvgLuma.h" />
+    <ClInclude Include="..\src\effects\SkyView\SkyView.h" />
+    <ClInclude Include="..\src\effects\Sky\PhysSkyModel.h" />
+    <ClInclude Include="..\src\effects\AmbientLight\AmbientLight.h" />
+    <ClInclude Include="..\src\effects\BloodLens\BloodLens.h" />
+    <ClInclude Include="..\src\effects\Bloom\Bloom.h" />
+    <ClInclude Include="..\src\effects\BloomLegacy\BloomLegacy.h" />
+    <ClInclude Include="..\src\effects\Cinema\Cinema.h" />
+    <ClInclude Include="..\src\effects\DitherBuster\DitherBuster.h" />
+    <ClInclude Include="..\src\effects\Coloring\Coloring.h" />
+    <ClInclude Include="..\src\effects\LUT\LUT.h" />
+    <ClInclude Include="..\src\effects\LUT\LUTIdentity.h" />
+    <ClInclude Include="..\src\effects\CombineDepth\CombineDepth.h" />
+    <ClInclude Include="..\src\effects\Debug\Debug.h" />
+    <ClInclude Include="..\src\effects\DepthOfField\DepthOfField.h" />
+    <ClInclude Include="..\src\effects\Effects.h" />
+    <ClInclude Include="..\src\effects\Exposure\Exposure.h" />
+    <ClInclude Include="..\src\effects\Flashlight\Flashlight.h" />
+    <ClInclude Include="..\src\effects\FlashlightBeam\FlashlightBeam.h" />
+    <ClInclude Include="..\src\effects\GodRays\GodRays.h" />
+    <ClInclude Include="..\src\effects\Grass\Grass.h" />
+    <ClInclude Include="..\src\effects\Particles\Particles.h" />
+    <ClInclude Include="..\src\effects\ImageAdjust\ImageAdjust.h" />
+    <ClInclude Include="..\src\effects\Lens\Lens.h" />
+    <ClInclude Include="..\src\effects\LowHF\LowHF.h" />
+    <ClInclude Include="..\src\effects\MotionBlur\MotionBlur.h" />
+    <ClInclude Include="..\src\effects\Normals\Normals.h" />
+    <ClInclude Include="..\src\effects\PBR\PBR.h" />
+    <ClInclude Include="..\src\effects\PointShadows\PointShadows.h" />
+    <ClInclude Include="..\src\effects\PointShadows2\PointShadows2.h" />
+    <ClInclude Include="..\src\effects\POM\POM.h" />
+    <ClInclude Include="..\src\effects\Precipitations\Rain.h" />
+    <ClInclude Include="..\src\effects\GpuParticles\GpuParticles.h" />
+    <ClInclude Include="..\src\effects\Grass\GpuGrass.h" />
+    <ClInclude Include="..\src\effects\SMAA\SMAA.h" />
+    <ClInclude Include="..\src\effects\FXAA\FXAA.h" />
+    <ClInclude Include="..\src\effects\TAA\TAA.h" />
+    <ClInclude Include="..\src\effects\ShadowsExteriors\ShadowsExterior.h" />
+    <ClInclude Include="..\src\effects\ShadowsInteriors\ShadowsInteriors.h" />
+    <ClInclude Include="..\src\effects\Sharpening\Sharpening.h" />
+    <ClInclude Include="..\src\effects\HeatHaze\HeatHaze.h" />
+    <ClInclude Include="..\src\effects\Sandstorm\Sandstorm.h" />
+    <ClInclude Include="..\src\effects\VolumetricLight\VolumetricLight.h" />
+    <ClInclude Include="..\src\effects\SkyDither\SkyDither.h" />
+    <ClInclude Include="..\src\effects\Terrain\LandHeights.h" />
+    <ClInclude Include="..\src\effects\TerrainShadows\TerrainShadows.h" />
+    <ClInclude Include="..\src\effects\SunFar\SunFar.h" />
+    <ClInclude Include="..\src\effects\Grass\GrassCollision.h" />
+    <ClInclude Include="..\src\effects\Bodycam\Bodycam.h" />
+    <ClInclude Include="..\src\effects\Bodycam\BodycamAudio.h" />
+    <ClInclude Include="..\src\effects\Reflections\Reflections.h" />
+    <ClInclude Include="..\src\effects\VolumetricClouds\VolumetricClouds.h" />
+    <ClInclude Include="..\src\effects\BloodFlow\BloodFlow.h" />
+    <ClInclude Include="..\src\effects\BloodFlow\BloodFlowBoxes.h" />
+    <ClInclude Include="..\src\effects\BloodFlow\BloodFluid.h" />
+    <ClInclude Include="..\src\effects\BounceLight\BounceLight.h" />
+    <ClInclude Include="..\src\effects\BounceLight\BounceLightMath.h" />
+    <ClInclude Include="..\src\effects\Skin\Skin.h" />
+    <ClInclude Include="..\src\effects\SkinScattering\SkinScattering.h" />
+    <ClInclude Include="..\src\effects\Sky\Sky.h" />
+    <ClInclude Include="..\src\effects\Snow\Snow.h" />
+    <ClInclude Include="..\src\effects\SnowAccumulation\SnowAccumulation.h" />
+    <ClInclude Include="..\src\effects\Specular\Specular.h" />
+    <ClInclude Include="..\src\effects\SunShadows\SunShadows.h" />
+    <ClInclude Include="..\src\effects\Terrain\Terrain.h" />
+    <ClInclude Include="..\src\effects\Tonemapping\Tonemapping.h" />
+    <ClInclude Include="..\src\effects\Underwater\Underwater.h" />
+    <ClInclude Include="..\src\effects\VolumetricFog\VolumetricFog.h" />
+    <ClInclude Include="..\src\effects\Water\Water.h" />
+    <ClInclude Include="..\src\effects\WaterLens\WaterLens.h" />
+    <ClInclude Include="..\src\effects\WetWorld\WetWorld.h" />
+    <ClInclude Include="..\src\effects\CoverMap\CoverMap.h" />
+    <ClInclude Include="..\lib\Bink\bink.h" />
+    <ClInclude Include="..\lib\Bink\radbase.h" />
+    <ClInclude Include="..\lib\Detours\detours.h" />
+    <ClInclude Include="..\lib\Nvidia\nvapi.h" />
+    <ClInclude Include="..\lib\imgui\imgui.h" />
+    <ClInclude Include="..\lib\imgui\imgui_internal.h" />
+    <ClInclude Include="..\lib\imgui\backends\imgui_impl_dx9.h" />
+    <ClInclude Include="..\lib\imgui\backends\imgui_impl_win32.h" />
+    <ClInclude Include="..\src\NewVegas\Base.h" />
+    <ClInclude Include="..\src\NewVegas\Defines.h" />
+    <ClInclude Include="..\src\NewVegas\Framework.h" />
+    <ClInclude Include="..\src\NewVegas\nvse\class_vtbls.h" />
+    <ClInclude Include="..\src\NewVegas\nvse\Game.h" />
+    <ClInclude Include="..\src\NewVegas\nvse\GameHavok.h" />
+    <ClInclude Include="..\src\NewVegas\nvse\GameNi.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\FlyCam.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\Game.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\Hooks.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\MaterialPass.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\Render.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\Settings.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\ShaderIO.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\Shaders.h" />
+    <ClInclude Include="..\src\NewVegas\Hooks\Shadows.h" />
+    <ClInclude Include="..\src\NewVegas\Managers.h" />
+    <ClInclude Include="..\src\NewVegas\Plugin.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\NewVegas\nvse\GameNi.cpp" />
+    <ClCompile Include="Main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Exports.def" />
+    <None Include="packages.config" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="NewVegasReloaded.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\packages\Microsoft.DXSDK.D3DX.9.29.952.8\build\native\Microsoft.DXSDK.D3DX.targets" Condition="Exists('..\packages\Microsoft.DXSDK.D3DX.9.29.952.8\build\native\Microsoft.DXSDK.D3DX.targets')" />
+  </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\packages\Microsoft.DXSDK.D3DX.9.29.952.8\build\native\Microsoft.DXSDK.D3DX.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.DXSDK.D3DX.9.29.952.8\build\native\Microsoft.DXSDK.D3DX.targets'))" />
+  </Target>
+</Project>

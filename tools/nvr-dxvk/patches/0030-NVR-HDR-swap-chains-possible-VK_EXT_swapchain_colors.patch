@@ -1,0 +1,194 @@
+From 828cce8bf2acc38deb22f612667d4ec1c80411a1 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 15:49:38 -0400
+Subject: [PATCH 30/32] NVR: HDR swap chains possible
+ (VK_EXT_swapchain_colorspace enabled with the instance) + HDR switch logged
+
+VK_EXT_swapchain_colorspace is an instance extension, but DXVK 3.0.1 lists it only in the device extension table
+(dxvk_device_info.cpp), where it is never found ("extSwapchainColorSpace : 0" in every log), so it was never enabled.
+Without it the driver offers only SRGB_NONLINEAR surface formats: ID3D9NvrExtHdr::SetHdrOutput could never get an HDR10
+or scRGB swap chain and NVR's HDR output stayed SDR. DxvkInstanceExtensionInfo now has it, enabled whenever the loader
+offers it (as DXVK 2.x did; "Enabled instance extensions" lists it). SDR output is unchanged (SRGB_NONLINEAR is still
+picked for the SDR colour space).
+
+Logging: GetHdrInfo logs what the display offers (HDR10 / scRGB, each time that changes) with the extension state,
+dxvk.allowFse and the surface formats (Presenter::listSurfaceFormats); a refused SetHdrOutput logs the same; a colour
+space switch logs old -> new and the back buffer format. The presenter's "Actual swapchain properties" block also shows
+the requested format / colour space next to the one it got. The switch itself was already right: setSurfaceFormat marks
+the swap chain dirty and the next present's acquire recreates it, the path Reset and resizes take, windowed or full
+screen (full-screen exclusive is ALLOWED / DISALLOWED, never application-controlled, so nothing is acquired again).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit a0553e7e11b79977a0a79bc512aec723071e8dd9)
+---
+ src/d3d9/d3d9_nvr_hdr.cpp   | 37 +++++++++++++++++++++++++++++++++++--
+ src/d3d9/d3d9_nvr_hdr.h     |  1 +
+ src/dxvk/dxvk_instance.cpp  |  1 +
+ src/dxvk/dxvk_instance.h    |  3 +++
+ src/dxvk/dxvk_presenter.cpp | 16 ++++++++++++++++
+ src/dxvk/dxvk_presenter.h   |  7 +++++++
+ 6 files changed, 63 insertions(+), 2 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_hdr.cpp b/src/d3d9/d3d9_nvr_hdr.cpp
+index d0e5482..f82ad41 100755
+--- a/src/d3d9/d3d9_nvr_hdr.cpp
++++ b/src/d3d9/d3d9_nvr_hdr.cpp
+@@ -21,6 +21,22 @@ namespace dxvk {
+   }
+ 
+ 
++  // For the log: what the surface offers, the colour space extension and full-screen exclusive (DXVK notes Windows may need it
++  // for HDR; dxvk.allowFse).
++  static std::string NvrHdrSurfaceText(D3D9DeviceEx* pDevice, const Rc<Presenter>& presenter) {
++    const Rc<DxvkDevice>& device = pDevice->GetDXVKDevice();
++
++    std::string formats;
++    for (const auto& f : presenter->listSurfaceFormats())
++      formats += str::format(formats.empty() ? "" : ", ", f.format, " / ", f.colorSpace);
++
++    return str::format("VK_EXT_swapchain_colorspace ",
++      device->instance()->extensions().extSwapchainColorSpace.specVersion ? "on" : "OFF (driver offers SDR only)",
++      ", full-screen exclusive ", device->config().allowFse ? "allowed" : "off (dxvk.allowFse = False)",
++      ", surface formats: ", formats.empty() ? std::string("none") : formats);
++  }
++
++
+   D3D9NvrExtHdr::D3D9NvrExtHdr(D3D9DeviceEx* pDevice)
+   : m_device(pDevice) {
+ 
+@@ -98,6 +114,13 @@ namespace dxvk {
+     pInfo->SupportsHdr10 = presenter->supportsColorSpace(VK_COLOR_SPACE_HDR10_ST2084_EXT);
+     pInfo->SupportsScRgb = presenter->supportsColorSpace(VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT);
+ 
++    const int32_t support = (pInfo->SupportsHdr10 ? 1 : 0) | (pInfo->SupportsScRgb ? 2 : 0);
++    if (std::exchange(swapchain->m_nvrHdr.loggedSupport, support) != support) {
++      Logger::info(str::format("NVR ext: HDR: display offers HDR10 ", pInfo->SupportsHdr10 ? "yes" : "no",
++        ", scRGB ", pInfo->SupportsScRgb ? "yes" : "no",
++        support ? "" : " (Windows HDR has to be on for this display)", "; ", NvrHdrSurfaceText(m_device, presenter)));
++    }
++
+     D3D9VkExtOutputMetadata desc = { };
+     if (SUCCEEDED(swapchain->m_swapchainExt.GetCurrentOutputDesc(&desc))) {
+       pInfo->DisplayMinNits          = desc.MinLuminance;
+@@ -132,7 +155,8 @@ namespace dxvk {
+     const Rc<Presenter>& presenter = swapchain->m_wctx->presenter;
+ 
+     if (pOutput->Mode != NVR_EXT_HDR_OFF && !presenter->supportsColorSpace(colorSpace)) {
+-      Logger::warn(str::format("NVR ext: HDR: the surface does not offer ", NvrHdrModeName(pOutput->Mode), "; output stays SDR"));
++      Logger::warn(str::format("NVR ext: HDR: the surface does not offer ", NvrHdrModeName(pOutput->Mode),
++        "; output stays SDR (Windows HDR has to be on for this display); ", NvrHdrSurfaceText(m_device, presenter)));
+       return D3DERR_NOTAVAILABLE;
+     }
+ 
+@@ -174,8 +198,17 @@ namespace dxvk {
+     }
+ 
+     if (swapchain->m_colorspace != colorSpace) {
++      const VkColorSpaceKHR oldColorSpace = swapchain->m_colorspace;
+       swapchain->m_colorspace = colorSpace;
+-      presenter->setSurfaceFormat(swapchain->GetSurfaceFormat());
++
++      // Marks the swap chain dirty: the next present's acquire destroys and recreates it (the path Reset and resizes take,
++      // windowed or full screen; full-screen exclusive is ALLOWED / DISALLOWED, never application-controlled, so there is no
++      // exclusive mode to acquire again). The presenter logs the swap chain it gets ("Actual swapchain properties").
++      const VkSurfaceFormatKHR surfaceFormat = swapchain->GetSurfaceFormat();
++      presenter->setSurfaceFormat(surfaceFormat);
++
++      Logger::info(str::format("NVR ext: HDR: swap chain colour space ", oldColorSpace, " -> ", colorSpace,
++        " (back buffer ", surfaceFormat.format, "), recreated on the next present"));
+     }
+ 
+     if (changed) {
+diff --git a/src/d3d9/d3d9_nvr_hdr.h b/src/d3d9/d3d9_nvr_hdr.h
+index a03dfe6..4b6a1b4 100755
+--- a/src/d3d9/d3d9_nvr_hdr.h
++++ b/src/d3d9/d3d9_nvr_hdr.h
+@@ -33,6 +33,7 @@ namespace dxvk {
+     Rc<DxvkImage>     gain;           // copy of NVR's gain
+     bool              marked          = false;   // ref/gain hold this frame's data
+     bool              warnedMark      = false;
++    int32_t           loggedSupport   = -1;      // GetHdrInfo logs the surface's HDR support when it changes
+ 
+     bool              captureRequested = false;
+     bool              captureRecorded  = false;
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index a19304e..87df91a 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -416,6 +416,7 @@ namespace dxvk {
+     return {{
+       &extensions.extDebugUtils,
+       &extensions.extSurfaceMaintenance1,
++      &extensions.extSwapchainColorSpace,
+       &extensions.khrGetSurfaceCapabilities2,
+       &extensions.khrSurface,
+       &extensions.khrSurfaceMaintenance1,
+diff --git a/src/dxvk/dxvk_instance.h b/src/dxvk/dxvk_instance.h
+index b302ae0..dd532e7 100644
+--- a/src/dxvk/dxvk_instance.h
++++ b/src/dxvk/dxvk_instance.h
+@@ -28,6 +28,9 @@ namespace dxvk {
+   struct DxvkInstanceExtensionInfo {
+     VkExtensionProperties extDebugUtils               = vk::makeExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+     VkExtensionProperties extSurfaceMaintenance1      = vk::makeExtension(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
++    /// NVR: an instance extension (the device table's extSwapchainColorSpace is never found, so it stays 0 there).
++    /// Without it the driver reports only SRGB_NONLINEAR surface formats and HDR10 / scRGB swap chains are impossible.
++    VkExtensionProperties extSwapchainColorSpace      = vk::makeExtension(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+     VkExtensionProperties khrGetSurfaceCapabilities2  = vk::makeExtension(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+     VkExtensionProperties khrSurface                  = vk::makeExtension(VK_KHR_SURFACE_EXTENSION_NAME);
+     VkExtensionProperties khrSurfaceMaintenance1      = vk::makeExtension(VK_KHR_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
+diff --git a/src/dxvk/dxvk_presenter.cpp b/src/dxvk/dxvk_presenter.cpp
+index f0d2651..46ffc07 100644
+--- a/src/dxvk/dxvk_presenter.cpp
++++ b/src/dxvk/dxvk_presenter.cpp
+@@ -326,6 +326,21 @@ namespace dxvk {
+   }
+ 
+ 
++  std::vector<VkSurfaceFormatKHR> Presenter::listSurfaceFormats() {
++    std::lock_guard lock(m_surfaceMutex);
++
++    std::vector<VkSurfaceFormatKHR> surfaceFormats;
++
++    if (!m_surface && createSurface() != VK_SUCCESS)
++      return surfaceFormats;
++
++    if (getSupportedFormats(surfaceFormats) != VK_SUCCESS)
++      surfaceFormats.clear();
++
++    return surfaceFormats;
++  }
++
++
+   void Presenter::invalidateSurface() {
+     std::lock_guard lock(m_surfaceMutex);
+ 
+@@ -762,6 +777,7 @@ namespace dxvk {
+       "Presenter: Actual swapchain properties:"
+       "\n  Format:       ", swapInfo.imageFormat,
+       "\n  Color space:  ", swapInfo.imageColorSpace,
++      "\n  Requested:    ", m_preferredFormat.format, " / ", m_preferredFormat.colorSpace,
+       "\n  Present mode: ", swapInfo.presentMode, " (dynamic: ", (dynamicModes.empty() ? "no)" : "yes)"),
+       "\n  Buffer size:  ", swapInfo.imageExtent.width, "x", swapInfo.imageExtent.height,
+       "\n  Image count:  ", swapInfo.minImageCount));
+diff --git a/src/dxvk/dxvk_presenter.h b/src/dxvk/dxvk_presenter.h
+index 48fa292..064d3f5 100644
+--- a/src/dxvk/dxvk_presenter.h
++++ b/src/dxvk/dxvk_presenter.h
+@@ -197,6 +197,13 @@ namespace dxvk {
+      */
+     bool supportsColorSpace(VkColorSpaceKHR colorspace);
+ 
++    /**
++     * \brief NVR: the surface formats the surface offers (for the HDR log)
++     *
++     * \returns The formats, empty if there is no surface
++     */
++    std::vector<VkSurfaceFormatKHR> listSurfaceFormats();
++
+     /**
+      * \brief Invalidates Vulkan surface
+      *
+-- 
+2.43.0
+

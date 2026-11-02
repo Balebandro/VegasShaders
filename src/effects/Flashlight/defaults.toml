@@ -1,0 +1,42 @@
+[_Shaders.Flashlight.Main]
+ColorR = 2.0                           # R Channel of the color of the flashlight
+ColorG = 2.0                           # G Channel of the color of the flashlight
+ColorB = 1.0                           # B Channel of the color of the flashlight
+Dimmer = 1.0                           # Dimmer for the color of the flashlight
+Angle = 30.0                           # Angle for the flashlight cone
+Distance = 1000                        # Distance radius for the light
+OffsetX = 0.0                          # X coordinate offset for the position of the light relative to the weapon position 
+OffsetY = 0.0                          # Y coordinate offset for the position of the light relative to the weapon position
+OffsetZ = 0.0                          # Z coordinate offset for the position of the light relative to the weapon position
+RenderShadows = false                  # Wether to use rendered shadows in the flashlight cone
+AttachToWeapon = true                  # The flashlight will move with the weapon instead of being fixed to the camera. It rides the weapon while aiming either way
+NearFade = 0.0                         # Fades the light out on surfaces closer than this many units, so point blank walls don't clip to white. 0 disables
+HotspotLimit = 0.0                     # Rolls off the brightest part of the lit pool without dimming the falloff around it. 0 disables
+CookieStrength = 0.0                   # Procedural rings and mottling in the beam, for structure on flat surfaces. 0 disables
+SoftEdges = false                      # Wrap lighting instead of clamped diffuse. Removes the speckle the reconstructed normals produce on grass and foliage, at the cost of a flatter beam. Does not change overall brightness
+HidePipBoyLight = true                 # FIX (2026-10-28): the game's Pip-Boy light, which the flashlight replaces, also gets no brightness or reach while the flashlight is on (before, it was only hidden: indoors it could still take one of the few lamps each object near you is lit by, and that lamp's light and shadows went, a moment after turning the flashlight on). false = as before. Live.
+TestForceOn = false                    # TEST (2026-10-28), for automatic tests: the flashlight on as if the Pip-Boy light were. Leave off.
+EdgeFix = 1                            # UNOFFICIAL: cleans up the flashlight at the edges of grass, leaves and characters, worst with MSAA: the bright rim in the colour of what is behind them (sky, a lit wall) and the jagged edge that flickers as you move. 1: the lit surfaces - at an edge, the part of the pixel that is leaf gets the leaf's light and the part that is background gets the background's. 2: also the beam's light shaft in the air, which then no longer spills over the edges of what stands in front of it (sharper, but it can speckle on grass in third person). Only pixels at edges change. Costs about 0.1 ms at 2560x1440 (GTX 1070) with grass filling the beam, less with less. 0 off. Applies immediately
+
+[_Shaders.Flashlight.Interiors]
+ColorR = 2.0                           # UNOFFICIAL: the flashlight's look indoors (Main is outdoors). R channel of the color
+ColorG = 2.0                           # G channel of the color
+ColorB = 1.0                           # B channel of the color
+Dimmer = 1.0                           # Dimmer for the color of the flashlight
+Angle = 30.0                           # Angle for the flashlight cone
+Distance = 1000                        # Distance radius for the light
+NearFade = 0.0                         # Fades the light out on surfaces closer than this many units. 0 disables
+HotspotLimit = 0.0                     # Rolls off the brightest part of the lit pool. 0 disables
+CookieStrength = 0.0                   # Procedural rings and mottling in the beam. 0 disables
+
+[_Shaders.Flashlight.MaterialLight]
+Enabled = false                        # Re-light nearby static geometry with its own normals, normal map and specular settings, instead of relying on normals reconstructed from depth
+Intensity = 0.015                      # Strength of the re-lit contribution
+Specular = 0.5                         # Scales the specular highlight. Multiplies the material own specular strength
+NormalStrength = 1.0                   # Scales the sideways component of the normal map. 1.0 uses the map as authored
+MaxGeometry = 2048                     # Cap on the number of objects re-lit in one frame
+DebugMode = 0                          # 0 renders normally, 1 to 7 visualise the pass, 8 draws everything it captured through walls
+
+[_Shaders.Flashlight.Status]
+Enabled = true                          # Replace the pipboy light with a post process flashlight attached to the weapon
+

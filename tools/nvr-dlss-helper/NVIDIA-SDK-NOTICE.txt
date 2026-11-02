@@ -1,0 +1,24 @@
+NVIDIA DLSS SDK -- what NvrDlssHelper.exe contains from NVIDIA, and under which terms
+
+NvrDlssHelper.exe, when built with NVIDIA's DLSS SDK (github.com/NVIDIA/DLSS; the build used tag v310.9.16), contains:
+  - nvsdk_ngx_s.lib (NVIDIA's NGX loader, linked in as object code), and
+  - the inline helper functions of nvsdk_ngx_helpers_vk.h / nvsdk_ngx_helpers.h (compiled in).
+    This software contains source code provided by NVIDIA Corporation.
+and loads at run time NVIDIA's DLSS runtime, nvngx_dlss.dll, which is shipped next to it unmodified (NVIDIA's signature intact).
+
+Those parts are NVIDIA's and are licensed under the "NVIDIA RTX SDKs LICENSE" (with its RTX supplement), the LICENSE.txt that comes
+with the SDK. Anyone distributing NvrDlssHelper.exe or nvngx_dlss.dll must ship that LICENSE.txt with them and follow it, among
+other things:
+  - DLSS may only be used in applications for systems with NVIDIA GPUs (the helper refuses to run on any other GPU);
+  - nvngx_dlss.dll must not be modified, and NVIDIA's development nvngx_dlss.dll (lib\dev, with the on-screen overlay) must never be
+    part of a public release;
+  - no reverse engineering of the SDK; it may not be distributed on its own or made subject to an open-source licence;
+  - NVIDIA must be notified before a commercial release; a public release must credit NVIDIA's DLSS SDK (splash/about/credits), and
+    any use of NVIDIA's names or marks needs NVIDIA's prior written approval (send samples at least two weeks ahead);
+  - the third-party notices in section 9.5/9.6 of NVIDIA's DLSS Programming Guide must be included in the public documentation.
+No NVIDIA logo is used anywhere in New Vegas Reloaded.
+
+NVIDIA and DLSS are trademarks and/or registered trademarks of NVIDIA Corporation in the U.S. and other countries.
+
+The helper's own source (this folder) is MIT (LICENSE). New Vegas Reloaded itself (GPL) contains no NVIDIA code: it talks to the
+helper only through shared GPU images, two GPU semaphores and a shared-memory block (NvrDlssProtocol.h).

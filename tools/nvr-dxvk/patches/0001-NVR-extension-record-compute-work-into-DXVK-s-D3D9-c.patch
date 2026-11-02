@@ -1,0 +1,1546 @@
+From da858c77c42aa24cfc0fe948244a3fcd03f9f76a Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 18:12:54 +0000
+Subject: [PATCH 1/3] NVR extension: record compute work into DXVK's D3D9
+ command stream (ID3D9NvrExt)
+
+New COM interface on the D3D9 device (own files d3d9_nvr_ext*.{h,cpp}):
+compute pipelines from SPIR-V, D3D9 textures/surfaces bound as sampled or
+storage images, own buffers and samplers, push constants, Dispatch, buffer
+copies and a test-only readback. Everything goes through EmitCs, so DXVK
+orders it with the D3D9 work and handles layouts and barriers.
+
+DXVK files touched: d3d9_device.{h,cpp} (member, friend, QueryInterface),
+src/d3d9/meson.build (source + version header), dxvk_context.h (push data
+state snapshot/restore, since graphics and compute share it).
+---
+ src/d3d9/d3d9_device.cpp    |   6 +
+ src/d3d9/d3d9_device.h      |   3 +
+ src/d3d9/d3d9_nvr_ext.cpp   | 937 ++++++++++++++++++++++++++++++++++++
+ src/d3d9/d3d9_nvr_ext.h     | 193 ++++++++
+ src/d3d9/d3d9_nvr_ext_api.h | 266 ++++++++++
+ src/d3d9/meson.build        |   3 +-
+ src/dxvk/dxvk_context.h     |  17 +
+ 7 files changed, 1424 insertions(+), 1 deletion(-)
+ create mode 100644 src/d3d9/d3d9_nvr_ext.cpp
+ create mode 100644 src/d3d9/d3d9_nvr_ext.h
+ create mode 100644 src/d3d9/d3d9_nvr_ext_api.h
+
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index bc0ab60..a6ddb53 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -60,6 +60,7 @@ namespace dxvk {
+     , m_submissionFence    ( new sync::Fence() )
+     , m_flushTracker       ( GetMaxFlushType() )
+     , m_d3d9Interop        ( this )
++    , m_nvrExt             ( this )
+     , m_d3d9On12Args       ( pAdapter->Get9On12Args() )
+     , m_d3d9On12           ( this )
+     , m_d3d8Bridge         ( this ) {
+@@ -199,6 +200,11 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    if (riid == __uuidof(ID3D9NvrExt)) {
++      *ppvObject = ref(&m_nvrExt);
++      return S_OK;
++    }
++
+     if (riid == __uuidof(IDirect3DDevice9On12)) {
+       if (m_d3d9On12Args.Enable9On12) {
+         *ppvObject = ref(&m_d3d9On12);
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index de0890e..dfe4c75 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -21,6 +21,7 @@
+ #include "d3d9_swvp_emu.h"
+ 
+ #include "d3d9_interop.h"
++#include "d3d9_nvr_ext.h"
+ #include "d3d9_on_12.h"
+ 
+ #include <cstdint>
+@@ -228,6 +229,7 @@ namespace dxvk {
+     friend class D3D9UserDefinedAnnotation;
+     friend class DxvkD3D8Bridge;
+     friend D3D9VkInteropDevice;
++    friend D3D9NvrExt;
+ 
+     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
+   public:
+@@ -1695,6 +1697,7 @@ namespace dxvk {
+     D3D9SpecData                    m_specData = {};
+ 
+     D3D9VkInteropDevice             m_d3d9Interop;
++    D3D9NvrExt                      m_nvrExt;
+     D3D9ON12_ARGS                   m_d3d9On12Args = { };
+     D3D9On12                        m_d3d9On12;
+     DxvkD3D8Bridge                  m_d3d8Bridge;
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+new file mode 100644
+index 0000000..384d892
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -0,0 +1,937 @@
++#include "d3d9_nvr_ext.h"
++#include "d3d9_device.h"
++#include "d3d9_common_texture.h"
++#include "d3d9_surface.h"
++#include "d3d9_texture.h"
++
++#include "../dxvk/dxvk_context.h"
++#include "../dxvk/dxvk_shader_spirv.h"
++
++#include <version.h>
++
++#include <array>
++#include <cstring>
++#include <vector>
++
++namespace dxvk {
++
++  ////////////////////////////////
++  // Pipeline, buffer, sampler objects
++  ///////////////////////////////
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtPipeline::QueryInterface(REFIID riid, void** ppvObject) {
++    if (ppvObject == nullptr)
++      return E_POINTER;
++
++    *ppvObject = nullptr;
++
++    if (riid == __uuidof(IUnknown)
++     || riid == __uuidof(ID3D9NvrExtPipeline)) {
++      *ppvObject = ref(this);
++      return S_OK;
++    }
++
++    return E_NOINTERFACE;
++  }
++
++
++  const D3D9NvrExtBindingInfo* D3D9NvrExtPipeline::FindBinding(uint32_t slot, NVR_EXT_BIND_TYPE type) const {
++    for (size_t i = 0; i < m_bindings.size(); i++) {
++      if (m_bindings[i].slot == slot && m_bindings[i].type == type)
++        return &m_bindings[i];
++    }
++    return nullptr;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtBuffer::QueryInterface(REFIID riid, void** ppvObject) {
++    if (ppvObject == nullptr)
++      return E_POINTER;
++
++    *ppvObject = nullptr;
++
++    if (riid == __uuidof(IUnknown)
++     || riid == __uuidof(ID3D9NvrExtBuffer)) {
++      *ppvObject = ref(this);
++      return S_OK;
++    }
++
++    return E_NOINTERFACE;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExtSampler::QueryInterface(REFIID riid, void** ppvObject) {
++    if (ppvObject == nullptr)
++      return E_POINTER;
++
++    *ppvObject = nullptr;
++
++    if (riid == __uuidof(IUnknown)
++     || riid == __uuidof(ID3D9NvrExtSampler)) {
++      *ppvObject = ref(this);
++      return S_OK;
++    }
++
++    return E_NOINTERFACE;
++  }
++
++
++  ////////////////////////////////
++  // Helpers
++  ///////////////////////////////
++
++  static VkImageViewType DecodeNvrViewType(NVR_EXT_VIEW_TYPE type) {
++    switch (type) {
++      case NVR_EXT_VIEW_3D:       return VK_IMAGE_VIEW_TYPE_3D;
++      case NVR_EXT_VIEW_CUBE:     return VK_IMAGE_VIEW_TYPE_CUBE;
++      case NVR_EXT_VIEW_2D_ARRAY: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++      default:                    return VK_IMAGE_VIEW_TYPE_2D;
++    }
++  }
++
++
++  static VkSamplerAddressMode DecodeNvrAddressMode(NVR_EXT_ADDRESS mode) {
++    switch (mode) {
++      case NVR_EXT_ADDRESS_WRAP:   return VK_SAMPLER_ADDRESS_MODE_REPEAT;
++      case NVR_EXT_ADDRESS_MIRROR: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
++      case NVR_EXT_ADDRESS_BORDER: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
++      default:                     return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++    }
++  }
++
++
++  /**
++   * \brief One resource resolved for a dispatch
++   *
++   * Built on the calling thread, consumed on the CS thread. Views are
++   * created on the CS thread so that a storage image can first get its
++   * storage usage added (which may relocate the image).
++   */
++  struct D3D9NvrExtBound {
++    uint32_t          slot = 0u;
++    NVR_EXT_BIND_TYPE type = NVR_EXT_BIND_SAMPLED_IMAGE;
++    bool              writes = false;
++    Rc<DxvkImage>     image;
++    DxvkImageViewKey  viewKey = { };
++    DxvkBufferSlice   buffer;
++    Rc<DxvkSampler>   sampler;
++  };
++
++
++  ////////////////////////////////
++  // Extension object
++  ///////////////////////////////
++
++  D3D9NvrExt::D3D9NvrExt(D3D9DeviceEx* pDevice)
++  : m_device(pDevice) {
++
++  }
++
++
++  D3D9NvrExt::~D3D9NvrExt() {
++
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrExt::AddRef() {
++    return m_device->AddRef();
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrExt::Release() {
++    return m_device->Release();
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::QueryInterface(REFIID riid, void** ppvObject) {
++    return m_device->QueryInterface(riid, ppvObject);
++  }
++
++
++  void STDMETHODCALLTYPE D3D9NvrExt::GetInfo(NVR_EXT_INFO* pInfo) {
++    if (pInfo == nullptr)
++      return;
++
++    const auto& props = m_device->GetDXVKDevice()->properties();
++
++    *pInfo = NVR_EXT_INFO();
++    pInfo->ExtVersionMajor = NVR_EXT_VERSION_MAJOR;
++    pInfo->ExtVersionMinor = NVR_EXT_VERSION_MINOR;
++    std::strncpy(pInfo->DxvkVersion, DXVK_VERSION, sizeof(pInfo->DxvkVersion) - 1u);
++    pInfo->MaxPushBytes = NVR_EXT_MAX_PUSH_BYTES;
++    pInfo->MaxSlots = NVR_EXT_MAX_SLOTS;
++    pInfo->SubgroupSize = props.vk11.subgroupSize;
++    pInfo->MaxWorkgroupInvocations = props.core.properties.limits.maxComputeWorkGroupInvocations;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CreateComputePipeline(
++    const NVR_EXT_COMPUTE_PIPELINE_DESC*  pDesc,
++          ID3D9NvrExtPipeline**           ppPipeline) {
++    InitReturnPtr(ppPipeline);
++
++    if (unlikely(pDesc == nullptr || ppPipeline == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    const char* name = pDesc->pDebugName ? pDesc->pDebugName : "NVR compute";
++
++    if (unlikely(pDesc->pSpirv == nullptr || pDesc->SpirvSize < 20u || (pDesc->SpirvSize & 3u))) {
++      Logger::err(str::format("NVR ext: ", name, ": no SPIR-V or a size that is not a multiple of 4"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (unlikely(pDesc->BindingCount > NVR_EXT_MAX_BINDINGS
++              || (pDesc->BindingCount && pDesc->pBindings == nullptr))) {
++      Logger::err(str::format("NVR ext: ", name, ": bad binding list"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (unlikely(pDesc->PushConstantSize > NVR_EXT_MAX_PUSH_BYTES || (pDesc->PushConstantSize & 3u))) {
++      Logger::err(str::format("NVR ext: ", name, ": push constant size must be 4-aligned and at most ", NVR_EXT_MAX_PUSH_BYTES));
++      return D3DERR_INVALIDCALL;
++    }
++
++    small_vector<DxvkBindingInfo, 16>       dxvkBindings;
++    small_vector<D3D9NvrExtBindingInfo, 8>  ownBindings;
++    uint64_t pushResourceMask = 0u;
++    bool usesSamplers = false;
++
++    for (uint32_t i = 0; i < pDesc->BindingCount; i++) {
++      const auto& b = pDesc->pBindings[i];
++
++      if (unlikely(b.Slot >= NVR_EXT_MAX_SLOTS)) {
++        Logger::err(str::format("NVR ext: ", name, ": binding ", i, " slot ", b.Slot, " out of range"));
++        return D3DERR_INVALIDCALL;
++      }
++
++      D3D9NvrExtBindingInfo own;
++      own.slot = b.Slot;
++      own.type = b.Type;
++      own.viewType = b.ViewType;
++      own.writes = b.Writes != FALSE;
++
++      for (size_t j = 0; j < ownBindings.size(); j++) {
++        if (ownBindings[j].slot == own.slot && ownBindings[j].type == own.type) {
++          Logger::err(str::format("NVR ext: ", name, ": slot ", b.Slot, " is bound twice for the same type"));
++          return D3DERR_INVALIDCALL;
++        }
++      }
++
++      DxvkBindingInfo info = { };
++      info.set = b.Set;
++      info.binding = b.Binding;
++      info.descriptorCount = 1u;
++
++      switch (b.Type) {
++        case NVR_EXT_BIND_SAMPLED_IMAGE:
++          info.resourceIndex  = NvrExtImageSlotBase + b.Slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++          info.viewType       = DecodeNvrViewType(b.ViewType);
++          info.access         = VK_ACCESS_SHADER_READ_BIT;
++          break;
++
++        case NVR_EXT_BIND_STORAGE_IMAGE:
++          info.resourceIndex  = NvrExtImageSlotBase + b.Slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
++          info.viewType       = DecodeNvrViewType(b.ViewType);
++          info.access         = VK_ACCESS_SHADER_READ_BIT | (own.writes ? VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT) : VkAccessFlags(0u));
++          break;
++
++        case NVR_EXT_BIND_STORAGE_BUFFER:
++          // A buffer the shader writes goes through a raw buffer view: DXVK then tracks the write, so a later
++          // transfer (copy, readback) cannot be reordered in front of the dispatch. Read-only ones sit in the
++          // UBO set like DXVK's own (cheaper, tracked as reads).
++          info.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++          info.access         = VK_ACCESS_SHADER_READ_BIT | (own.writes ? VkAccessFlags(VK_ACCESS_SHADER_WRITE_BIT) : VkAccessFlags(0u));
++          if (own.writes) {
++            info.resourceIndex = NvrExtBufferViewSlotBase + b.Slot;
++          } else {
++            info.resourceIndex = NvrExtBufferSlotBase + b.Slot;
++            info.flags.set(DxvkDescriptorFlag::UniformBuffer);
++          }
++          break;
++
++        case NVR_EXT_BIND_UNIFORM_BUFFER:
++          info.resourceIndex  = NvrExtBufferSlotBase + b.Slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
++          info.access         = VK_ACCESS_UNIFORM_READ_BIT;
++          info.flags.set(DxvkDescriptorFlag::UniformBuffer);
++          break;
++
++        case NVR_EXT_BIND_SAMPLER:
++          if (unlikely((b.PushOffset & 3u) || b.PushOffset + 4u > pDesc->PushConstantSize)) {
++            Logger::err(str::format("NVR ext: ", name, ": sampler slot ", b.Slot, " push offset ", b.PushOffset, " is not inside the push block"));
++            return D3DERR_INVALIDCALL;
++          }
++          info.resourceIndex  = NvrExtSamplerSlotBase + b.Slot;
++          info.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
++          info.blockOffset    = b.PushOffset;
++          info.flags.set(DxvkDescriptorFlag::PushData);
++          pushResourceMask |= 1ull << (b.PushOffset / 4u);
++          usesSamplers = true;
++          break;
++
++        default:
++          Logger::err(str::format("NVR ext: ", name, ": binding ", i, " has an unknown type"));
++          return D3DERR_INVALIDCALL;
++      }
++
++      dxvkBindings.push_back(info);
++      ownBindings.push_back(own);
++    }
++
++    if (unlikely(usesSamplers && !pDesc->UsesSamplerHeap)) {
++      Logger::err(str::format("NVR ext: ", name, ": sampler bindings need UsesSamplerHeap and the heap's set/binding"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    DxvkSpirvShaderCreateInfo info;
++    info.bindingCount = dxvkBindings.size();
++    info.bindings = dxvkBindings.data();
++
++    if (pDesc->PushConstantSize)
++      info.localPushData = DxvkPushDataBlock(VK_SHADER_STAGE_COMPUTE_BIT, 0u, pDesc->PushConstantSize, 4u, pushResourceMask);
++
++    if (pDesc->UsesSamplerHeap)
++      info.samplerHeap = DxvkShaderBinding(VK_SHADER_STAGE_COMPUTE_BIT, pDesc->SamplerHeapSet, pDesc->SamplerHeapBinding);
++
++    info.debugName = name;
++
++    try {
++      Rc<DxvkShader> shader = new DxvkSpirvShader(info,
++        SpirvCodeBuffer(pDesc->SpirvSize / 4u, reinterpret_cast<const uint32_t*>(pDesc->pSpirv)));
++
++      if (shader->metadata().stage != VK_SHADER_STAGE_COMPUTE_BIT) {
++        Logger::err(str::format("NVR ext: ", name, ": the SPIR-V is not a compute shader"));
++        return D3DERR_INVALIDCALL;
++      }
++
++      *ppPipeline = ref(new D3D9NvrExtPipeline(std::move(shader), pDesc->PushConstantSize, std::move(ownBindings)));
++      Logger::info(str::format("NVR ext: compute pipeline '", name, "' created (", pDesc->BindingCount, " bindings, ", pDesc->PushConstantSize, " push bytes)"));
++      return D3D_OK;
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext: ", name, ": ", e.message()));
++      return D3DERR_INVALIDCALL;
++    }
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CreateBuffer(
++    const NVR_EXT_BUFFER_DESC*            pDesc,
++          ID3D9NvrExtBuffer**             ppBuffer) {
++    InitReturnPtr(ppBuffer);
++
++    if (unlikely(pDesc == nullptr || ppBuffer == nullptr || pDesc->Size == 0u || !pDesc->Flags))
++      return D3DERR_INVALIDCALL;
++
++    DxvkBufferCreateInfo info;
++    info.size   = align(pDesc->Size, 16u);
++    info.usage  = 0u;
++    info.stages = 0u;
++    info.access = 0u;
++    info.debugName = pDesc->pDebugName;
++
++    if (pDesc->Flags & NVR_EXT_BUFFER_STORAGE) {
++      info.usage  |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
++      info.stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++      info.access |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++    }
++
++    if (pDesc->Flags & NVR_EXT_BUFFER_UNIFORM) {
++      info.usage  |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
++      info.stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++      info.access |= VK_ACCESS_UNIFORM_READ_BIT;
++    }
++
++    if (pDesc->Flags & NVR_EXT_BUFFER_TRANSFER_SRC) {
++      info.usage  |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++      info.stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
++      info.access |= VK_ACCESS_TRANSFER_READ_BIT;
++    }
++
++    if (pDesc->Flags & NVR_EXT_BUFFER_TRANSFER_DST) {
++      info.usage  |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++      info.stages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
++      info.access |= VK_ACCESS_TRANSFER_WRITE_BIT;
++    }
++
++    try {
++      Rc<DxvkBuffer> buffer = m_device->GetDXVKDevice()->createBuffer(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++      *ppBuffer = ref(new D3D9NvrExtBuffer(std::move(buffer), pDesc->Size));
++      return D3D_OK;
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext: CreateBuffer: ", e.message()));
++      return D3DERR_OUTOFVIDEOMEMORY;
++    }
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CreateSampler(
++    const NVR_EXT_SAMPLER_DESC*           pDesc,
++          ID3D9NvrExtSampler**            ppSampler) {
++    InitReturnPtr(ppSampler);
++
++    if (unlikely(pDesc == nullptr || ppSampler == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    VkFilter filter = pDesc->Filter == NVR_EXT_FILTER_LINEAR ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
++    VkSamplerAddressMode address = DecodeNvrAddressMode(pDesc->Address);
++
++    DxvkSamplerKey key = { };
++    key.setFilter(filter, filter, VK_SAMPLER_MIPMAP_MODE_NEAREST);
++    key.setAddressModes(address, address, address);
++    key.setLodRange(0.0f, 0.0f, 0.0f);
++    key.setAniso(0u);
++    key.setDepthCompare(false, VK_COMPARE_OP_NEVER);
++    key.setReduction(VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE);
++
++    VkClearColorValue border = { };
++    key.setBorderColor(border);
++
++    try {
++      Rc<DxvkSampler> sampler = m_device->GetDXVKDevice()->createSampler(key);
++      *ppSampler = ref(new D3D9NvrExtSampler(std::move(sampler)));
++      return D3D_OK;
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext: CreateSampler: ", e.message()));
++      return D3DERR_INVALIDCALL;
++    }
++  }
++
++
++  bool D3D9NvrExt::ResolveTexture(IUnknown* pResource, uint32_t MipLevel, uint32_t Layer, TextureRef& ref) {
++    ref = TextureRef();
++
++    if (pResource == nullptr)
++      return false;
++
++    // Every D3D9 surface and texture answers IDirect3DResource9; GetType tells
++    // them apart without QueryInterface warnings in the DXVK log.
++    Com<IDirect3DResource9> resource;
++    if (FAILED(pResource->QueryInterface(__uuidof(IDirect3DResource9), reinterpret_cast<void**>(&resource))))
++      return false;
++
++    switch (resource->GetType()) {
++      case D3DRTYPE_SURFACE: {
++        // A surface carries its own mip level and face.
++        D3D9Surface* s = static_cast<D3D9Surface*>(static_cast<IDirect3DSurface9*>(resource.ptr()));
++        ref.texture   = s->GetCommonTexture();
++        ref.mipLevel  = s->GetMipLevel();
++        ref.layer     = s->GetFace();
++        ref.isSurface = true;
++        return ref.texture != nullptr;
++      }
++
++      case D3DRTYPE_TEXTURE:
++      case D3DRTYPE_CUBETEXTURE:
++      case D3DRTYPE_VOLUMETEXTURE: {
++        ref.texture  = GetCommonTexture(static_cast<IDirect3DBaseTexture9*>(resource.ptr()));
++        ref.mipLevel = MipLevel;
++        ref.layer    = Layer;
++        return ref.texture != nullptr
++            && MipLevel < ref.texture->Desc()->MipLevels
++            && Layer < ref.texture->Desc()->ArraySize;
++      }
++
++      default:
++        return false;
++    }
++  }
++
++
++  bool D3D9NvrExt::ValidateBufferRange(ID3D9NvrExtBuffer* pBuffer, UINT Offset, UINT& Size, UINT Align) const {
++    if (pBuffer == nullptr)
++      return false;
++
++    UINT total = pBuffer->GetSize();
++
++    if (Offset > total || (Offset % Align))
++      return false;
++
++    if (Size == 0u)
++      Size = total - Offset;
++
++    return Size <= total - Offset && !(Size % Align);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::Dispatch(const NVR_EXT_DISPATCH_DESC* pDesc) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pDesc == nullptr || pDesc->pPipeline == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(!pDesc->GroupsX || !pDesc->GroupsY || !pDesc->GroupsZ))
++      return D3D_OK;
++
++    auto* pipeline = static_cast<D3D9NvrExtPipeline*>(pDesc->pPipeline);
++
++    if (unlikely(pDesc->PushDataSize > pipeline->GetPushSize()
++              || (pDesc->PushDataSize && pDesc->pPushData == nullptr))) {
++      Logger::err("NVR ext: Dispatch: push data larger than the pipeline's block");
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (unlikely(pDesc->BindingCount > NVR_EXT_MAX_BINDINGS
++              || (pDesc->BindingCount && pDesc->pBindings == nullptr)))
++      return D3DERR_INVALIDCALL;
++
++    small_vector<D3D9NvrExtBound, 8> bound;
++
++    for (uint32_t i = 0; i < pDesc->BindingCount; i++) {
++      const auto& b = pDesc->pBindings[i];
++      const auto* decl = pipeline->FindBinding(b.Slot, b.Type);
++
++      if (unlikely(decl == nullptr)) {
++        Logger::err(str::format("NVR ext: Dispatch: slot ", b.Slot, " (type ", uint32_t(b.Type), ") is not declared by the pipeline"));
++        return D3DERR_INVALIDCALL;
++      }
++
++      D3D9NvrExtBound res;
++      res.slot = b.Slot;
++      res.type = b.Type;
++      res.writes = decl->writes;
++
++      switch (b.Type) {
++        case NVR_EXT_BIND_SAMPLED_IMAGE:
++        case NVR_EXT_BIND_STORAGE_IMAGE: {
++          TextureRef ref;
++          if (unlikely(!ResolveTexture(b.pResource, b.MipLevel, 0u, ref))) {
++            Logger::err(str::format("NVR ext: Dispatch: slot ", b.Slot, ": not a D3D9 texture or surface"));
++            return D3DERR_INVALIDCALL;
++          }
++
++          res.image = ref.texture->GetImage();
++
++          const Rc<DxvkImageView>& sampleView = ref.texture->GetSampleView(b.Srgb != FALSE);
++
++          if (unlikely(res.image == nullptr || sampleView == nullptr)) {
++            Logger::err(str::format("NVR ext: Dispatch: slot ", b.Slot, ": the texture has no GPU image (system memory pool?)"));
++            return D3DERR_INVALIDCALL;
++          }
++
++          // Start from DXVK's own sample view of the texture (format, swizzle, aspects),
++          // then narrow it down to what the binding asked for.
++          DxvkImageViewKey key = sampleView->info();
++          const auto& desc = *ref.texture->Desc();
++          bool storage = b.Type == NVR_EXT_BIND_STORAGE_IMAGE;
++
++          key.viewType = DecodeNvrViewType(decl->viewType);
++          key.mipIndex = ref.mipLevel;
++          key.mipCount = storage ? 1u : (desc.MipLevels - ref.mipLevel);
++
++          if (key.viewType == VK_IMAGE_VIEW_TYPE_2D) {
++            key.layerIndex = ref.layer;
++            key.layerCount = 1u;
++          } else {
++            key.layerIndex = 0u;
++            key.layerCount = desc.ArraySize;
++          }
++
++          if (storage) {
++            key.usage = VK_IMAGE_USAGE_STORAGE_BIT;
++            key.layout = VK_IMAGE_LAYOUT_GENERAL;
++            key.packedSwizzle = 0u;
++            key.allowTypeMismatch = VK_FALSE;
++
++            if (unlikely(!(key.aspects & VK_IMAGE_ASPECT_COLOR_BIT))) {
++              Logger::err(str::format("NVR ext: Dispatch: slot ", b.Slot, ": storage images must be color images"));
++              return D3DERR_INVALIDCALL;
++            }
++          } else {
++            key.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
++            key.allowTypeMismatch = VK_FALSE;
++          }
++
++          res.viewKey = key;
++        } break;
++
++        case NVR_EXT_BIND_STORAGE_BUFFER:
++        case NVR_EXT_BIND_UNIFORM_BUFFER: {
++          Com<ID3D9NvrExtBuffer> buffer;
++          if (unlikely(b.pResource == nullptr
++                    || FAILED(b.pResource->QueryInterface(__uuidof(ID3D9NvrExtBuffer), reinterpret_cast<void**>(&buffer))))) {
++            Logger::err(str::format("NVR ext: Dispatch: slot ", b.Slot, ": not an extension buffer"));
++            return D3DERR_INVALIDCALL;
++          }
++
++          UINT size = b.Size;
++          if (unlikely(!ValidateBufferRange(buffer.ptr(), b.Offset, size, 4u))) {
++            Logger::err(str::format("NVR ext: Dispatch: slot ", b.Slot, ": buffer range out of bounds"));
++            return D3DERR_INVALIDCALL;
++          }
++
++          res.buffer = DxvkBufferSlice(static_cast<D3D9NvrExtBuffer*>(buffer.ptr())->GetBuffer(), b.Offset, size);
++        } break;
++
++        case NVR_EXT_BIND_SAMPLER: {
++          Com<ID3D9NvrExtSampler> sampler;
++          if (unlikely(b.pResource == nullptr
++                    || FAILED(b.pResource->QueryInterface(__uuidof(ID3D9NvrExtSampler), reinterpret_cast<void**>(&sampler))))) {
++            Logger::err(str::format("NVR ext: Dispatch: slot ", b.Slot, ": not an extension sampler"));
++            return D3DERR_INVALIDCALL;
++          }
++
++          res.sampler = static_cast<D3D9NvrExtSampler*>(sampler.ptr())->GetSampler();
++        } break;
++
++        default:
++          return D3DERR_INVALIDCALL;
++      }
++
++      bound.push_back(std::move(res));
++    }
++
++    std::array<char, NVR_EXT_MAX_PUSH_BYTES> push = { };
++    if (pDesc->PushDataSize)
++      std::memcpy(push.data(), pDesc->pPushData, pDesc->PushDataSize);
++
++    m_device->EmitCs([
++      cShader   = pipeline->GetShader(),
++      cBound    = std::move(bound),
++      cPush     = push,
++      cPushSize = pipeline->GetPushSize(),
++      cX        = pDesc->GroupsX,
++      cY        = pDesc->GroupsY,
++      cZ        = pDesc->GroupsZ
++    ] (DxvkContext* ctx) {
++      constexpr VkShaderStageFlags Stage = VK_SHADER_STAGE_COMPUTE_BIT;
++
++      // The push data state is shared with the graphics side (D3D9's fog colour,
++      // alpha reference and sampler indices live there). Put it back afterwards.
++      DxvkPushDataState savedPushData = ctx->nvrGetPushDataState();
++
++      ctx->bindShader<VK_SHADER_STAGE_COMPUTE_BIT>(Rc<DxvkShader>(cShader));
++
++      for (size_t i = 0; i < cBound.size(); i++) {
++        const auto& b = cBound[i];
++
++        switch (b.type) {
++          case NVR_EXT_BIND_SAMPLED_IMAGE:
++            ctx->bindResourceImageView(Stage, NvrExtImageSlotBase + b.slot, b.image->createView(b.viewKey));
++            break;
++
++          case NVR_EXT_BIND_STORAGE_IMAGE: {
++            DxvkImageUsageInfo usage = { };
++            usage.usage  = VK_IMAGE_USAGE_STORAGE_BIT;
++            usage.stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++            usage.access = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++            usage.layout = VK_IMAGE_LAYOUT_GENERAL;
++
++            if (!ctx->ensureImageCompatibility(b.image, usage)) {
++              Logger::err("NVR ext: Dispatch: a texture cannot be used as a storage image (format?)");
++              ctx->bindResourceImageView(Stage, NvrExtImageSlotBase + b.slot, nullptr);
++              break;
++            }
++
++            ctx->bindResourceImageView(Stage, NvrExtImageSlotBase + b.slot, b.image->createView(b.viewKey));
++          } break;
++
++          case NVR_EXT_BIND_STORAGE_BUFFER:
++            if (b.writes) {
++              DxvkBufferViewKey viewKey = { };
++              viewKey.format = VK_FORMAT_UNDEFINED;
++              viewKey.usage  = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
++              viewKey.offset = b.buffer.offset();
++              viewKey.size   = b.buffer.length();
++              ctx->bindResourceBufferView(Stage, NvrExtBufferViewSlotBase + b.slot, b.buffer.buffer()->createView(viewKey));
++              break;
++            }
++            ctx->bindUniformBuffer(Stage, NvrExtBufferSlotBase + b.slot, DxvkBufferSlice(b.buffer));
++            break;
++
++          case NVR_EXT_BIND_UNIFORM_BUFFER:
++            ctx->bindUniformBuffer(Stage, NvrExtBufferSlotBase + b.slot, DxvkBufferSlice(b.buffer));
++            break;
++
++          case NVR_EXT_BIND_SAMPLER:
++            ctx->bindResourceSampler(Stage, NvrExtSamplerSlotBase + b.slot, Rc<DxvkSampler>(b.sampler));
++            break;
++
++          default:
++            break;
++        }
++      }
++
++      if (cPushSize)
++        ctx->pushData(Stage, 0u, cPushSize, cPush.data());
++
++      ctx->dispatch(cX, cY, cZ);
++
++      // Drop the references so that the textures and buffers do not stay
++      // alive (or tracked) through the rest of the frame.
++      for (size_t i = 0; i < cBound.size(); i++) {
++        const auto& b = cBound[i];
++
++        switch (b.type) {
++          case NVR_EXT_BIND_SAMPLED_IMAGE:
++          case NVR_EXT_BIND_STORAGE_IMAGE:
++            ctx->bindResourceImageView(Stage, NvrExtImageSlotBase + b.slot, nullptr);
++            break;
++
++          case NVR_EXT_BIND_STORAGE_BUFFER:
++            if (b.writes) {
++              ctx->bindResourceBufferView(Stage, NvrExtBufferViewSlotBase + b.slot, nullptr);
++              break;
++            }
++            ctx->bindUniformBuffer(Stage, NvrExtBufferSlotBase + b.slot, DxvkBufferSlice());
++            break;
++
++          case NVR_EXT_BIND_UNIFORM_BUFFER:
++            ctx->bindUniformBuffer(Stage, NvrExtBufferSlotBase + b.slot, DxvkBufferSlice());
++            break;
++
++          case NVR_EXT_BIND_SAMPLER:
++            ctx->bindResourceSampler(Stage, NvrExtSamplerSlotBase + b.slot, nullptr);
++            break;
++
++          default:
++            break;
++        }
++      }
++
++      ctx->bindShader<VK_SHADER_STAGE_COMPUTE_BIT>(nullptr);
++      ctx->nvrSetPushDataState(savedPushData);
++    });
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::UpdateBuffer(
++          ID3D9NvrExtBuffer*              pBuffer,
++          UINT                            Offset,
++          UINT                            Size,
++    const void*                           pData) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pData == nullptr || Size == 0u || Size > 65536u))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(!ValidateBufferRange(pBuffer, Offset, Size, 4u)))
++      return D3DERR_INVALIDCALL;
++
++    std::vector<char> data(Size);
++    std::memcpy(data.data(), pData, Size);
++
++    m_device->EmitCs([
++      cBuffer = static_cast<D3D9NvrExtBuffer*>(pBuffer)->GetBuffer(),
++      cOffset = Offset,
++      cData   = std::move(data)
++    ] (DxvkContext* ctx) {
++      ctx->updateBuffer(cBuffer, cOffset, cData.size(), cData.data());
++    });
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::ClearBuffer(
++          ID3D9NvrExtBuffer*              pBuffer,
++          UINT                            Offset,
++          UINT                            Size,
++          UINT                            Value) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(!ValidateBufferRange(pBuffer, Offset, Size, 4u)))
++      return D3DERR_INVALIDCALL;
++
++    if (!Size)
++      return D3D_OK;
++
++    m_device->EmitCs([
++      cBuffer = static_cast<D3D9NvrExtBuffer*>(pBuffer)->GetBuffer(),
++      cOffset = Offset,
++      cSize   = Size,
++      cValue  = Value
++    ] (DxvkContext* ctx) {
++      ctx->clearBuffer(cBuffer, cOffset, cSize, cValue);
++    });
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CopyBuffer(
++          ID3D9NvrExtBuffer*              pDst,
++          UINT                            DstOffset,
++          ID3D9NvrExtBuffer*              pSrc,
++          UINT                            SrcOffset,
++          UINT                            Size) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(Size == 0u || pDst == pSrc))
++      return D3DERR_INVALIDCALL;
++
++    UINT dstSize = Size;
++    UINT srcSize = Size;
++
++    if (unlikely(!ValidateBufferRange(pDst, DstOffset, dstSize, 4u)
++              || !ValidateBufferRange(pSrc, SrcOffset, srcSize, 4u)))
++      return D3DERR_INVALIDCALL;
++
++    m_device->EmitCs([
++      cDst       = static_cast<D3D9NvrExtBuffer*>(pDst)->GetBuffer(),
++      cDstOffset = DstOffset,
++      cSrc       = static_cast<D3D9NvrExtBuffer*>(pSrc)->GetBuffer(),
++      cSrcOffset = SrcOffset,
++      cSize      = Size
++    ] (DxvkContext* ctx) {
++      ctx->copyBuffer(cDst, cDstOffset, cSrc, cSrcOffset, cSize);
++    });
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CopyBufferToTexture(
++          IUnknown*                       pTexture,
++          UINT                            MipLevel,
++          UINT                            Layer,
++          ID3D9NvrExtBuffer*              pSrc,
++          UINT                            SrcOffset) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    TextureRef ref;
++    if (unlikely(!ResolveTexture(pTexture, MipLevel, Layer, ref)))
++      return D3DERR_INVALIDCALL;
++
++    Rc<DxvkImage> image = ref.texture->GetImage();
++    if (unlikely(image == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    auto formatInfo = lookupFormatInfo(image->info().format);
++    if (unlikely(!(formatInfo->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)))
++      return D3DERR_INVALIDCALL;
++
++    VkExtent3D extent = image->mipLevelExtent(ref.mipLevel);
++    VkExtent3D blocks = util::computeBlockCount(extent, formatInfo->blockSize);
++    UINT bytes = UINT(formatInfo->elementSize * blocks.width * blocks.height * blocks.depth);
++
++    if (unlikely(!ValidateBufferRange(pSrc, SrcOffset, bytes, 4u)))
++      return D3DERR_INVALIDCALL;
++
++    VkImageSubresourceLayers layers = { };
++    layers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    layers.mipLevel = ref.mipLevel;
++    layers.baseArrayLayer = ref.layer;
++    layers.layerCount = 1u;
++
++    m_device->EmitCs([
++      cImage  = std::move(image),
++      cLayers = layers,
++      cExtent = extent,
++      cBuffer = static_cast<D3D9NvrExtBuffer*>(pSrc)->GetBuffer(),
++      cOffset = SrcOffset
++    ] (DxvkContext* ctx) {
++      ctx->copyBufferToImage(cImage, cLayers, VkOffset3D { 0, 0, 0 }, cExtent,
++        cBuffer, cOffset, 0u, 0u, cImage->info().format);
++    });
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::CopyTextureToBuffer(
++          ID3D9NvrExtBuffer*              pDst,
++          UINT                            DstOffset,
++          IUnknown*                       pTexture,
++          UINT                            MipLevel,
++          UINT                            Layer) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    TextureRef ref;
++    if (unlikely(!ResolveTexture(pTexture, MipLevel, Layer, ref)))
++      return D3DERR_INVALIDCALL;
++
++    Rc<DxvkImage> image = ref.texture->GetImage();
++    if (unlikely(image == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    auto formatInfo = lookupFormatInfo(image->info().format);
++    if (unlikely(!(formatInfo->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT)))
++      return D3DERR_INVALIDCALL;
++
++    VkExtent3D extent = image->mipLevelExtent(ref.mipLevel);
++    VkExtent3D blocks = util::computeBlockCount(extent, formatInfo->blockSize);
++    UINT bytes = UINT(formatInfo->elementSize * blocks.width * blocks.height * blocks.depth);
++
++    if (unlikely(!ValidateBufferRange(pDst, DstOffset, bytes, 4u)))
++      return D3DERR_INVALIDCALL;
++
++    VkImageSubresourceLayers layers = { };
++    layers.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
++    layers.mipLevel = ref.mipLevel;
++    layers.baseArrayLayer = ref.layer;
++    layers.layerCount = 1u;
++
++    m_device->EmitCs([
++      cImage  = std::move(image),
++      cLayers = layers,
++      cExtent = extent,
++      cBuffer = static_cast<D3D9NvrExtBuffer*>(pDst)->GetBuffer(),
++      cOffset = DstOffset
++    ] (DxvkContext* ctx) {
++      ctx->copyImageToBuffer(cBuffer, cOffset, 0u, 0u, cImage->info().format,
++        cImage, cLayers, VkOffset3D { 0, 0, 0 }, cExtent);
++    });
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::ReadBuffer(
++          ID3D9NvrExtBuffer*              pBuffer,
++          UINT                            Offset,
++          UINT                            Size,
++          void*                           pData) {
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (unlikely(pData == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    if (unlikely(!ValidateBufferRange(pBuffer, Offset, Size, 4u)))
++      return D3DERR_INVALIDCALL;
++
++    if (!Size)
++      return D3D_OK;
++
++    // A host-readable staging copy; the wait below is the price (test use only).
++    DxvkBufferCreateInfo info;
++    info.size   = align(Size, 16u);
++    info.usage  = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
++    info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
++    info.access = VK_ACCESS_TRANSFER_WRITE_BIT;
++    info.debugName = "NVR ext readback";
++
++    Rc<DxvkBuffer> staging;
++
++    try {
++      staging = m_device->GetDXVKDevice()->createBuffer(info,
++        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR ext: ReadBuffer: ", e.message()));
++      return D3DERR_OUTOFVIDEOMEMORY;
++    }
++
++    m_device->EmitCs([
++      cDst    = staging,
++      cSrc    = static_cast<D3D9NvrExtBuffer*>(pBuffer)->GetBuffer(),
++      cOffset = Offset,
++      cSize   = Size
++    ] (DxvkContext* ctx) {
++      ctx->copyBuffer(cDst, 0u, cSrc, cOffset, cSize);
++    });
++
++    // Flushes, waits for the CS thread and then for the GPU.
++    m_device->WaitForResource(*staging, DxvkCsThread::SynchronizeAll, D3DLOCK_READONLY);
++
++    void* mapped = staging->mapPtr(0u);
++    if (unlikely(mapped == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    std::memcpy(pData, mapped, Size);
++    return D3D_OK;
++  }
++
++}
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+new file mode 100644
+index 0000000..19611bb
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -0,0 +1,193 @@
++#pragma once
++
++/*
++ * NVR extension: implementation side. See d3d9_nvr_ext_api.h for the contract.
++ * Everything here records into the D3D9 device's CS chunk (EmitCs), so the
++ * work runs on DXVK's CS thread in order with the D3D9 commands around it.
++ */
++
++#include "d3d9_nvr_ext_api.h"
++#include "d3d9_include.h"
++#include "d3d9_multithread.h"
++
++#include "../dxvk/dxvk_buffer.h"
++#include "../dxvk/dxvk_image.h"
++#include "../dxvk/dxvk_sampler.h"
++#include "../dxvk/dxvk_shader.h"
++
++#include "../util/util_small_vector.h"
++
++namespace dxvk {
++
++  class D3D9DeviceEx;
++  class D3D9CommonTexture;
++
++  /** Binding slot bases, chosen above everything the D3D9 side uses. */
++  constexpr uint32_t NvrExtImageSlotBase      = 64u;  // DxvkContext m_resources (image views)
++  constexpr uint32_t NvrExtBufferViewSlotBase = 96u;  // DxvkContext m_resources (raw buffer views: storage buffers the shader writes)
++  constexpr uint32_t NvrExtBufferSlotBase     = 64u;  // DxvkContext m_uniformBuffers (read-only buffers in the UBO set)
++  constexpr uint32_t NvrExtSamplerSlotBase    = 64u;  // DxvkContext m_samplers
++
++  struct D3D9NvrExtBindingInfo {
++    uint32_t          slot = 0u;
++    NVR_EXT_BIND_TYPE type = NVR_EXT_BIND_SAMPLED_IMAGE;
++    NVR_EXT_VIEW_TYPE viewType = NVR_EXT_VIEW_2D;
++    bool              writes = false;
++  };
++
++  class D3D9NvrExtPipeline final : public ComObject<ID3D9NvrExtPipeline> {
++
++  public:
++
++    D3D9NvrExtPipeline(Rc<DxvkShader>&& shader, uint32_t pushSize,
++      small_vector<D3D9NvrExtBindingInfo, 8>&& bindings)
++    : m_shader(std::move(shader)), m_pushSize(pushSize), m_bindings(std::move(bindings)) { }
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    const Rc<DxvkShader>& GetShader() const { return m_shader; }
++
++    uint32_t GetPushSize() const { return m_pushSize; }
++
++    const D3D9NvrExtBindingInfo* FindBinding(uint32_t slot, NVR_EXT_BIND_TYPE type) const;
++
++  private:
++
++    Rc<DxvkShader>                           m_shader;
++    uint32_t                                 m_pushSize;
++    small_vector<D3D9NvrExtBindingInfo, 8>   m_bindings;
++
++  };
++
++  class D3D9NvrExtBuffer final : public ComObject<ID3D9NvrExtBuffer> {
++
++  public:
++
++    D3D9NvrExtBuffer(Rc<DxvkBuffer>&& buffer, uint32_t size)
++    : m_buffer(std::move(buffer)), m_size(size) { }
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    UINT STDMETHODCALLTYPE GetSize() { return m_size; }
++
++    const Rc<DxvkBuffer>& GetBuffer() const { return m_buffer; }
++
++  private:
++
++    Rc<DxvkBuffer> m_buffer;
++    uint32_t       m_size;
++
++  };
++
++  class D3D9NvrExtSampler final : public ComObject<ID3D9NvrExtSampler> {
++
++  public:
++
++    explicit D3D9NvrExtSampler(Rc<DxvkSampler>&& sampler)
++    : m_sampler(std::move(sampler)) { }
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    const Rc<DxvkSampler>& GetSampler() const { return m_sampler; }
++
++  private:
++
++    Rc<DxvkSampler> m_sampler;
++
++  };
++
++  /**
++   * \brief NVR extension object, owned by the D3D9 device
++   *
++   * Like D3D9VkInteropDevice: its reference count is the device's.
++   */
++  class D3D9NvrExt final : public ID3D9NvrExt {
++
++  public:
++
++    explicit D3D9NvrExt(D3D9DeviceEx* pDevice);
++
++    ~D3D9NvrExt();
++
++    ULONG STDMETHODCALLTYPE AddRef();
++
++    ULONG STDMETHODCALLTYPE Release();
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    void STDMETHODCALLTYPE GetInfo(
++            NVR_EXT_INFO*                   pInfo);
++
++    HRESULT STDMETHODCALLTYPE CreateComputePipeline(
++      const NVR_EXT_COMPUTE_PIPELINE_DESC*  pDesc,
++            ID3D9NvrExtPipeline**           ppPipeline);
++
++    HRESULT STDMETHODCALLTYPE CreateBuffer(
++      const NVR_EXT_BUFFER_DESC*            pDesc,
++            ID3D9NvrExtBuffer**             ppBuffer);
++
++    HRESULT STDMETHODCALLTYPE CreateSampler(
++      const NVR_EXT_SAMPLER_DESC*           pDesc,
++            ID3D9NvrExtSampler**            ppSampler);
++
++    HRESULT STDMETHODCALLTYPE Dispatch(
++      const NVR_EXT_DISPATCH_DESC*          pDesc);
++
++    HRESULT STDMETHODCALLTYPE UpdateBuffer(
++            ID3D9NvrExtBuffer*              pBuffer,
++            UINT                            Offset,
++            UINT                            Size,
++      const void*                           pData);
++
++    HRESULT STDMETHODCALLTYPE ClearBuffer(
++            ID3D9NvrExtBuffer*              pBuffer,
++            UINT                            Offset,
++            UINT                            Size,
++            UINT                            Value);
++
++    HRESULT STDMETHODCALLTYPE CopyBuffer(
++            ID3D9NvrExtBuffer*              pDst,
++            UINT                            DstOffset,
++            ID3D9NvrExtBuffer*              pSrc,
++            UINT                            SrcOffset,
++            UINT                            Size);
++
++    HRESULT STDMETHODCALLTYPE CopyBufferToTexture(
++            IUnknown*                       pTexture,
++            UINT                            MipLevel,
++            UINT                            Layer,
++            ID3D9NvrExtBuffer*              pSrc,
++            UINT                            SrcOffset);
++
++    HRESULT STDMETHODCALLTYPE CopyTextureToBuffer(
++            ID3D9NvrExtBuffer*              pDst,
++            UINT                            DstOffset,
++            IUnknown*                       pTexture,
++            UINT                            MipLevel,
++            UINT                            Layer);
++
++    HRESULT STDMETHODCALLTYPE ReadBuffer(
++            ID3D9NvrExtBuffer*              pBuffer,
++            UINT                            Offset,
++            UINT                            Size,
++            void*                           pData);
++
++  private:
++
++    struct TextureRef {
++      D3D9CommonTexture* texture = nullptr;
++      uint32_t           mipLevel = 0u;
++      uint32_t           layer = 0u;
++      bool               isSurface = false;
++    };
++
++    /** Resolves a D3D9 texture or surface interface. */
++    static bool ResolveTexture(IUnknown* pResource, uint32_t MipLevel, uint32_t Layer, TextureRef& ref);
++
++    bool ValidateBufferRange(ID3D9NvrExtBuffer* pBuffer, UINT Offset, UINT& Size, UINT Align) const;
++
++    D3D9DeviceEx* m_device;
++
++  };
++
++}
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+new file mode 100644
+index 0000000..260387d
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -0,0 +1,266 @@
++#pragma once
++
++/*
++ * NVR extension for DXVK's D3D9 device ("NVR DXVK").
++ *
++ * This header is the whole public contract between New Vegas Reloaded (NVR) and
++ * an NVR-built DXVK d3d9.dll. It is kept free of Vulkan and DXVK types so that
++ * NVR can include it as is (MSVC, 32-bit) next to <d3d9.h>. A copy of this file
++ * lives in the NVR repository; keep both identical.
++ *
++ * How it works: everything an NVR call records goes through DXVK's own command
++ * stream (the "dxvk-cs" thread) and so runs in order with the D3D9 work before
++ * and after it. DXVK handles image layouts, barriers and resource lifetimes.
++ * No CPU/GPU wait is involved unless a method says so.
++ *
++ * Usage: query ID3D9NvrExt from the IDirect3DDevice9 with QueryInterface.
++ * Stock DXVK and native D3D9 return E_NOINTERFACE; callers fall back to their
++ * D3D9 path.
++ *
++ * Resource slots: a pipeline's bindings name a Slot (0..NVR_EXT_MAX_SLOTS-1)
++ * per binding type family. Images, buffers and samplers each have their own
++ * slot space. A dispatch binds resources to those slots. The slots are
++ * independent of anything D3D9 binds, so a dispatch never disturbs the game's
++ * or NVR's D3D9 state.
++ *
++ * Push constants: the shader's push_constant block starts at offset 0 and may
++ * hold up to NVR_EXT_MAX_PUSH_BYTES. Sampler bindings take their sampler-heap
++ * index from a uint member of that block (PushOffset). The low 16 bits hold the
++ * index; mask with 0xFFFF in the shader. The host side fills those dwords in,
++ * the push data passed to Dispatch is copied over the whole block first.
++ *
++ * Shader conventions (GLSL, compiled with glslangValidator -V --target-env vulkan1.1):
++ *   layout(set = S, binding = B) uniform sampler s_samplers[];   // sampler heap, if samplers are used
++ *   layout(set = S, binding = B) uniform texture2D  t_src;       // NVR_EXT_BIND_SAMPLED_IMAGE
++ *   layout(set = S, binding = B, rgba16f) uniform image2D i_dst; // NVR_EXT_BIND_STORAGE_IMAGE
++ *   layout(set = S, binding = B, std430) buffer Foo { ... };    // NVR_EXT_BIND_STORAGE_BUFFER
++ *   layout(set = S, binding = B, std140) uniform Bar { ... };   // NVR_EXT_BIND_UNIFORM_BUFFER
++ *   layout(push_constant) uniform Push { ...; uint sampler_index; ... };
++ * The set/binding numbers are the shader's own; DXVK remaps them. Use any
++ * values, but each (set, binding) pair must be unique and listed in the
++ * pipeline description.
++ */
++
++#include <d3d9.h>
++#include <unknwn.h>
++
++#define NVR_EXT_VERSION_MAJOR 1
++#define NVR_EXT_VERSION_MINOR 0
++
++#define NVR_EXT_MAX_SLOTS       32
++#define NVR_EXT_MAX_BINDINGS    32
++#define NVR_EXT_MAX_PUSH_BYTES  240
++
++enum NVR_EXT_BIND_TYPE {
++  NVR_EXT_BIND_SAMPLED_IMAGE  = 0,  // texture2D/3D/Cube in the shader; any D3D9 texture or surface
++  NVR_EXT_BIND_STORAGE_IMAGE  = 1,  // image2D etc.; D3D9 render-target textures (DXVK adds storage usage once)
++  NVR_EXT_BIND_STORAGE_BUFFER = 2,  // buffer block; an ID3D9NvrExtBuffer created with NVR_EXT_BUFFER_STORAGE
++  NVR_EXT_BIND_UNIFORM_BUFFER = 3,  // uniform block; an ID3D9NvrExtBuffer created with NVR_EXT_BUFFER_UNIFORM
++  NVR_EXT_BIND_SAMPLER        = 4,  // one entry of the sampler heap, index via push data
++};
++
++enum NVR_EXT_VIEW_TYPE {
++  NVR_EXT_VIEW_2D       = 0,
++  NVR_EXT_VIEW_3D       = 1,
++  NVR_EXT_VIEW_CUBE     = 2,
++  NVR_EXT_VIEW_2D_ARRAY = 3,
++};
++
++enum NVR_EXT_BUFFER_FLAGS {
++  NVR_EXT_BUFFER_STORAGE      = 0x1,
++  NVR_EXT_BUFFER_UNIFORM      = 0x2,
++  NVR_EXT_BUFFER_TRANSFER_SRC = 0x4,  // CopyBufferToTexture source, CopyBuffer source, ReadBuffer source
++  NVR_EXT_BUFFER_TRANSFER_DST = 0x8,  // UpdateBuffer, ClearBuffer, CopyTextureToBuffer, CopyBuffer destination
++};
++
++enum NVR_EXT_FILTER {
++  NVR_EXT_FILTER_NEAREST = 0,
++  NVR_EXT_FILTER_LINEAR  = 1,
++};
++
++enum NVR_EXT_ADDRESS {
++  NVR_EXT_ADDRESS_CLAMP  = 0,
++  NVR_EXT_ADDRESS_WRAP   = 1,
++  NVR_EXT_ADDRESS_MIRROR = 2,
++  NVR_EXT_ADDRESS_BORDER = 3,  // transparent black
++};
++
++/** One descriptor the SPIR-V declares. */
++struct NVR_EXT_BINDING_DESC {
++  UINT              Set;        // as in the SPIR-V
++  UINT              Binding;    // as in the SPIR-V
++  NVR_EXT_BIND_TYPE Type;
++  UINT              Slot;       // resource slot a dispatch binds to (0..NVR_EXT_MAX_SLOTS-1)
++  NVR_EXT_VIEW_TYPE ViewType;   // images only
++  BOOL              Writes;     // storage image/buffer: the shader writes it
++  UINT              PushOffset; // samplers only: byte offset of the uint index in the push block (4-aligned)
++};
++
++struct NVR_EXT_COMPUTE_PIPELINE_DESC {
++  const void*                 pSpirv;         // SPIR-V words
++  UINT                        SpirvSize;      // bytes, multiple of 4
++  UINT                        BindingCount;
++  const NVR_EXT_BINDING_DESC* pBindings;
++  UINT                        PushConstantSize; // size of the shader's push_constant block, 4-aligned, <= NVR_EXT_MAX_PUSH_BYTES; 0 = none
++  BOOL                        UsesSamplerHeap;  // the shader declares the sampler heap
++  UINT                        SamplerHeapSet;
++  UINT                        SamplerHeapBinding;
++  const char*                 pDebugName;       // optional
++};
++
++struct NVR_EXT_BUFFER_DESC {
++  UINT        Size;      // bytes
++  UINT        Flags;     // NVR_EXT_BUFFER_FLAGS
++  const char* pDebugName;
++};
++
++struct NVR_EXT_SAMPLER_DESC {
++  NVR_EXT_FILTER  Filter;   // min and mag; mips are not filtered (NVR's buffers have none)
++  NVR_EXT_ADDRESS Address;  // U, V and W
++};
++
++/** A resource bound for one dispatch. */
++struct NVR_EXT_RESOURCE_BINDING {
++  UINT              Slot;
++  NVR_EXT_BIND_TYPE Type;
++  IUnknown*         pResource;  // IDirect3DBaseTexture9*, IDirect3DSurface9*, ID3D9NvrExtBuffer* or ID3D9NvrExtSampler*
++  UINT              MipLevel;   // textures: first mip of the view (surfaces: ignored, the surface's own)
++  UINT              Offset;     // buffers: byte offset
++  UINT              Size;       // buffers: byte size, 0 = to the end
++  BOOL              Srgb;       // sampled images: sRGB view of a sRGB-capable format
++};
++
++struct NVR_EXT_DISPATCH_DESC {
++  struct ID3D9NvrExtPipeline*     pPipeline;
++  UINT                            BindingCount;
++  const NVR_EXT_RESOURCE_BINDING* pBindings;
++  const void*                     pPushData;     // PushDataSize bytes, copied at offset 0 of the push block
++  UINT                            PushDataSize;
++  UINT                            GroupsX;
++  UINT                            GroupsY;
++  UINT                            GroupsZ;
++};
++
++struct NVR_EXT_INFO {
++  UINT  ExtVersionMajor;
++  UINT  ExtVersionMinor;
++  char  DxvkVersion[32];     // DXVK's own version string of this build
++  UINT  MaxPushBytes;
++  UINT  MaxSlots;
++  UINT  SubgroupSize;        // the GPU's subgroup size (0 if unknown)
++  UINT  MaxWorkgroupInvocations;
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d301")
++ID3D9NvrExtPipeline : public IUnknown {
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d302")
++ID3D9NvrExtBuffer : public IUnknown {
++  virtual UINT STDMETHODCALLTYPE GetSize() = 0;
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d303")
++ID3D9NvrExtSampler : public IUnknown {
++};
++
++/**
++ * \brief NVR extension on the D3D9 device
++ *
++ * All methods are called from the thread that uses the D3D9 device (the game's
++ * render thread), like any other device method. Objects created here are owned
++ * by the caller (Release them) and are not affected by a D3D9 device Reset.
++ */
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d300")
++ID3D9NvrExt : public IUnknown {
++  /** Version and limits of this build. */
++  virtual void STDMETHODCALLTYPE GetInfo(
++          NVR_EXT_INFO*                   pInfo) = 0;
++
++  /**
++   * Creates a compute pipeline from SPIR-V. Fails (D3DERR_INVALIDCALL) when the
++   * description is inconsistent; the DXVK log says why. The pipeline is compiled
++   * on first use (one-time stall on the CS thread).
++   */
++  virtual HRESULT STDMETHODCALLTYPE CreateComputePipeline(
++    const NVR_EXT_COMPUTE_PIPELINE_DESC*  pDesc,
++          ID3D9NvrExtPipeline**           ppPipeline) = 0;
++
++  /** Creates a device-local buffer. Contents are undefined until written. */
++  virtual HRESULT STDMETHODCALLTYPE CreateBuffer(
++    const NVR_EXT_BUFFER_DESC*            pDesc,
++          ID3D9NvrExtBuffer**             ppBuffer) = 0;
++
++  /** Creates a sampler. Equal descriptions share one sampler-heap entry. */
++  virtual HRESULT STDMETHODCALLTYPE CreateSampler(
++    const NVR_EXT_SAMPLER_DESC*           pDesc,
++          ID3D9NvrExtSampler**            ppSampler) = 0;
++
++  /**
++   * Records a compute dispatch after everything the D3D9 device recorded so far.
++   * D3D9 textures bound here may be render targets of earlier passes; DXVK
++   * orders and transitions them. The dispatch must not bind a texture that is
++   * currently set as a render target on the device.
++   */
++  virtual HRESULT STDMETHODCALLTYPE Dispatch(
++    const NVR_EXT_DISPATCH_DESC*          pDesc) = 0;
++
++  /** Writes Size bytes at Offset (staged through DXVK, no wait). Size <= 64 KiB per call. */
++  virtual HRESULT STDMETHODCALLTYPE UpdateBuffer(
++          ID3D9NvrExtBuffer*              pBuffer,
++          UINT                            Offset,
++          UINT                            Size,
++    const void*                           pData) = 0;
++
++  /** Fills Size bytes (4-aligned) at Offset with a 32-bit value. Size 0 = to the end. */
++  virtual HRESULT STDMETHODCALLTYPE ClearBuffer(
++          ID3D9NvrExtBuffer*              pBuffer,
++          UINT                            Offset,
++          UINT                            Size,
++          UINT                            Value) = 0;
++
++  virtual HRESULT STDMETHODCALLTYPE CopyBuffer(
++          ID3D9NvrExtBuffer*              pDst,
++          UINT                            DstOffset,
++          ID3D9NvrExtBuffer*              pSrc,
++          UINT                            SrcOffset,
++          UINT                            Size) = 0;
++
++  /**
++   * Copies tightly packed texels in the texture's own format from the buffer
++   * into one whole subresource (mip MipLevel, face/layer Layer) of a D3D9
++   * texture, or into a surface (then MipLevel and Layer are ignored).
++   */
++  virtual HRESULT STDMETHODCALLTYPE CopyBufferToTexture(
++          IUnknown*                       pTexture,
++          UINT                            MipLevel,
++          UINT                            Layer,
++          ID3D9NvrExtBuffer*              pSrc,
++          UINT                            SrcOffset) = 0;
++
++  /** The reverse of CopyBufferToTexture. */
++  virtual HRESULT STDMETHODCALLTYPE CopyTextureToBuffer(
++          ID3D9NvrExtBuffer*              pDst,
++          UINT                            DstOffset,
++          IUnknown*                       pTexture,
++          UINT                            MipLevel,
++          UINT                            Layer) = 0;
++
++  /**
++   * TEST ONLY: copies Size bytes of a buffer to pData, waiting for the GPU to
++   * finish everything recorded so far. This stalls the CPU for a whole frame's
++   * GPU work; use it for checks, never per frame in play.
++   */
++  virtual HRESULT STDMETHODCALLTYPE ReadBuffer(
++          ID3D9NvrExtBuffer*              pBuffer,
++          UINT                            Offset,
++          UINT                            Size,
++          void*                           pData) = 0;
++};
++
++#ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExt,         0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x00);
++__CRT_UUID_DECL(ID3D9NvrExtPipeline, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x01);
++__CRT_UUID_DECL(ID3D9NvrExtBuffer,   0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x02);
++__CRT_UUID_DECL(ID3D9NvrExtSampler,  0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x03);
++#endif
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 1ce6f2e..7aaff8d 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -48,6 +48,7 @@ d3d9_src = [
+   'd3d9_annotation.cpp',
+   'd3d9_window.cpp',
+   'd3d9_interop.cpp',
++  'd3d9_nvr_ext.cpp',
+   'd3d9_on_12.cpp',
+   'd3d9_bridge.cpp',
+   'd3d9_shader_analysis.cpp',
+@@ -61,7 +62,7 @@ if platform != 'windows'
+   d3d9_link_depends += files('d3d9.sym')
+ endif
+ 
+-d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
++d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res, dxvk_version,
+   dependencies        : [ dxbc_spirv_dep, dxvk_dep ],
+   include_directories : dxvk_include_path,
+   install             : true,
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index fdf6d06..8728a89 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -946,6 +946,23 @@ namespace dxvk {
+       const Rc<DxvkImage>&            image,
+       const DxvkImageUsageInfo&       usageInfo);
+ 
++    /**
++     * \brief NVR extension: push data state snapshot
++     *
++     * The push data state is shared between the graphics and compute bind
++     * points. An injected compute dispatch (NVR DXVK extension) saves it
++     * before and restores it afterwards so the client API's own push data
++     * is not disturbed.
++     */
++    DxvkPushDataState nvrGetPushDataState() const {
++      return m_state.pc;
++    }
++
++    void nvrSetPushDataState(const DxvkPushDataState& state) {
++      m_state.pc = state;
++      m_flags.set(DxvkContextFlag::DirtyPushData);
++    }
++
+     /**
+      * \brief Updates push data
+      * 
+-- 
+2.43.0
+

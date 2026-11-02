@@ -1,0 +1,92 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Mon, 26 Oct 2026 16:00:00 -0400
+Subject: [PATCH] NVR extension 1.5-debug: nvr.debugEnv in dxvk.conf
+
+A dxvk.conf option that sets process environment variables before DXVK
+reads DXVK_DEBUG and before the Vulkan loader searches for layers:
+
+  nvr.debugEnv = "DXVK_DEBUG=validation|VK_ADD_LAYER_PATH=C:/VulkanSDK/<ver>/Bin32|VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true"
+
+so a folder with d3d9.dll + dxvk.conf (NVR's test slots copy exactly
+that) runs a game with the Khronos validation layer and synchronization
+validation, or with D3DPERF events as Vulkan debug labels for RenderDoc
+(DXVK_DEBUG=markers), without a launcher that passes environment
+variables on. Separator '|' (Windows paths use ';'). Absent or empty:
+nothing changes. Each variable set is logged in d3d9.log.
+---
+ src/dxvk/dxvk_instance.cpp | 46 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index cdab2e3..a19304e 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -11,11 +11,55 @@
+ #include "../vulkan/vulkan_util.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <set>
+ #include <sstream>
+ 
++#ifdef _WIN32
++#include <windows.h>
++#endif
++
+ namespace dxvk {
+ 
++  /**
++   * NVR debug environment (NVR extension "1.5-debug", patch 0014)
++   *
++   * dxvk.conf: nvr.debugEnv = "NAME=value|NAME=value|..." sets those process
++   * environment variables before DXVK reads DXVK_DEBUG and before the Vulkan
++   * loader looks for layers. A d3d9.dll + dxvk.conf folder is then enough to
++   * run a game with Vulkan validation (DXVK_DEBUG=validation, VK_ADD_LAYER_PATH,
++   * VK_KHRONOS_VALIDATION_VALIDATE_SYNC) or with D3DPERF labels as Vulkan
++   * debug labels (DXVK_DEBUG=markers) without a launcher that passes them on.
++   * Separator '|' (Windows paths use ';'). Empty or absent: nothing happens.
++   */
++  static void applyNvrDebugEnv(const Config& config) {
++    std::string list = config.getOption<std::string>("nvr.debugEnv", std::string());
++    size_t start = 0;
++
++    while (start < list.size()) {
++      size_t end = list.find('|', start);
++      if (end == std::string::npos)
++        end = list.size();
++
++      std::string item = list.substr(start, end - start);
++      size_t eq = item.find('=');
++
++      if (eq != std::string::npos && eq > 0) {
++        std::string name = item.substr(0, eq);
++        std::string value = item.substr(eq + 1);
++#ifdef _WIN32
++        SetEnvironmentVariableA(name.c_str(), value.c_str());
++#else
++        setenv(name.c_str(), value.c_str(), 1);
++#endif
++        Logger::info(str::format("NVR debugEnv: ", name, "=", value));
++      }
++
++      start = end + 1;
++    }
++  }
++
++
+   DxvkInstance::DxvkInstance(DxvkInstanceFlags flags)
+   : DxvkInstance(DxvkInstanceImportInfo(), flags) {
+ 
+@@ -33,6 +77,8 @@ namespace dxvk {
+     m_config.merge(Config::getAppConfig(env::getExePath()));
+     m_config.logOptions();
+ 
++    applyNvrDebugEnv(m_config);
++
+     m_options = DxvkOptions(m_config);
+ 
+     // Load Vulkan library
+-- 
+2.40.0.windows.1
+

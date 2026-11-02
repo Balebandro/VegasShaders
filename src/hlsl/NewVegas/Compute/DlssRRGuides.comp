@@ -1,0 +1,119 @@
+#version 450
+// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (needs NVR DXVK; effects/TAAFSR.cpp RayReconstruct, docs/next/FORK2-DLSS-RR.md): the
+// pictures DLSS-D takes besides depth and motion (those are FSRPrep's, as DLSS SR gets them), from what NVR has at the RR point (after
+// the Reflections composite, before the fog). One thread per pixel, at the screen's size:
+//  o_color:     the noisy lit picture, decoded to linear: pow(max(c, 0), Linearization). The FP16 scene holds the stored (gamma) curve
+//               here, not linear light: LinearScene leaves it encoded, and the game's tonemap decodes it with TESR_ToneMapping.w.
+//  o_diffuse:   options.x 0 (RRAlbedo 0): flat grey 0.5, so RR denoises texture and light alike; 1: the picture's own colour at a fixed
+//               luminance 0.5 (its chroma kept as the albedo), grey where a pixel is too dark to have a colour worth keeping (its chroma
+//               would only be noise); 2 (UNOFFICIAL 2026-10-31 AlbedoBuffer, [Main.Main.Quality] AlbedoBuffer): the surface's own linear
+//               base colour from TESR_AlbedoBuffer where NVR's templates wrote it this frame (a 1), times (1 - metal) with the metal from
+//               TESR_MaterialBuffer.r's fraction; the chroma stand-in (1) where nothing was written (the game's own shaders, skin without
+//               the screen-space skin blur, the weapon).
+//  o_specular:  the integrated specular reflectance for this roughness and view angle: Karis' analytic fit of the split-sum environment
+//               BRDF ("Physically Based Shading on Mobile", 2014, after Lazarov 2013), EnvBRDFApprox exactly as Shaders/Includes/PBR.hlsl
+//               has it, of a dielectric (F0 0.04), or with options.x 2 of F0 = lerp(0.04, albedo, metal) where the albedo is written.
+//  o_normals:   the unit surface normal: TESR_NormalsBuffer's view-space normal turned into camera-relative world space by the camera's
+//               axes (options.y 1, RRNormals 1: left in view space); w = the roughness (DLSS-D's packed roughness mode reads it there,
+//               the unpacked default ignores it). The sky (no depth) points back at the camera.
+//  o_roughness: linear (perceptual) roughness, the one GGX squares: TESR_MaterialBuffer.b where this frame's material buffer holds one
+//               (a material class in r, b >= 0; options.z 1), else RRRoughness (view.w); 1 on the sky.
+// The first-person weapon is taken as rendered (its pixels are put back unchanged after RR: DlssRRComposite).
+#extension GL_GOOGLE_include_directive : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_color;       // the frame chain's current image (the stored curve)
+layout(set = 1, binding = 1) uniform texture2D t_normals;     // TESR_NormalsBuffer (view-space normal x 0.5 + 0.5)
+layout(set = 1, binding = 2) uniform texture2D t_depth;       // TESR_DepthBuffer (linear depth / far; 1 on the sky)
+layout(set = 1, binding = 3) uniform texture2D t_material;    // TESR_MaterialBuffer (r class, b roughness, -1 none; a placeholder while options.z is 0)
+layout(set = 1, binding = 4, rgba16f) writeonly uniform image2D o_color;
+layout(set = 1, binding = 5, rgba16f) writeonly uniform image2D o_diffuse;
+layout(set = 1, binding = 6, rgba16f) writeonly uniform image2D o_specular;
+layout(set = 1, binding = 7, rgba16f) writeonly uniform image2D o_normals;
+layout(set = 1, binding = 8, r16f) writeonly uniform image2D o_roughness;
+layout(set = 1, binding = 9) uniform texture2D t_albedo;      // TESR_AlbedoBuffer (rgb linear base colour, a 1 written; a placeholder while options.x is below 2)
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    vec4 right;                 // xyz: the camera's right axis in world space (TESR_ViewTransform's first column)
+    vec4 up;                    // xyz: its up axis (second column)
+    vec4 forward;               // xyz: its forward axis (third column)
+    vec4 view;                  // x: 1 / projection _11, y: 1 / _22 (the view ray per NDC unit), z: Linearization, w: RRRoughness
+    vec4 options;               // x: RRAlbedo (0 grey, 1 the picture's chroma, 2 t_albedo where written, else the chroma), y: 1 = normals in view space, z: 1 = t_material holds this frame's
+    vec4 size;                  // xy: the screen size in pixels
+} cb;
+
+layout(push_constant) uniform Push {
+    uint pointIndex;            // 0: POINT, CLAMP (the extension writes the heap index)
+} pc;
+
+#define POINT_S NVR_SAMPLER(pc.pointIndex)
+
+// Karis' fit (Shaders/Includes/PBR.hlsl EnvBRDFApprox): f0 * A + B of the split-sum environment BRDF.
+vec3 EnvBRDFApprox(vec3 f0, float roughness, float NdotV) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+void main() {
+    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, ivec2(cb.size.xy)))) return;
+    vec2 uv = (vec2(pixel) + 0.5) / cb.size.xy;
+
+    vec3 color = pow(max(texelFetch(sampler2D(t_color, POINT_S), pixel, 0).rgb, vec3(0.0)), vec3(cb.view.z));
+    // (review 2026-10-30) the decode is fp32 but the guide is FP16: a stored value over ~154 (at 2.2) would become +Inf, and an Inf / NaN
+    // already in the chain would spread through DLSS-D's history. The game's tonemap never stored this value, so it is new here: cap it.
+    color = min(color, vec3(65000.0));
+    if (any(isnan(color))) color = vec3(0.0);
+    float linear01 = texelFetch(sampler2D(t_depth, POINT_S), pixel, 0).x;
+    bool sky = linear01 >= 0.9999;
+
+    // The view ray through this pixel (view space: +x right, +y up, +z forward), as FSRPrep's toWorld builds it.
+    vec3 toCamera = -normalize(vec3((2.0 * uv.x - 1.0) * cb.view.x, (1.0 - 2.0 * uv.y) * cb.view.y, 1.0));
+    vec3 n = texelFetch(sampler2D(t_normals, POINT_S), pixel, 0).xyz * 2.0 - 1.0;
+    float len = length(n);
+    n = (sky || len < 1e-3) ? toCamera : n / len;
+
+    float roughness = cb.view.w;
+    vec4 material = vec4(0.0);
+    if (cb.options.z > 0.5) {
+        material = texelFetch(sampler2D(t_material, POINT_S), pixel, 0);
+        if (material.r > 0.5 && material.b >= 0.0) roughness = material.b;
+    }
+    roughness = sky ? 1.0 : saturate(roughness);
+
+    // UNOFFICIAL 2026-10-31 AlbedoBuffer (options.x 2): the written albedo splits into the diffuse and the specular guide by the material's metal
+    vec3 f0 = vec3(0.04);
+    vec3 diffuse = vec3(0.5);
+    bool albedoWritten = false;
+    if (cb.options.x > 1.5 && !sky) {
+        vec4 albedo = texelFetch(sampler2D(t_albedo, POINT_S), pixel, 0);
+        if (albedo.a > 0.5) {
+            float metal = material.r > 0.5 ? saturate(fract(material.r) / 0.49) : 0.0;
+            vec3 base = saturate(albedo.rgb);
+            diffuse = base * (1.0 - metal);
+            f0 = mix(vec3(0.04), base, metal);
+            albedoWritten = true;
+        }
+    }
+    if (cb.options.x > 0.5 && !albedoWritten) {
+        float l = luma(color);
+        diffuse = mix(vec3(0.5), saturate(color / max(l, 1e-4) * 0.5), smoothstep(0.0, 0.002, l));
+    }
+
+    // (saturate: the fit reaches about 1.04 at a grazing view on a mirror; a reflectance is at most 1)
+    vec3 specular = saturate(EnvBRDFApprox(f0, roughness, saturate(dot(n, toCamera))));
+
+    vec3 normal = cb.options.y > 0.5 ? n : n.x * cb.right.xyz + n.y * cb.up.xyz + n.z * cb.forward.xyz;
+
+    imageStore(o_color, pixel, vec4(color, 1.0));
+    imageStore(o_diffuse, pixel, vec4(diffuse, 1.0));
+    imageStore(o_specular, pixel, vec4(specular, 1.0));
+    imageStore(o_normals, pixel, vec4(normalize(normal), roughness));
+    imageStore(o_roughness, pixel, vec4(roughness, 0.0, 0.0, 0.0));
+}

@@ -1,0 +1,29 @@
+# NVR DXVK debug template: Vulkan validation layers + synchronization validation.
+# Copy this file next to the fork's d3d9.dll and rename it to dxvk.conf (a test slot: put both in the FORK_D3D9 folder).
+# Needs: a fork d3d9.dll built with patch 0015 (0014 before the 10-27 renumbering) (nvr.debugEnv), and the LunarG Vulkan SDK installed WITH its 32-bit
+# components (Fallout: New Vegas is a 32-bit game: it can only load the 32-bit layer in the SDK's Bin32 folder).
+# The path below is the installed SDK 1.3.296.0 (the last Windows SDK with 32-bit layers; its installer also registered
+# them, so VK_ADD_LAYER_PATH is a belt-and-braces extra). Edit it only for another SDK.
+# Messages go into DXVK's log next to the game (FalloutNV_d3d9.log), lines starting "err:" / "warn:".
+# Validation makes the game MUCH slower (often 2-10x): only for hunting a broken frame, never for timing.
+# Guide: docs/next/FORK-DEBUG-CAPTURE.md
+
+# DXVK_DEBUG=validation              DXVK enables VK_LAYER_KHRONOS_validation and sends its messages to the log
+# VK_ADD_LAYER_PATH                  where the Vulkan loader finds the 32-bit layer (forward slashes are fine)
+# VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true      synchronization validation (missing barriers, read/write hazards)
+# VK_LAYER_ENABLES=...SYNCHRONIZATION...        the same switch for older validation layers
+# VK_LOADER_LAYERS_DISABLE=~implicit~           overlays (RivaTuner, Overwolf, OBS, Steam) off for this run: cleaner messages
+nvr.debugEnv = "DXVK_DEBUG=validation|VK_ADD_LAYER_PATH=C:/VulkanSDK/1.3.296.0/Bin32|VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true|VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT|VK_LOADER_LAYERS_DISABLE=~implicit~"
+
+# ON by default for SDK 1.3.296 (2026-10-26): that layer (October 2024) is older than the descriptor extension DXVK 3.0
+# prefers, and an older layer reported "set not bound" for EVERY draw on that path, DXVK's own draws too (Linux test,
+# layer 1.3.275). DXVK's legacy descriptor path is fully understood by the layer and was clean in that test
+# (docs/next/NVR-DXVK-EXTENSION.md, "Verified here"). It changes only how DXVK binds descriptors internally, not what
+# NVR or the game draws. Comment both out only with a newer 32-bit layer, to validate the play-time path as well.
+dxvk.enableDescriptorHeap = False
+dxvk.enableDescriptorBuffer = False
+# Expected noise from a 1.3.296 layer on DXVK 3.0: a few "unknown/unsupported extension" warnings at device creation for
+# extensions newer than the layer. They are not findings; real problems are VUID-... and SYNC-HAZARD-... lines.
+
+# Depth on NVIDIA with a fork WITHOUT the RESZ-on-every-vendor patch (0007-NVR-RESZ...): uncomment.
+# d3d9.customVendorId = 1002

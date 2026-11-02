@@ -1,0 +1,14 @@
+# The NVR effect passes with an SM6 (SPIR-V) build for the NVR DXVK fork: <Effect> <Technique> <pass index> [NAME=VALUE pins].
+# tools/nvr-sm6/build.py compiles them into src/hlsl/NewVegas/Compute/Sm6; [Main.Main.Performance] NvrSm6Shaders uses them.
+# A pin builds only that state of a define (NAME=- : not defined); without pins every state of every define the effect tests.
+
+# VolumetricFog's dedicated path (RenderDedicated): the half-resolution estimate (two targets) and the full-resolution
+# reconstruct, plain and composite (sun shadows + AO folded in). The composite was at ps_3_0's 224 constants with the physical sky.
+VolumetricFog DedicatedFog 0
+VolumetricFog DedicatedFog 1
+VolumetricFog CompositeFog 0
+VolumetricFog CompositeFog 1
+
+# PointShadows' lamp mask (MergedPointShadows: 11 shadow cubes + depth + normals = 13 of ps_3_0's 16 samplers, its constants at the
+# 224 limit once the preshader has run): the second SM6 proof, through EffectRecord::Render's generic hook (FrameVS, no states).
+PointShadows MergedPointShadows 0

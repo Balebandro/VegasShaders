@@ -1,0 +1,1264 @@
+From f9d97f00b19bf613394fdb170370534fe5607c86 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 22:52:47 -0400
+Subject: [PATCH] NVR extension 1.7-displace: tessellation displacement for
+ registered D3D9 shader pairs
+
+A separate interface, ID3D9NvrExtTess (d3d9_nvr_ext_api.h; ID3D9NvrExt and its
+version are unchanged). NVR registers a vertex shader with a tessellation control
+shader and pixel shaders of the same family with tessellation evaluation shaders,
+before the D3D9 shaders are created. A draw whose bound vertex and pixel shaders
+belong to one family then runs VS -> TCS -> TES -> PS from a patch list of 3
+control points (D3D9DeviceEx::ApplyPrimitiveType hook): a triangle list as is, a
+triangle strip from DrawPrimitive / DrawIndexedPrimitive as three patch lists over
+its index windows from its first, second and third index (every strip triangle
+once; the TCS gets the window in its push data and swaps the odd triangles' first
+two control points). Every other draw takes the normal path. The TES may read the
+pixel shader's textures and samplers, the vertex shader's float constants and the
+clip planes; per-draw push data gives it the compacted constant indices and the
+signs of two pixel shader registers. The interfaces (TCS inputs vs VS outputs,
+TES outputs vs the PS inputs the VS writes) are checked on the CS thread at a
+pair's first draw; a mismatch is logged and the pair draws untessellated.
+Wireframe debug view. The TCS and TES push blocks start at shader offset 32 (MaxSharedPushDataSize),
+after D3D9's shared block, as DXVK's own D3D9 shaders do. Pixel shader texture binds also mark the TES stage once
+anything is registered (pipeline-library layouts keep the TES descriptors in the
+pre-raster set).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/d3d9/d3d9_device.cpp    |  48 ++-
+ src/d3d9/d3d9_device.h      |   3 +
+ src/d3d9/d3d9_nvr_ext_api.h | 101 ++++++
+ src/d3d9/d3d9_nvr_tess.cpp  | 703 ++++++++++++++++++++++++++++++++++++
+ src/d3d9/d3d9_nvr_tess.h    | 190 ++++++++++
+ src/d3d9/d3d9_shader.h      |  12 +
+ src/d3d9/meson.build        |   1 +
+ 7 files changed, 1055 insertions(+), 3 deletions(-)
+ create mode 100644 src/d3d9/d3d9_nvr_tess.cpp
+ create mode 100644 src/d3d9/d3d9_nvr_tess.h
+
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index a77bd66..00e5843 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -62,6 +62,7 @@ namespace dxvk {
+     , m_d3d9Interop        ( this )
+     , m_nvrExt             ( this )
+     , m_nvrExtHdr          ( this )
++    , m_nvrTess            ( this )
+     , m_d3d9On12Args       ( pAdapter->Get9On12Args() )
+     , m_d3d9On12           ( this )
+     , m_d3d8Bridge         ( this ) {
+@@ -211,6 +212,11 @@ namespace dxvk {
+       return S_OK;
+     }
+ 
++    if (riid == __uuidof(ID3D9NvrExtTess)) {
++      *ppvObject = ref(&m_nvrTess);
++      return S_OK;
++    }
++
+     if (riid == __uuidof(IDirect3DDevice9On12)) {
+       if (m_d3d9On12Args.Enable9On12) {
+         *ppvObject = ref(&m_d3d9On12);
+@@ -3035,8 +3041,17 @@ namespace dxvk {
+     UploadPerDrawData(StartVertex, vertexCount, firstIndex, 0,
+       baseVertexIndex, &dynamicSysmemVBOs, nullptr);
+ 
++    // NVR extension 1.7-displace: this draw may take a triangle strip through the tessellation path
++    if (unlikely(m_nvrTess.IsUsed()))
++      m_nvrTess.BeginDraw();
++
+     PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, false);
+ 
++    if (unlikely(m_nvrTess.StripPending())) {
++      m_nvrTess.EmitStripDraw(false, StartVertex, vertexCount, 0, 1u);
++      return D3D_OK;
++    }
++
+     // Tests on Windows show that D3D9 does not do non-indexed instanced draws.
+     VkDrawIndirectCommand draw = {};
+     draw.vertexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
+@@ -3086,8 +3101,17 @@ namespace dxvk {
+     UploadPerDrawData(MinVertexIndex, NumVertices, StartIndex, indexCount,
+       BaseVertexIndex, &dynamicSysmemVBOs, &dynamicSysmemIBO);
+ 
++    // NVR extension 1.7-displace: this draw may take a triangle strip through the tessellation path
++    if (unlikely(m_nvrTess.IsUsed()))
++      m_nvrTess.BeginDraw();
++
+     PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO);
+ 
++    if (unlikely(m_nvrTess.StripPending())) {
++      m_nvrTess.EmitStripDraw(true, StartIndex, indexCount, BaseVertexIndex, GetInstanceCount());
++      return D3D_OK;
++    }
++
+     VkDrawIndexedIndirectCommand draw = {};
+     draw.indexCount = indexCount;
+     draw.instanceCount = GetInstanceCount();
+@@ -7096,6 +7120,9 @@ namespace dxvk {
+     state.setDepthClip(true);
+     state.setFrontFace(VK_FRONT_FACE_CLOCKWISE);
+     state.setPolygonMode(DecodeFillMode(D3DFILLMODE(rs[D3DRS_FILLMODE])));
++    // NVR extension 1.7-displace: the tessellated draws' wireframe debug view
++    if (unlikely(m_nvrTess.WireframeActive()))
++      state.setPolygonMode(VK_POLYGON_MODE_LINE);
+     state.setFlatShading(m_state.renderStates[D3DRS_SHADEMODE] == D3DSHADE_FLAT);
+     state.setSampleCount(m_state.renderStates[D3DRS_MULTISAMPLEANTIALIAS]
+       ? VkSampleCountFlags(0u)
+@@ -7280,18 +7307,24 @@ namespace dxvk {
+ 
+     EmitCs([
+       cSlot       = StateSampler,
+-      cImageView  = commonTex->GetSampleView(srgb)
++      cImageView  = commonTex->GetSampleView(srgb),
++      cExtra      = m_nvrTess.ExtraTextureStages()
+     ](DxvkContext* ctx) mutable {
+       auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(cSlot);
++      // NVR extension 1.7-displace: a tessellation evaluation shader may read the pixel shader's textures
++      if (stage & VK_SHADER_STAGE_FRAGMENT_BIT)
++        stage |= cExtra;
+       ctx->bindResourceImageView(stage, slot, std::move(cImageView));
+     });
+   }
+ 
+ 
+   void D3D9DeviceEx::UnbindTextures(uint32_t mask) {
+-    EmitCs([cMask = mask] (DxvkContext* ctx) {
++    EmitCs([cMask = mask, cExtra = m_nvrTess.ExtraTextureStages()] (DxvkContext* ctx) {
+       for (uint32_t i : bit::BitMask(cMask)) {
+         auto [stage, slot] = D3D9ShaderResourceMapping::getTextureSlotInfo(i);
++        if (stage & VK_SHADER_STAGE_FRAGMENT_BIT)
++          stage |= cExtra;
+         ctx->bindResourceImageView(stage, slot, nullptr);
+       }
+     });
+@@ -8026,7 +8059,9 @@ namespace dxvk {
+ 
+     // NVR extension: a registered SPIR-V replacement for this bytecode takes the place of the converted shader
+     if (Rc<DxvkShader> replacement = m_nvrExt.BuildReplacementShader(ShaderType, pShaderBytecode, bytecodeLength, analysis)) {
+-      *pShaderModule   = D3D9CommonShader(std::move(analysis), std::move(replacement));
++      D3D9CommonShader replaced(std::move(analysis), std::move(replacement));
++      m_nvrTess.Attach(ShaderType, pShaderBytecode, bytecodeLength, replaced);   // NVR extension 1.7-displace
++      *pShaderModule   = std::move(replaced);
+       *pBytecodeLength = bytecodeLength;
+       return D3D_OK;
+     }
+@@ -8043,6 +8078,9 @@ namespace dxvk {
+     if (FAILED(hr))
+       return hr;
+ 
++    // NVR extension 1.7-displace: a registered shader gets its tessellation attachment (nothing otherwise)
++    m_nvrTess.Attach(ShaderType, pShaderBytecode, bytecodeLength, commonShader);
++
+     *pShaderModule   = std::move(commonShader);
+     *pBytecodeLength = bytecodeLength;
+     return D3D_OK;
+@@ -8508,6 +8546,10 @@ namespace dxvk {
+     if (unlikely(PrimType == D3DPT_FORCE_DWORD))
+       PrimType = D3DPT_POINTLIST;
+ 
++    // NVR extension 1.7-displace: a registered shader pair's triangle lists are drawn as tessellated patches
++    if (unlikely(m_nvrTess.IsUsed()) && m_nvrTess.ApplyDraw(PrimType))
++      return;
++
+     if (m_iaState.primitiveType != PrimType) {
+       m_iaState.primitiveType = PrimType;
+ 
+diff --git a/src/d3d9/d3d9_device.h b/src/d3d9/d3d9_device.h
+index b33224e..ebdf55e 100644
+--- a/src/d3d9/d3d9_device.h
++++ b/src/d3d9/d3d9_device.h
+@@ -23,6 +23,7 @@
+ #include "d3d9_interop.h"
+ #include "d3d9_nvr_ext.h"
+ #include "d3d9_nvr_hdr.h"
++#include "d3d9_nvr_tess.h"
+ #include "d3d9_on_12.h"
+ 
+ #include <cstdint>
+@@ -232,6 +233,7 @@ namespace dxvk {
+     friend D3D9VkInteropDevice;
+     friend D3D9NvrExt;
+     friend D3D9NvrExtHdr;
++    friend D3D9NvrTess;
+ 
+     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
+   public:
+@@ -1701,6 +1703,7 @@ namespace dxvk {
+     D3D9VkInteropDevice             m_d3d9Interop;
+     D3D9NvrExt                      m_nvrExt;
+     D3D9NvrExtHdr                   m_nvrExtHdr;
++    D3D9NvrTess                     m_nvrTess;          // NVR extension 1.7-displace (fork patch 0021)
+     D3D9ON12_ARGS                   m_d3d9On12Args = { };
+     D3D9On12                        m_d3d9On12;
+     DxvkD3D8Bridge                  m_d3d8Bridge;
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index f0b0b1a..470ef21 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -648,7 +648,108 @@ ID3D9NvrExtReadback : public IUnknown {
+ __CRT_UUID_DECL(ID3D9NvrExtReadback, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x15);
+ #endif
+ 
++/*
++ * Tessellation displacement ("1.7-displace", fork patch 0021). A separate interface, so ID3D9NvrExt and
++ * its version stay as they are: query it from the device (or from ID3D9NvrExt) with
++ * QueryInterface(__uuidof(ID3D9NvrExtTess)); a d3d9.dll without it answers E_NOINTERFACE.
++ *
++ * NVR registers, before the D3D9 shaders are created (as for 1.2's replacements):
++ *  - a vertex shader with a tessellation control shader (TCS, 3 control points) under a family number;
++ *  - pixel shaders of the same family, each with its tessellation evaluation shader (TES), one per
++ *    output winding.
++ * A draw whose vertex and pixel shaders were registered under the same family, drawn as a triangle list
++ * (indexed or not) while SetTessState enables it, runs VS -> TCS -> TES -> PS from a patch list of 3
++ * control points. A triangle strip from DrawPrimitive / DrawIndexedPrimitive is drawn as three patch lists
++ * over its index windows from its first, second and third index (together every strip triangle once):
++ * the TCS's p[7] (ControlParams[7], DXVK's own) is then the window 0 / 1 / 2, and -1 for a triangle list;
++ * patch gl_PrimitiveID of window k is strip triangle k + 3 * gl_PrimitiveID, and the TCS must swap the first
++ * two control points of the odd ones (their winding is reversed in a strip). Every other draw is untouched
++ * (fans, strips from the UP draws: counted in the stats, drawn as they are).
++ * The vertex shader is still DXVK's conversion of the D3D9 bytecode: the TCS reads its outputs, the TES
++ * writes what the pixel shader reads, at the D3D9 semantic locations (0 NORMAL0, 1..8 TEXCOORD0..7,
++ * 9/10 COLOR0/1, 11 FOG; vec4 each). At the first such draw of a pair DXVK checks that the TCS reads only
++ * what the vertex shader writes and that the TES writes everything the pixel shader reads from the vertex
++ * shader; a pair that fails is logged once and always drawn untessellated.
++ *
++ * GLSL contract (glslangValidator -V --target-env vulkan1.1):
++ *   Both push_constant blocks start at offset 32 (layout(offset = 32) on the first member): offsets 0-31 are D3D9's
++ *   shared block (fog, alpha ref), which every graphics stage of the pipeline sees; a block declared from 0 reads that.
++ *   TCS: layout(vertices = 3) out;
++ *        layout(push_constant) uniform Push { layout(offset = 32) float p[8]; };  // ControlParams[0..6]; p[7] the strip window
++ *   TES: layout(triangles, ..., cw) in for Winding 0 (keeps the input triangles' winding: Vulkan's tessellation
++ *        domain origin is upper left), ccw for Winding 1. May declare:
++ *        layout(set = 0, binding = 0) uniform sampler s_samplers[];                  // DXVK's sampler heap
++ *        layout(set = 1, binding = i) uniform texture2D t_i;                          // pixel shader sampler s_i, every bit of TextureMask
++ *        layout(set = 2, binding = 0, std140) uniform VsConsts { vec4 c[256]; };      // the vertex shader's float constants (compacted)
++ *        layout(set = 2, binding = 1, std140) uniform ClipPlanes { vec4 plane[6]; };  // D3D9 user clip planes (clip space; 0 = off)
++ *        layout(push_constant) uniform Push {
++ *          layout(offset = 32)
++ *          uint  samplerIndex[4]; // heap index of pixel shader sampler i (i < 8): bits 16 * (i & 1) of [i / 2]
++ *          uint  vsIndex;         // byte k: the compacted index of VsFloatRegisters[k] in VsConsts.c (0xFF: not used by the VS)
++ *          uint  psBits;          // bit 4 * j + k: component k of pixel shader register PsFloatRegisters[j] is > 0 (read per draw)
++ *          float evalParams[4];   // NVR_EXT_TESS_STATE.EvalParams
++ *        };
++ *        The TES writes gl_Position (and should write gl_ClipDistance[i] = dot(gl_Position, plane[i])).
++ */
++struct NVR_EXT_TESS_VS_DESC {
++  const void*                 pBytecode;            // the D3D9 vertex shader
++  UINT                        BytecodeSize;
++  UINT                        Family;               // nonzero
++  const void*                 pControlSpirv;        // the TCS
++  UINT                        ControlSpirvSize;
++  UINT                        VsFloatRegisters[4];  // vertex shader constant registers the TES reads (0xFFFFFFFF: none)
++  const char*                 pDebugName;
++};
++
++struct NVR_EXT_TESS_PS_DESC {
++  const void*                 pBytecode;            // the D3D9 pixel shader
++  UINT                        BytecodeSize;
++  UINT                        Family;
++  const void*                 pEvalSpirv[2];        // the TES for Winding 0 and 1 ([1] may be null: [0] for both)
++  UINT                        EvalSpirvSize[2];
++  UINT                        TextureMask;          // pixel shader samplers s0..s7 the TES reads; each must be one the pixel shader uses
++  UINT                        PsFloatRegisters[2];  // pixel shader registers whose components' signs go to psBits (0xFFFFFFFF: none)
++  const char*                 pDebugName;
++};
++
++struct NVR_EXT_TESS_STATE {
++  BOOL                        Enable;
++  UINT                        Winding;              // 0 or 1: which TES of each pixel shader
++  UINT                        Wireframe;            // 1: tessellated draws are drawn as lines (debug view)
++  FLOAT                       ControlParams[8];     // the TCS's push data ([7] is replaced by DXVK: the strip window, -1 for lists)
++  FLOAT                       EvalParams[4];        // the TES's push data (after its 24 bytes of indices)
++};
++
++struct NVR_EXT_TESS_STATS {
++  UINT64                      TessellatedDraws;     // draws that ran with tessellation (a strip counts once)
++  UINT64                      OtherTopologyDraws;   // family draws left as they are: fans, strips of the UP draws, other types
++  UINT64                      Bindings;             // times the tessellation shaders were (re)bound
++  UINT                        VertexShaders;        // registered shaders that were created
++  UINT                        PixelShaders;
++  UINT                        RefusedPairs;         // shaders the interface check turned away (logged)
++};
++
++MIDL_INTERFACE("6e2b0f3a-9c14-4d57-8a41-b2f0c7a9d321")
++ID3D9NvrExtTess : public IUnknown {
++  /** Registers a vertex shader and its TCS. D3DERR_INVALIDCALL when the bytecode or SPIR-V is unusable (logged). */
++  virtual HRESULT STDMETHODCALLTYPE RegisterTessVertexShader(
++    const NVR_EXT_TESS_VS_DESC*           pDesc) = 0;
++
++  /** Registers a pixel shader and its TES. */
++  virtual HRESULT STDMETHODCALLTYPE RegisterTessPixelShader(
++    const NVR_EXT_TESS_PS_DESC*           pDesc) = 0;
++
++  /** Switches tessellation on or off and sets its parameters; applies from the next draw. Call it once a frame. */
++  virtual HRESULT STDMETHODCALLTYPE SetTessState(
++    const NVR_EXT_TESS_STATE*             pState) = 0;
++
++  /** Cumulative counters (read twice and subtract). */
++  virtual HRESULT STDMETHODCALLTYPE GetTessStats(
++          NVR_EXT_TESS_STATS*             pStats) = 0;
++};
++
+ #ifndef _MSC_VER
++__CRT_UUID_DECL(ID3D9NvrExtTess,     0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x21);
+ __CRT_UUID_DECL(ID3D9NvrExtHdr,      0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x10);
+ __CRT_UUID_DECL(ID3D9NvrExt,         0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x00);
+ __CRT_UUID_DECL(ID3D9NvrExtPipeline, 0x6e2b0f3a,0x9c14,0x4d57,0x8a,0x41,0xb2,0xf0,0xc7,0xa9,0xd3,0x01);
+diff --git a/src/d3d9/d3d9_nvr_tess.cpp b/src/d3d9/d3d9_nvr_tess.cpp
+new file mode 100644
+index 0000000..140fd2a
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_tess.cpp
+@@ -0,0 +1,703 @@
++#include "d3d9_nvr_tess.h"
++#include "d3d9_device.h"
++#include "d3d9_shader.h"
++#include "d3d9_shader_analysis.h"
++#include "d3d9_constant_copy.h"
++#include "d3d9_util.h"
++
++#include <util/util_md5.h>
++
++#include "../dxvk/dxvk_context.h"
++#include "../dxvk/dxvk_shader_io.h"
++#include "../dxvk/dxvk_shader_spirv.h"
++
++#include <cstring>
++#include <utility>
++
++namespace dxvk {
++
++  D3D9NvrTess::D3D9NvrTess(D3D9DeviceEx* pDevice)
++  : m_device(pDevice) {
++
++  }
++
++
++  D3D9NvrTess::~D3D9NvrTess() {
++
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrTess::AddRef() {
++    return m_device->AddRef();
++  }
++
++
++  ULONG STDMETHODCALLTYPE D3D9NvrTess::Release() {
++    return m_device->Release();
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrTess::QueryInterface(REFIID riid, void** ppvObject) {
++    return m_device->QueryInterface(riid, ppvObject);
++  }
++
++
++  std::string D3D9NvrTess::HashBytecode(const void* pBytecode, size_t Length) {
++    auto hasher = dxbc_spv::util::md5::Hasher();
++    hasher.update(pBytecode, Length);
++    auto digest = hasher.finalize();
++
++    std::string result;
++    for (size_t i = 0; i < digest.data.size(); i++) {
++      static const char hex[] = "0123456789abcdef";
++      result.push_back(hex[digest.data[i] >> 4]);
++      result.push_back(hex[digest.data[i] & 0xF]);
++    }
++    return result;
++  }
++
++
++  static bool NvrTessCopySpirv(const void* pSpirv, UINT Size, std::vector<uint32_t>& Words) {
++    Words.clear();
++
++    if (pSpirv == nullptr || Size < 20u || (Size & 3u))
++      return false;
++
++    Words.resize(Size / 4u);
++    std::memcpy(Words.data(), pSpirv, Size);
++    return Words[0] == 0x07230203u;   // the SPIR-V magic number
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrTess::RegisterTessVertexShader(const NVR_EXT_TESS_VS_DESC* pDesc) {
++    if (unlikely(pDesc == nullptr || pDesc->pBytecode == nullptr || pDesc->BytecodeSize < 8u || !pDesc->Family))
++      return D3DERR_INVALIDCALL;
++
++    const char* name = pDesc->pDebugName ? pDesc->pDebugName : "NVR tessellated vertex shader";
++
++    if (!m_device->GetDXVKDevice()->features().core.features.tessellationShader) {
++      Logger::warn(str::format("NVR tess: ", name, ": this GPU has no tessellation shaders; it stays as it is"));
++      return D3DERR_NOTAVAILABLE;
++    }
++
++    dxbc_spv::util::ByteReader reader(pDesc->pBytecode, pDesc->BytecodeSize);
++    D3D9ShaderAnalysis analysis(reader, false);
++
++    if (unlikely(!analysis || analysis.GetShaderInfo().getType() != dxbc_spv::sm3::ShaderType::eVertex)) {
++      Logger::err(str::format("NVR tess: ", name, ": the bytecode is not a usable D3D9 vertex shader"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    PendingVs p;
++
++    if (!NvrTessCopySpirv(pDesc->pControlSpirv, pDesc->ControlSpirvSize, p.tcs)) {
++      Logger::err(str::format("NVR tess: ", name, ": the tessellation control shader is not SPIR-V"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    for (uint32_t k = 0; k < 4u; k++)
++      p.vsRegs[k] = pDesc->VsFloatRegisters[k];
++
++    p.family = pDesc->Family;
++    p.name = name;
++
++    std::string key = HashBytecode(pDesc->pBytecode, analysis.GetLength());
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    { std::lock_guard guard(m_mutex);
++      m_vs[key] = std::move(p);
++    }
++
++    m_extraStages = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
++    m_used.store(true);
++
++    Logger::info(str::format("NVR tess: vertex shader '", name, "' registered for ", key, " (family ", pDesc->Family, ")"));
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrTess::RegisterTessPixelShader(const NVR_EXT_TESS_PS_DESC* pDesc) {
++    if (unlikely(pDesc == nullptr || pDesc->pBytecode == nullptr || pDesc->BytecodeSize < 8u || !pDesc->Family))
++      return D3DERR_INVALIDCALL;
++
++    const char* name = pDesc->pDebugName ? pDesc->pDebugName : "NVR tessellated pixel shader";
++
++    if (!m_device->GetDXVKDevice()->features().core.features.tessellationShader)
++      return D3DERR_NOTAVAILABLE;
++
++    dxbc_spv::util::ByteReader reader(pDesc->pBytecode, pDesc->BytecodeSize);
++    D3D9ShaderAnalysis analysis(reader, false);
++
++    if (unlikely(!analysis || analysis.GetShaderInfo().getType() != dxbc_spv::sm3::ShaderType::ePixel)) {
++      Logger::err(str::format("NVR tess: ", name, ": the bytecode is not a usable D3D9 pixel shader"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (unlikely(pDesc->TextureMask & ~0xFFu)) {
++      Logger::err(str::format("NVR tess: ", name, ": TextureMask names a sampler above s7"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (unlikely(pDesc->TextureMask & ~analysis.GetSamplerMask())) {
++      Logger::err(str::format("NVR tess: ", name, ": TextureMask ", pDesc->TextureMask, " names samplers the pixel shader does not use (its mask ",
++        analysis.GetSamplerMask(), "); it stays as it is"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    PendingPs p;
++
++    if (!NvrTessCopySpirv(pDesc->pEvalSpirv[0], pDesc->EvalSpirvSize[0], p.tes[0])) {
++      Logger::err(str::format("NVR tess: ", name, ": the tessellation evaluation shader is not SPIR-V"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    if (pDesc->pEvalSpirv[1] && !NvrTessCopySpirv(pDesc->pEvalSpirv[1], pDesc->EvalSpirvSize[1], p.tes[1])) {
++      Logger::err(str::format("NVR tess: ", name, ": the second tessellation evaluation shader is not SPIR-V"));
++      return D3DERR_INVALIDCALL;
++    }
++
++    p.textureMask = pDesc->TextureMask;
++    p.psRegs = { pDesc->PsFloatRegisters[0], pDesc->PsFloatRegisters[1] };
++    p.family = pDesc->Family;
++    p.name = name;
++
++    std::string key = HashBytecode(pDesc->pBytecode, analysis.GetLength());
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    { std::lock_guard guard(m_mutex);
++      m_ps[key] = std::move(p);
++    }
++
++    m_extraStages = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
++    m_used.store(true);
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrTess::SetTessState(const NVR_EXT_TESS_STATE* pState) {
++    if (unlikely(pState == nullptr || pState->Winding > 1u))
++      return D3DERR_INVALIDCALL;
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    if (std::memcmp(&m_state, pState, sizeof(m_state))) {
++      m_state = *pState;
++      m_stateId++;
++    }
++
++    return D3D_OK;
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrTess::GetTessStats(NVR_EXT_TESS_STATS* pStats) {
++    if (unlikely(pStats == nullptr))
++      return D3DERR_INVALIDCALL;
++
++    D3D9DeviceLock lock = m_device->LockDevice();
++
++    *pStats = m_stats;
++    pStats->RefusedPairs = m_refused.load();
++    return D3D_OK;
++  }
++
++
++  Rc<DxvkShader> D3D9NvrTess::CreateControlShader(const std::vector<uint32_t>& Spirv, const std::string& Name) {
++    std::string key = "tcs" + HashBytecode(Spirv.data(), Spirv.size() * sizeof(uint32_t));
++
++    auto entry = m_shaderCache.find(key);
++    if (entry != m_shaderCache.end())
++      return entry->second;
++
++    DxvkSpirvShaderCreateInfo info;
++    // ControlParams: 8 floats, the stage's own push block. It starts at shader offset 32 (MaxSharedPushDataSize), as in
++    // DXVK's own D3D9 shaders: offsets 0-31 are the shared block (D3D9's fog / alpha-ref data, every graphics stage), and a
++    // stage block declared from offset 0 is remapped onto that shared data (round 2 of the bulk test: the TCS read its
++    // first four parameters from D3D9's fog data and never split anything; the TES read its sampler indices from it).
++    // The host side still pushes from the stage's offset 0 (shader offset 32 + x <-> pushData(stage, x)).
++    info.localPushData = DxvkPushDataBlock(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, MaxSharedPushDataSize, 32u, 4u, 0u);
++    info.patchVertexCount = 3u;
++    info.debugName = Name;
++
++    try {
++      Rc<DxvkShader> shader = new DxvkSpirvShader(info, SpirvCodeBuffer(uint32_t(Spirv.size()), Spirv.data()));
++
++      if (shader->metadata().stage != VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) {
++        Logger::err(str::format("NVR tess: ", Name, ": the SPIR-V is not a tessellation control shader"));
++        return nullptr;
++      }
++
++      m_shaderCache.insert({ key, shader });
++      return shader;
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR tess: ", Name, ": ", e.message()));
++      return nullptr;
++    }
++  }
++
++
++  Rc<DxvkShader> D3D9NvrTess::CreateEvalShader(const std::vector<uint32_t>& Spirv, uint32_t TextureMask, const std::string& Name) {
++    std::string key = "tes" + std::to_string(TextureMask) + HashBytecode(Spirv.data(), Spirv.size() * sizeof(uint32_t));
++
++    auto entry = m_shaderCache.find(key);
++    if (entry != m_shaderCache.end())
++      return entry->second;
++
++    small_vector<DxvkBindingInfo, 24> bindings;
++
++    // The pixel shader's textures and samplers, where the device binds them for the pixel shader
++    for (uint32_t i = 0; i < 8u; i++) {
++      if (!(TextureMask & (1u << i)))
++        continue;
++
++      uint32_t index = D3D9ShaderResourceMapping::computeTextureBinding(D3D9ShaderType::PixelShader, i);
++
++      DxvkBindingInfo tex = { };
++      tex.set = 1u;
++      tex.binding = i;
++      tex.resourceIndex = index;
++      tex.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
++      tex.descriptorCount = 1u;
++      tex.viewType = VK_IMAGE_VIEW_TYPE_2D;
++      tex.access = VK_ACCESS_SHADER_READ_BIT;
++      bindings.push_back(tex);
++
++      DxvkBindingInfo smp = { };
++      smp.resourceIndex = index;
++      smp.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
++      smp.descriptorCount = 1u;
++      smp.blockOffset = MaxSharedPushDataSize + sizeof(uint16_t) * i;   // shader offset (see CreateControlShader)
++      smp.flags.set(DxvkDescriptorFlag::PushData);
++      bindings.push_back(smp);
++    }
++
++    // The vertex shader's float constants (the same buffer the vertex shader reads)
++    DxvkBindingInfo vsc = { };
++    vsc.set = 2u;
++    vsc.binding = 0u;
++    vsc.resourceIndex = D3D9ShaderResourceMapping::CbvIndex::VSStaticConstants;
++    vsc.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
++    vsc.descriptorCount = 1u;
++    vsc.access = VK_ACCESS_UNIFORM_READ_BIT;
++    vsc.flags.set(DxvkDescriptorFlag::UniformBuffer);
++    bindings.push_back(vsc);
++
++    // D3D9's user clip planes, as DXVK's converted vertex shaders read them
++    DxvkBindingInfo clip = vsc;
++    clip.binding = 1u;
++    clip.resourceIndex = D3D9ShaderResourceMapping::CbvIndex::VSClipPlanes;
++    bindings.push_back(clip);
++
++    DxvkSpirvShaderCreateInfo info;
++    info.bindingCount = bindings.size();
++    info.bindings = bindings.data();
++    // From shader offset 32 (MaxSharedPushDataSize, see CreateControlShader): 4 dwords of sampler heap indices (resource
++    // data), then vsIndex, psBits and EvalParams[4] (pushed at the stage's offset 16)
++    info.localPushData = DxvkPushDataBlock(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, MaxSharedPushDataSize, 40u, 4u, 0xFu);
++    info.samplerHeap = DxvkShaderBinding(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 0u, 0u);
++    info.debugName = Name;
++
++    try {
++      Rc<DxvkShader> shader = new DxvkSpirvShader(info, SpirvCodeBuffer(uint32_t(Spirv.size()), Spirv.data()));
++
++      if (shader->metadata().stage != VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT) {
++        Logger::err(str::format("NVR tess: ", Name, ": the SPIR-V is not a tessellation evaluation shader"));
++        return nullptr;
++      }
++
++      m_shaderCache.insert({ key, shader });
++      return shader;
++    } catch (const DxvkError& e) {
++      Logger::err(str::format("NVR tess: ", Name, ": ", e.message()));
++      return nullptr;
++    }
++  }
++
++
++  void D3D9NvrTess::Attach(
++          D3D9ShaderType                  ShaderType,
++    const void*                           pBytecode,
++          size_t                          BytecodeLength,
++          D3D9CommonShader&               Shader) {
++    if (likely(!m_used.load()))
++      return;
++
++    std::string key = HashBytecode(pBytecode, BytecodeLength);
++
++    std::lock_guard guard(m_mutex);
++
++    if (ShaderType == D3D9ShaderType::VertexShader) {
++      auto entry = m_vs.find(key);
++      if (entry == m_vs.end())
++        return;
++
++      PendingVs& p = entry->second;
++
++      if (!p.created) {
++        auto object = std::make_unique<D3D9NvrTessVs>();
++        object->name = p.name;
++        object->family = p.family;
++        object->tcs = CreateControlShader(p.tcs, p.name + " TCS");
++
++        if (object->tcs == nullptr) {
++          m_vs.erase(entry);
++          return;
++        }
++
++        // Where the TES finds each listed register in the vertex shader's compacted float constants
++        const D3D9ConstantBufferCopy* layout = Shader.GetConstantLayout();
++        uint32_t packed = 0u;
++
++        for (uint32_t k = 0; k < 4u; k++) {
++          uint32_t index = 0xFFu;
++
++          if (layout != nullptr && p.vsRegs[k] < 256u) {
++            auto found = layout->getLayout(D3D9ConstantType::Float).findConstant(p.vsRegs[k]);
++
++            if (found && *found < 0xFFu)
++              index = *found;
++          }
++
++          packed |= index << (8u * k);
++        }
++
++        object->vsIndex = packed;
++        p.created = object.get();
++        m_vsObjects.push_back(std::move(object));
++        m_stats.VertexShaders++;
++
++        Logger::info(str::format("NVR tess: vertex shader '", p.name, "' created with its TCS (constant indices ",
++          packed & 0xFFu, " ", (packed >> 8u) & 0xFFu, " ", (packed >> 16u) & 0xFFu, " ", packed >> 24u, ")"));
++      }
++
++      Shader.SetNvrTessVs(p.created);
++    } else {
++      auto entry = m_ps.find(key);
++      if (entry == m_ps.end())
++        return;
++
++      PendingPs& p = entry->second;
++
++      if (!p.created) {
++        auto object = std::make_unique<D3D9NvrTessPs>();
++        object->name = p.name;
++        object->family = p.family;
++        object->psRegs = p.psRegs;
++        object->tes[0] = CreateEvalShader(p.tes[0], p.textureMask, p.name + " TES");
++
++        if (!p.tes[1].empty())
++          object->tes[1] = CreateEvalShader(p.tes[1], p.textureMask, p.name + " TES ccw");
++
++        if (object->tes[0] == nullptr || (!p.tes[1].empty() && object->tes[1] == nullptr)) {
++          m_ps.erase(entry);
++          return;
++        }
++
++        p.created = object.get();
++        m_psObjects.push_back(std::move(object));
++        m_stats.PixelShaders++;
++      }
++
++      Shader.SetNvrTessPs(p.created);
++    }
++  }
++
++
++  uint32_t D3D9NvrTess::ComputePsBits(const D3D9NvrTessPs* Ps) const {
++    uint32_t bits = 0u;
++
++    for (uint32_t j = 0; j < 2u; j++) {
++      uint32_t reg = Ps->psRegs[j];
++
++      if (reg >= caps::MaxSM3FloatConstantsPS)
++        continue;
++
++      const auto& value = m_device->m_state.psConsts->fConsts[reg];
++
++      for (uint32_t k = 0; k < 4u; k++) {
++        if (value.data[k] > 0.0f)
++          bits |= 1u << (4u * j + k);
++      }
++    }
++
++    return bits;
++  }
++
++
++  /** Whether a stage's outputs hold an input (same location, the components covered). */
++  static bool NvrTessProduces(const DxvkShaderIo& Outputs, const DxvkShaderIoVar& Input) {
++    for (uint32_t j = 0; j < Outputs.getVarCount(); j++) {
++      DxvkShaderIoVar o = Outputs.getVar(j);
++
++      if (o.builtIn != spv::BuiltInMax || o.isPatchConstant || o.location != Input.location)
++        continue;
++
++      if (o.componentIndex <= Input.componentIndex
++       && o.componentIndex + o.componentCount >= Input.componentIndex + Input.componentCount)
++        return true;
++    }
++
++    return false;
++  }
++
++
++  /**
++   * The interface check, once per registered shader, on the CS thread (where DXVK itself reads shader metadata):
++   * the TCS reads only what the vertex shader writes; the TES writes every input of the pixel shader that the
++   * vertex shader writes (an input the vertex shader does not write either is filled in by DXVK as before).
++   */
++  static bool NvrTessCheck(
++          DxvkShader*             Vs,
++          DxvkShader*             Tcs,
++          DxvkShader*             Tes,
++          DxvkShader*             Fs,
++          D3D9NvrTessVs*          VsAttach,
++          D3D9NvrTessPs*          PsAttach,
++          std::atomic<uint32_t>*  Refused) {
++    if (VsAttach->io.load() == 0 && Vs != nullptr) {
++      bool ok = DxvkShaderIo::checkStageCompatibility(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, Tcs->metadata().inputs,
++        VK_SHADER_STAGE_VERTEX_BIT, Vs->metadata().outputs, false);
++
++      VsAttach->io.store(ok ? 1 : -1);
++
++      if (ok) {
++        Logger::info(str::format("NVR tess: '", VsAttach->name, "': its TCS reads what the vertex shader writes"));
++      } else {
++        Logger::err(str::format("NVR tess: '", VsAttach->name, "': the TCS reads inputs the vertex shader does not write; drawn without tessellation"));
++        Refused->fetch_add(1u);
++      }
++    }
++
++    if (PsAttach->io.load() == 0 && Vs != nullptr && Fs != nullptr) {
++      const DxvkShaderIo& fsInputs = Fs->metadata().inputs;
++      const DxvkShaderIo& vsOutputs = Vs->metadata().outputs;
++      const DxvkShaderIo& tesOutputs = Tes->metadata().outputs;
++
++      bool ok = true;
++
++      for (uint32_t i = 0; i < fsInputs.getVarCount(); i++) {
++        DxvkShaderIoVar input = fsInputs.getVar(i);
++
++        if (input.builtIn != spv::BuiltInMax)
++          continue;
++
++        if (NvrTessProduces(vsOutputs, input) && !NvrTessProduces(tesOutputs, input)) {
++          Logger::err(str::format("NVR tess: '", PsAttach->name, "': the pixel shader reads location ", uint32_t(input.location),
++            " (component ", uint32_t(input.componentIndex), "+", uint32_t(input.componentCount), "), which the TES does not write; drawn without tessellation"));
++          ok = false;
++        }
++      }
++
++      PsAttach->io.store(ok ? 1 : -1);
++
++      if (ok)
++        Logger::info(str::format("NVR tess: '", PsAttach->name, "': its TES writes everything the pixel shader reads"));
++      else
++        Refused->fetch_add(1u);
++    }
++
++    return VsAttach->io.load() > 0 && PsAttach->io.load() > 0;
++  }
++
++
++  bool D3D9NvrTess::ApplyDraw(D3DPRIMITIVETYPE PrimType) {
++    const D3D9NvrTessVs* vs = nullptr;
++    const D3D9NvrTessPs* ps = nullptr;
++    const D3D9CommonShader* vsShader = nullptr;
++    const D3D9CommonShader* psShader = nullptr;
++
++    // Only DrawPrimitive / DrawIndexedPrimitive (BeginDraw) can issue a strip as three patch lists
++    const bool stripsOk = std::exchange(m_stripsOk, false);
++    m_stripPending = false;
++
++    if (m_state.Enable && m_device->UseProgrammableVS() && m_device->UseProgrammablePS() && !m_device->CanSWVP()) {
++      vsShader = GetCommonShader(m_device->m_state.vertexShader);
++      psShader = GetCommonShader(m_device->m_state.pixelShader);
++
++      vs = vsShader ? vsShader->GetNvrTessVs() : nullptr;
++      ps = psShader ? psShader->GetNvrTessPs() : nullptr;
++
++      if (vs == nullptr || ps == nullptr || vs->family != ps->family || vs->io.load() < 0 || ps->io.load() < 0) {
++        vs = nullptr;
++        ps = nullptr;
++      } else if (PrimType != D3DPT_TRIANGLELIST && !(PrimType == D3DPT_TRIANGLESTRIP && stripsOk)) {
++        m_stats.OtherTopologyDraws++;
++
++        if (!m_loggedOther) {
++          m_loggedOther = true;
++          Logger::warn(str::format("NVR tess: '", vs->name, "' / '", ps->name, "' drawn with D3D9 primitive type ", uint32_t(PrimType),
++            " (or a strip through DrawPrimitiveUP): left untessellated (only triangle lists and DrawPrimitive / DrawIndexedPrimitive strips are tessellated)"));
++        }
++
++        vs = nullptr;
++        ps = nullptr;
++      }
++    }
++
++    if (vs == nullptr) {
++      if (m_boundVs == nullptr)
++        return false;
++
++      // Back to the normal pipeline
++      m_boundVs = nullptr;
++      m_boundPs = nullptr;
++      m_device->m_iaState.primitiveType = PrimType;
++
++      m_device->EmitCs([
++        cPrimType = PrimType
++      ] (DxvkContext* ctx) {
++        ctx->bindShader<VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT>(nullptr);
++        ctx->bindShader<VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT>(nullptr);
++        ctx->setInputAssemblyState(DecodeInputAssemblyState(cPrimType));
++      });
++
++      if (m_boundWire) {
++        m_boundWire = false;
++        m_device->BindRasterizerState();
++      }
++
++      return true;
++    }
++
++    m_stats.TessellatedDraws++;
++
++    // A strip is issued by EmitStripDraw (the device's draw call asks StripPending after its PrepareDraw)
++    m_stripPending = PrimType == D3DPT_TRIANGLESTRIP;
++
++    uint32_t psBits = ComputePsBits(ps);
++
++    if (vs == m_boundVs && ps == m_boundPs && m_boundState == m_stateId && psBits == m_boundPsBits)
++      return true;
++
++    m_stats.Bindings++;
++
++    bool check = vs->io.load() == 0 || ps->io.load() == 0;
++    uint32_t winding = (m_state.Winding && ps->tes[1] != nullptr) ? 1u : 0u;
++
++    std::array<float, 8> tcsData;
++    for (uint32_t i = 0; i < 8u; i++)
++      tcsData[i] = m_state.ControlParams[i];
++
++    // ControlParams[7] is DXVK's: -1 = a triangle list; 0, 1, 2 = which index window of a strip (EmitStripDraw)
++    tcsData[7] = -1.0f;
++
++    std::array<uint32_t, 6> tesData;
++    tesData[0] = vs->vsIndex;
++    tesData[1] = psBits;
++    for (uint32_t i = 0; i < 4u; i++)
++      tesData[2u + i] = bit::cast<uint32_t>(m_state.EvalParams[i]);
++
++    m_device->EmitCs([
++      cTcs      = vs->tcs,
++      cTes      = ps->tes[winding],
++      cVs       = check ? vsShader->GetShader() : Rc<DxvkShader>(),
++      cFs       = check ? psShader->GetShader() : Rc<DxvkShader>(),
++      cVsAttach = const_cast<D3D9NvrTessVs*>(vs),
++      cPsAttach = const_cast<D3D9NvrTessPs*>(ps),
++      cRefused  = &m_refused,
++      cPrimType = PrimType,
++      cTcsData  = tcsData,
++      cTesData  = tesData
++    ] (DxvkContext* ctx) mutable {
++      bool ok = NvrTessCheck(cVs.ptr(), cTcs.ptr(), cTes.ptr(), cFs.ptr(), cVsAttach, cPsAttach, cRefused);
++
++      if (ok) {
++        ctx->bindShader<VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT>(Rc<DxvkShader>(cTcs));
++        ctx->bindShader<VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT>(Rc<DxvkShader>(cTes));
++
++        DxvkInputAssemblyState ia(VK_PRIMITIVE_TOPOLOGY_PATCH_LIST, false);
++        ia.setPatchVertexCount(3u);
++        ctx->setInputAssemblyState(ia);
++
++        ctx->pushData(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 0u, sizeof(cTcsData), cTcsData.data());
++        // after the 16 bytes of sampler heap indices, which DXVK fills in
++        ctx->pushData(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, 16u, sizeof(cTesData), cTesData.data());
++      } else {
++        ctx->bindShader<VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT>(nullptr);
++        ctx->bindShader<VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT>(nullptr);
++        ctx->setInputAssemblyState(DecodeInputAssemblyState(cPrimType));
++      }
++    });
++
++    m_boundVs = vs;
++    m_boundPs = ps;
++    // While the interface check is still to be answered on the CS thread, every draw binds again (each such bind sets
++    // the topology for its own draw, so a refused pair never draws with another draw's topology)
++    m_boundState = check ? 0u : m_stateId;
++    m_boundPsBits = psBits;
++    m_device->m_iaState.primitiveType = PrimType;
++
++    bool wire = m_state.Wireframe != 0u;
++
++    if (wire != m_boundWire) {
++      m_boundWire = wire;
++      m_device->BindRasterizerState();   // consults WireframeActive()
++    }
++
++    return true;
++  }
++
++
++  void D3D9NvrTess::EmitStripDraw(bool Indexed, uint32_t First, uint32_t Count, int32_t BaseVertex, uint32_t InstanceCount) {
++    m_stripPending = false;
++
++    if (!m_loggedStrip && m_boundVs && m_boundPs) {
++      m_loggedStrip = true;
++      Logger::info(str::format("NVR tess: '", m_boundVs->name, "' / '", m_boundPs->name, "' come as triangle strips: each strip is",
++        " tessellated as three patch lists (its index windows from the first, second and third index)"));
++    }
++
++    m_device->EmitCs([
++      cIndexed   = Indexed,
++      cFirst     = First,
++      cCount     = Count,
++      cBase      = BaseVertex,
++      cInstances = InstanceCount,
++      cVsAttach  = m_boundVs,
++      cPsAttach  = m_boundPs,
++      &cIaState  = m_device->m_iaState
++    ] (DxvkContext* ctx) {
++      uint32_t instances = cInstances;
++
++      // As DrawIndexedPrimitive: no instancing when no instanced binding is used
++      if (unlikely(cIaState.streamsInstanced && !(cIaState.streamsInstanced & cIaState.streamsUsed)))
++        instances = 1u;
++
++      if (cVsAttach == nullptr || cPsAttach == nullptr || cVsAttach->io.load() <= 0 || cPsAttach->io.load() <= 0) {
++        // Refused by the interface check (this draw's bind put the strip topology back): the strip as it is
++        if (cIndexed) {
++          VkDrawIndexedIndirectCommand draw = { cCount, instances, cFirst, cBase, 0u };
++          ctx->drawIndexed(1u, &draw);
++        } else {
++          VkDrawIndirectCommand draw = { cCount, 1u, cFirst, 0u };
++          ctx->draw(1u, &draw);
++        }
++        return;
++      }
++
++      // Strip triangle i = (i, i + 1, i + 2). Window k (k = 0, 1, 2) as a patch list from index k: its patch p is
++      // strip triangle k + 3p, so the three windows hold every triangle of the strip exactly once.
++      for (uint32_t k = 0; k < 3u; k++) {
++        if (cCount < 3u + k)
++          break;
++
++        uint32_t patches = (cCount - 3u - k) / 3u + 1u;
++        float window = float(k);
++        ctx->pushData(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 28u, sizeof(window), &window);
++
++        if (cIndexed) {
++          VkDrawIndexedIndirectCommand draw = { 3u * patches, instances, cFirst + k, cBase, 0u };
++          ctx->drawIndexed(1u, &draw);
++        } else {
++          VkDrawIndirectCommand draw = { 3u * patches, 1u, cFirst + k, 0u };
++          ctx->draw(1u, &draw);
++        }
++      }
++
++      float list = -1.0f;
++      ctx->pushData(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, 28u, sizeof(list), &list);
++    });
++  }
++
++}
+diff --git a/src/d3d9/d3d9_nvr_tess.h b/src/d3d9/d3d9_nvr_tess.h
+new file mode 100644
+index 0000000..97b5a5b
+--- /dev/null
++++ b/src/d3d9/d3d9_nvr_tess.h
+@@ -0,0 +1,190 @@
++#pragma once
++
++/*
++ * NVR extension, tessellation displacement ("1.7-displace", fork patch 0021): the implementation of
++ * ID3D9NvrExtTess (d3d9_nvr_ext_api.h). Opt-in per registered shader pair: a draw whose vertex and pixel
++ * shaders NVR registered under one family (and which is a triangle list) gets NVR's TCS and TES bound
++ * and a patch-list topology; every other draw takes DXVK's normal path, untouched.
++ */
++
++#include "d3d9_nvr_ext_api.h"
++#include "d3d9_include.h"
++#include "d3d9_multithread.h"
++
++#include "../dxvk/dxvk_shader.h"
++
++#include "../util/thread.h"
++
++#include <array>
++#include <atomic>
++#include <memory>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++namespace dxvk {
++
++  class D3D9DeviceEx;
++  class D3D9CommonShader;
++
++  /** A registered vertex shader once created: its TCS and the indices the TES needs. Lives as long as the device. */
++  struct D3D9NvrTessVs {
++    std::string           name;
++    uint32_t              family  = 0u;
++    Rc<DxvkShader>        tcs;
++    uint32_t              vsIndex = 0xFFFFFFFFu;  // 4 x u8: compacted VS float index of VsFloatRegisters[k]
++    std::atomic<int32_t>  io      = { 0 };        // interface check (CS thread): 0 not yet, 1 passed, -1 refused
++  };
++
++  /** A registered pixel shader once created: its TES (one per winding) and the registers read per draw. */
++  struct D3D9NvrTessPs {
++    std::string                   name;
++    uint32_t                      family = 0u;
++    std::array<Rc<DxvkShader>, 2> tes;
++    std::array<uint32_t, 2>       psRegs = { 0xFFFFFFFFu, 0xFFFFFFFFu };
++    std::atomic<int32_t>          io     = { 0 };
++  };
++
++  class D3D9NvrTess final : public ID3D9NvrExtTess {
++
++  public:
++
++    explicit D3D9NvrTess(D3D9DeviceEx* pDevice);
++
++    ~D3D9NvrTess();
++
++    ULONG STDMETHODCALLTYPE AddRef();
++
++    ULONG STDMETHODCALLTYPE Release();
++
++    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject);
++
++    HRESULT STDMETHODCALLTYPE RegisterTessVertexShader(
++      const NVR_EXT_TESS_VS_DESC*           pDesc);
++
++    HRESULT STDMETHODCALLTYPE RegisterTessPixelShader(
++      const NVR_EXT_TESS_PS_DESC*           pDesc);
++
++    HRESULT STDMETHODCALLTYPE SetTessState(
++      const NVR_EXT_TESS_STATE*             pState);
++
++    HRESULT STDMETHODCALLTYPE GetTessStats(
++            NVR_EXT_TESS_STATS*             pStats);
++
++    /** Whether anything was ever registered: until then the device skips every hook (one branch per draw). */
++    bool IsUsed() const {
++      return m_used.load(std::memory_order_relaxed);
++    }
++
++    /**
++     * \brief Extra stages for the pixel shader's texture bindings
++     *
++     * The TES reads pixel shader textures. With pipeline libraries the TES's descriptors live in the
++     * pre-rasterization set, which DXVK refreshes only when a pre-rasterization stage's bindings change:
++     * once anything is registered, the device marks pixel shader texture binds for the TES too.
++     */
++    VkShaderStageFlags ExtraTextureStages() const {
++      return m_extraStages;
++    }
++
++    /** CreateShaderModule: gives a registered shader its tessellation attachment. */
++    void Attach(
++            D3D9ShaderType                  ShaderType,
++      const void*                           pBytecode,
++            size_t                          BytecodeLength,
++            D3D9CommonShader&               Shader);
++
++    /**
++     * \brief The device's ApplyPrimitiveType hook (game thread, inside PrepareDraw)
++     *
++     * Binds or unbinds the tessellation shaders and sets the input assembly state as this draw needs.
++     * \returns \c true when it handled the input assembly state itself; \c false: nothing of ours is
++     *   bound and the device applies the primitive type as usual.
++     */
++    bool ApplyDraw(D3DPRIMITIVETYPE PrimType);
++
++    /**
++     * \brief Triangle strips (the land comes as strips)
++     *
++     * DrawPrimitive / DrawIndexedPrimitive call BeginDraw before their PrepareDraw: only those draws may take
++     * a triangle strip through the tessellation path (the UP draws and the other PrepareDraw callers may not).
++     * A strip of n indices is then drawn as three patch lists of consecutive index windows, starting at the
++     * strip's first, second and third index: together they are every triangle (i, i + 1, i + 2) of the strip,
++     * each once; the TCS learns from its push data which window a draw is (ControlParams[7]) and restores the
++     * winding of the strip's odd triangles by swapping their first two control points. No index buffer is
++     * read or written. StripPending then says the draw must be issued by EmitStripDraw instead.
++     */
++    void BeginDraw() {
++      m_stripsOk = true;
++    }
++
++    bool StripPending() const {
++      return m_stripPending;
++    }
++
++    void EmitStripDraw(bool Indexed, uint32_t First, uint32_t Count, int32_t BaseVertex, uint32_t InstanceCount);
++
++    /** Whether tessellated draws are bound right now in the wireframe debug view (BindRasterizerState). */
++    bool WireframeActive() const {
++      return m_boundVs != nullptr && m_state.Wireframe != 0u;
++    }
++
++  private:
++
++    bool                                          m_stripsOk     = false;
++    bool                                          m_stripPending = false;
++    bool                                          m_loggedStrip  = false;
++    bool                                          m_loggedOther  = false;
++
++    struct PendingVs {
++      std::vector<uint32_t>   tcs;
++      std::array<uint32_t, 4> vsRegs = { };
++      uint32_t                family = 0u;
++      std::string             name;
++      D3D9NvrTessVs*          created = nullptr;
++    };
++
++    struct PendingPs {
++      std::array<std::vector<uint32_t>, 2> tes;
++      uint32_t                textureMask = 0u;
++      std::array<uint32_t, 2> psRegs = { };
++      uint32_t                family = 0u;
++      std::string             name;
++      D3D9NvrTessPs*          created = nullptr;
++    };
++
++    static std::string HashBytecode(const void* pBytecode, size_t Length);
++
++    Rc<DxvkShader> CreateControlShader(const std::vector<uint32_t>& Spirv, const std::string& Name);
++
++    Rc<DxvkShader> CreateEvalShader(const std::vector<uint32_t>& Spirv, uint32_t TextureMask, const std::string& Name);
++
++    uint32_t ComputePsBits(const D3D9NvrTessPs* Ps) const;
++
++    D3D9DeviceEx*                                 m_device;
++
++    std::atomic<bool>                             m_used        = { false };
++    VkShaderStageFlags                            m_extraStages = 0u;
++
++    dxvk::mutex                                   m_mutex;
++    std::unordered_map<std::string, PendingVs>    m_vs;
++    std::unordered_map<std::string, PendingPs>    m_ps;
++    std::unordered_map<std::string, Rc<DxvkShader>> m_shaderCache;  // equal SPIR-V shares one DxvkShader
++    std::vector<std::unique_ptr<D3D9NvrTessVs>>   m_vsObjects;
++    std::vector<std::unique_ptr<D3D9NvrTessPs>>   m_psObjects;
++
++    // Game-thread state (the device lock is held in every call)
++    NVR_EXT_TESS_STATE                            m_state       = { };
++    uint64_t                                      m_stateId     = 1u;
++    const D3D9NvrTessVs*                          m_boundVs     = nullptr;
++    const D3D9NvrTessPs*                          m_boundPs     = nullptr;
++    uint64_t                                      m_boundState  = 0u;
++    uint32_t                                      m_boundPsBits = 0u;
++    bool                                          m_boundWire   = false;
++
++    NVR_EXT_TESS_STATS                            m_stats       = { };
++    std::atomic<uint32_t>                         m_refused     = { 0u };
++
++  };
++
++}
+diff --git a/src/d3d9/d3d9_shader.h b/src/d3d9/d3d9_shader.h
+index 4050e8e..40283f9 100644
+--- a/src/d3d9/d3d9_shader.h
++++ b/src/d3d9/d3d9_shader.h
+@@ -17,6 +17,9 @@
+ 
+ namespace dxvk {
+ 
++  struct D3D9NvrTessVs;   // NVR extension (1.7-displace), d3d9_nvr_tess.h
++  struct D3D9NvrTessPs;
++
+   struct D3D9ShaderOptions {
+     /** Whether the device is configured to do SWVP.
+      * This must only be true for vertex shaders.
+@@ -128,11 +131,20 @@ namespace dxvk {
+ 
+     dxbc_spv::sm3::ShaderInfo GetInfo() const { return m_analysis.GetShaderInfo(); }
+ 
++    /** NVR extension (1.7-displace): the tessellation attachment of a registered shader (owned by the device), or null */
++    const D3D9NvrTessVs* GetNvrTessVs() const { return m_nvrTessVs; }
++    const D3D9NvrTessPs* GetNvrTessPs() const { return m_nvrTessPs; }
++    void SetNvrTessVs(const D3D9NvrTessVs* pTess) { m_nvrTessVs = pTess; }
++    void SetNvrTessPs(const D3D9NvrTessPs* pTess) { m_nvrTessPs = pTess; }
++
+   private:
+ 
+     D3D9ShaderAnalysis    m_analysis;
+     Rc<DxvkShader>        m_shader;
+ 
++    const D3D9NvrTessVs*  m_nvrTessVs = nullptr;
++    const D3D9NvrTessPs*  m_nvrTessPs = nullptr;
++
+   };
+ 
+   /**
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index b49f95a..3cde06e 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -51,6 +51,7 @@ d3d9_src = [
+   'd3d9_interop.cpp',
+   'd3d9_nvr_ext.cpp',
+   'd3d9_nvr_hdr.cpp',
++  'd3d9_nvr_tess.cpp',
+   'd3d9_on_12.cpp',
+   'd3d9_bridge.cpp',
+   'd3d9_shader_analysis.cpp',
+-- 
+2.40.0.windows.1
+

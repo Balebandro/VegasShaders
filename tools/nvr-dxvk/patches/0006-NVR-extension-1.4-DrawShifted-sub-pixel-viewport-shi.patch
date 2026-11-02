@@ -1,0 +1,121 @@
+From 5469d557a1e27a58f0ea7b4b2c789897e228ae9e Mon Sep 17 00:00:00 2001
+From: nvr <nvr@localhost>
+Date: Mon, 26 Oct 2026 00:27:50 -0400
+Subject: [PATCH] NVR extension 1.4: DrawShifted (sub-pixel viewport shift,
+ D3D9 half-pixel uv emulation)
+
+A D3D9 full-screen quad whose half-pixel uv offset was made for the screen reads a smaller target at x / W + 0.5 / S, not the texel centre. DrawShifted moves the viewport by a fraction of a pixel (scissor unchanged) so the built-in coordinate matches. New method at the end of the interface: older callers are unchanged; check ExtVersionMinor >= 4 before use.
+---
+ src/d3d9/d3d9_nvr_ext.cpp   | 19 ++++++++++++++++++-
+ src/d3d9/d3d9_nvr_ext.h     | 11 +++++++++++
+ src/d3d9/d3d9_nvr_ext_api.h | 14 +++++++++++++-
+ 3 files changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 23cca2b..6cf234b 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -871,6 +871,21 @@ namespace dxvk {
+ 
+ 
+   HRESULT STDMETHODCALLTYPE D3D9NvrExt::Draw(const NVR_EXT_DRAW_DESC* pDesc) {
++    return DrawImpl(pDesc, 0.0f, 0.0f);
++  }
++
++
++  HRESULT STDMETHODCALLTYPE D3D9NvrExt::DrawShifted(const NVR_EXT_DRAW_DESC* pDesc, FLOAT ShiftX, FLOAT ShiftY) {
++    if (unlikely(!(ShiftX > -1.0f && ShiftX < 1.0f && ShiftY > -1.0f && ShiftY < 1.0f))) {
++      Logger::err("NVR ext: DrawShifted: the shift must be within (-1, 1) pixels");
++      return D3DERR_INVALIDCALL;
++    }
++
++    return DrawImpl(pDesc, ShiftX, ShiftY);
++  }
++
++
++  HRESULT D3D9NvrExt::DrawImpl(const NVR_EXT_DRAW_DESC* pDesc, float ShiftX, float ShiftY) {
+     D3D9DeviceLock lock = m_device->LockDevice();
+ 
+     if (unlikely(pDesc == nullptr || pDesc->pPipeline == nullptr))
+@@ -983,6 +998,8 @@ namespace dxvk {
+       cTargets     = std::move(targets),
+       cTargetCount = pDesc->TargetCount,
+       cRect        = rect,
++      cShiftX      = ShiftX,
++      cShiftY      = ShiftY,
+       cBound       = std::move(bound),
+       cPush        = push,
+       cPushSize    = pipeline->GetPushSize()
+@@ -1006,7 +1023,7 @@ namespace dxvk {
+ 
+       DxvkViewport viewport = { };
+       viewport.viewport = VkViewport {
+-        float(cRect.offset.x), float(cRect.offset.y),
++        float(cRect.offset.x) + cShiftX, float(cRect.offset.y) + cShiftY,
+         float(cRect.extent.width), float(cRect.extent.height), 0.0f, 1.0f };
+       viewport.scissor = cRect;
+       ctx->setViewports(1u, &viewport);
+diff --git a/src/d3d9/d3d9_nvr_ext.h b/src/d3d9/d3d9_nvr_ext.h
+index 4aeec6e..73c9ac6 100644
+--- a/src/d3d9/d3d9_nvr_ext.h
++++ b/src/d3d9/d3d9_nvr_ext.h
+@@ -224,6 +224,11 @@ namespace dxvk {
+             UINT                            Size,
+             void*                           pData);
+ 
++    HRESULT STDMETHODCALLTYPE DrawShifted(
++      const NVR_EXT_DRAW_DESC*              pDesc,
++            FLOAT                           ShiftX,
++            FLOAT                           ShiftY);
++
+   private:
+ 
+     struct TextureRef {
+@@ -238,6 +243,12 @@ namespace dxvk {
+ 
+     bool ValidateBufferRange(ID3D9NvrExtBuffer* pBuffer, UINT Offset, UINT& Size, UINT Align) const;
+ 
++    /** Draw and DrawShifted. */
++    HRESULT DrawImpl(
++      const NVR_EXT_DRAW_DESC*              pDesc,
++            float                           ShiftX,
++            float                           ShiftY);
++
+     /** Validates a binding list and resolves it for the CS thread (shared by Dispatch and Draw). */
+     HRESULT ResolveBindings(
+             D3D9NvrExtPipeline*             pPipeline,
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 47e3d1c..f251a16 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -45,7 +45,7 @@
+ #include <unknwn.h>
+ 
+ #define NVR_EXT_VERSION_MAJOR 1
+-#define NVR_EXT_VERSION_MINOR 3
++#define NVR_EXT_VERSION_MINOR 4
+ 
+ #define NVR_EXT_MAX_SLOTS       32
+ #define NVR_EXT_MAX_BINDINGS    32
+@@ -378,6 +378,18 @@ ID3D9NvrExt : public IUnknown {
+           UINT                            Offset,
+           UINT                            Size,
+           void*                           pData) = 0;
++
++  /**
++   * As Draw, with the viewport moved by (ShiftX, ShiftY) pixels (since 1.4; fractions, -1 < shift < 1).
++   * The scissor stays the viewport rectangle, so the same pixels are written; only the interpolated
++   * location 0 texture coordinate moves. A D3D9 full-screen quad whose half-pixel uv offset was made
++   * for a size S, drawn into a viewport of width W, reads at x / W + 0.5 / S; the shift 0.5 - 0.5 * W / S
++   * gives the built-in coordinate the same values (0 when W = S).
++   */
++  virtual HRESULT STDMETHODCALLTYPE DrawShifted(
++    const NVR_EXT_DRAW_DESC*              pDesc,
++          FLOAT                           ShiftX,
++          FLOAT                           ShiftY) = 0;
+ };
+ 
+ #ifndef _MSC_VER
+-- 
+2.43.0
+

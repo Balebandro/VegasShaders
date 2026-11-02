@@ -1,0 +1,22 @@
+[_Shaders.POM.Main]
+HeightMapScale = 0.4                 # Parallax mapping scale. Keep 0.4 for a widely working value.
+
+[_Shaders.POM.Displacement]
+Enabled = false                      # EXPERIMENTAL (2026-10-28): real bumps on rocks, cliffs and the other objects with a parallax height map (the ones this page's parallax works on), through the same tessellation as the land: near the camera their triangles are split into small ones and moved in and out by the object's own height map, so a rock's or cliff's outline gets real bumps against the sky and its depth follows them (fog, AO, reflections). Needs [Main.Main.Performance] NvrDxvkDisplacement on when the game starts (under the DXVK fork; with it on, these objects' shaders are compiled in the layout this needs, whatever this says; 2026-10-28: except with [Main.Main.Quality] CapturedNormals on, where that layout is used only when this is on at startup, as it leaves no room for the rocks' smooth normal: then turning this on needs a restart). Off by default. Live. Costs: every such object within FadeEnd is drawn as many small triangles in each of its passes (lit, lamp and highlight passes, the water's reflection). Not yet: the bumps cast no shadows of their own (the sun's shadow maps keep the flat object).
+Strength = 8.0                       # [0-64] how far apart the lowest and the highest point of the bumps can be, in game units (70 = 1 m). 0 = the objects' own triangles exactly. Live.
+Center = 0.5                         # [0-1] 0.5 = the bumps go in and out round the object's own surface, so feet and things standing on a rock stay right on average. Lower moves the whole surface outward by (0.5 - Center) x Strength. Live.
+Contrast = 2.0                       # [0-32] how strongly the height map's differences are stretched (1 = as the height map has them; high values round off at the Strength limit). Live.
+EdgePixels = 12.0                    # [2-64] how far apart the new points are on screen, in pixels. Smaller = finer bumps, more work for the graphics card. Live.
+EdgeFade = 1.5                       # [0-8] the bumps fade to nothing on the edges of the object's own triangles, over this many steps of the new points. No edge then ever moves, so no crack can open where a rock's texture or shading seams meet (its triangles are split there, and the two sides would move differently). 0 = no fade (TEST only: cracks can open at seams). Live.
+MaxFactor = 16                       # [1-64] the most new points along one edge of an object's triangle. Live.
+FadeStart = 1024.0                   # game units from the camera where the bumps start to fade out ... Live.
+FadeEnd = 2048.0                     # ... and where they are gone and the objects are drawn as before. Live.
+LodBias = 0.0                        # [-2-4] detail level of the height lookups: 0 matches the spacing of the new points; higher = smoother bumps, lower = sharper but they may flicker as you move. Live.
+SameHeight = true                    # UNOFFICIAL BUG FIX (2026-11-01), live: every pass of a displaced object takes its height from the map its main pass used. Indoors the lamp and texture passes often found another texture in their height slot (left there by an earlier draw), so they landed on another depth and the object came out as white, untextured light in patches that moved with the view. false = as before.
+FixedFactor = 0                      # TEST: > 0 splits every object triangle edge this many times at any distance (1 with Strength 0 = the game's triangles exactly). 0 = by EdgePixels. Live.
+DebugView = 0                        # 0 off. 1 wireframe of the displaced objects (proof that they are split: the lines get dense near the camera). Live.
+Winding = 0                          # TEST: 0 = the game's triangle facing (expected). 1 = the other one: only if displaced rocks disappear (seen from inside) with 0. Live.
+
+[_Shaders.POM.Status]
+Enabled = true                       # Parallax mapping on object shaders to simulate extra detail.
+

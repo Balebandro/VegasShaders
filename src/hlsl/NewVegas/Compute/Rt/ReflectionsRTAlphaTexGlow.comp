@@ -1,0 +1,8 @@
+#version 460
+// UNOFFICIAL 2026-10-30 RT reflections: the helper's pass with the alpha-tested casters, hit textures and glow maps (alpha atlas 6, albedo 7, glow 8): ReflectionsRTBody.glsl with RT_ALPHA, RT_TEX, RT_GLOW.
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#define RT_ALPHA 1
+#define RT_TEX 1
+#define RT_GLOW 1
+#include "ReflectionsRTBody.glsl"

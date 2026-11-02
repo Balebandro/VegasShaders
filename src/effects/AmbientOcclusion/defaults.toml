@@ -1,0 +1,87 @@
+[_Shaders.AmbientOcclusion.Exteriors]
+AngleBias = 1.6                         # Value to increase the contribution of closer samples for more detail in creases.
+BlurDropThreshold = 8.0                 # Distance cutoff for areas that shouldn't be blurred together (edge aware denoise).
+BlurRadiusMultiplier = 2.0              # Blur radius to denoise AO.
+ClampStrength = 0.25                    # Lower limit to AO darkness (0 for pure black and 1 for pure white).
+Enabled = true                          # Enable Ambient occlusion in exteriors.
+LumThreshold = 0.7                      # Treshold to reduce AO strength on bright surfaces.
+Range = 30.0                            # Distance for sampling. Larger values create a softer AO, smaller creates sharper details.
+Samples = 5                             # Not used (currently hardcoded).
+StrengthMultiplier = 1.0                # Global AO strength/darkness multiplier.
+
+[_Shaders.AmbientOcclusion.Interiors]
+AngleBias = 0.0                         # Value to increase the contribution of closer samples for more detail in creases.
+BlurDropThreshold = 8.0                 # Distance cutoff for areas that shouldn't be blurred together (edge aware denoise).
+BlurRadiusMultiplier = 2.0              # Blur radius to denoise AO.
+ClampStrength = 0.2                     # Lower limit to AO darkness (0 for pure black and 1 for pure white).
+Enabled = true                          # Enable Ambient occlusion in exteriors.
+LumThreshold = 0.5                      # Treshold to reduce AO strength on bright surfaces.
+Range = 30.0                            # Distance for sampling. Larger values create a softer AO, smaller creates sharper details.
+Samples = 5                             # Not used (currently hardcoded).
+StrengthMultiplier = 1.0                # Global AO strength/darkness multiplier.
+
+[_Shaders.AmbientOcclusion.GTAO]
+Enabled = false                      # UNOFFICIAL (2026-10-16): ground-truth ambient occlusion (GTAO, Jimenez et al. 2016) instead of the old SSAO: open flat ground is no longer greyed, corners and creases darken by how closed they really are, no halo round things in front. Uses the same Range, strength and fade settings. Applies immediately
+MaxRadius = 64.0                     # [4-256] Largest search radius on screen, in pixels (close up the Range would cover half the screen)
+
+[_Shaders.AmbientOcclusion.Skylighting]
+Enabled = false                        # UNOFFICIAL (2026-10-17, new): outdoors, the sky's light is taken away where something above blocks the sky: under roofs, porches, bridges, overhangs and at the foot of cliffs. Uses a top-down map of the world round you and needs the ambient occlusion or (UNOFFICIAL 2026-10-20) AmbientLight on. Version 2 takes away only the sky's share of the light, so sunlit spots keep their sunlight.
+Version = 2                            # UNOFFICIAL 2026-10-17: 2 = the sky's share only, its own clean and rarely redrawn map, quarter resolution (about 0.1-0.2 ms); 1 = the first version (darkens through the ambient occlusion, whole pixel, map redrawn every 4th frame).
+Strength = 1.0                         # [0.0-1.0] How much of the blocked sky light is taken away.
+Distance = 800.0                       # [64-4000] How far (game units) to look for something above. Larger: big overhangs and cliffs count from further away; smaller: only close cover. (Version 1 was tuned at 600.)
+ShareApply = true                      # Version 2: take away only the sky's share of the light (false: the whole pixel, as a comparison).
+OpenThreshold = 0.85                   # [0.5-1.0] Version 2: a spot that sees at least this much of the sky counts as open (no change), so open ground next to buildings keeps its light. 1.0: every bit of blocked sky counts.
+DepthNormals = false                   # Version 2: work out the surface's slope from the depth (false: from the normals buffer, which is wrong on some road meshes and ground stains).
+OwnProjection = false                  # Version 2: draw its top-down map with its own straight-down projection round you (false: the rain map's projection).
+AmbientScale = 1.0                     # [0-10] Version 2: how strong the sky light is against the sun when the sky's share is worked out. Higher: sunlit surfaces under partial cover darken more.
+CleanMap = true                        # Version 2: the top-down map takes leaves and fences with their holes and leaves out see-through effects (dust devils, glass), which would block the sky over open ground.
+MapRefresh = 60                        # [1-100000] Version 2: frames between redraws of the top-down map while you stand still (cells that stream in). It is also redrawn when you move MoveRefresh units.
+MoveRefresh = 200.0                    # [1-100000] Version 2: how far (game units) you move before the top-down map is redrawn.
+SoftWidth = 40.0                       # [1-500] Version 2: how soft (game units) the edge of cover is in the test (against hard steps).
+DebugView = 0                          # Version 2, test views: 1 sky visibility, 2 the sky's share of the light, 3 the final darkening, 4 'covered' (something above the point in the map). 0 = off.
+Reflections = false                    # UNOFFICIAL (2026-10-19) Skylighting step 3: the sky's reflection also goes where the sky cannot be seen, so wet floors, puddles and shiny ground under roofs, porches and overhangs stop mirroring a bright sky (the Specular effect's sky reflection and the wet-ground reflections' sky). Needs Skylighting Version 2 on. Costs next to nothing. After Community Shaders' Skylighting (GPL-3.0).
+MinReflection = 0.1                    # [0-1] (2026-10-19) How much of the sky's reflection stays where the sky is fully hidden (Community Shaders' default 0.1).
+LightCap = 0.1                         # [0-10] UNOFFICIAL (2026-10-20): the most light Skylighting may take from a spot, in multiples of the sky's light (x Strength x how much of the sky is hidden), so lamp-lit walls and glowing signs and bulbs under a roof or canopy keep their own light (the sky can only take the light it gave). 0.1 keeps lamps and glow and changes nothing in daylight; 0 = no limit (before 2026-10-20: a wide canopy at dusk turned everything under it, the bulbs too, black). Applies immediately.
+OpenSides = 1.0                        # [0-1] UNOFFICIAL (2026-10-20): under a canopy, porch roof or bridge the sky test cannot see the open air at its sides, so it counted every spot under a wide cover as seeing no sky at all. 1 = for such a spot the low sky counts as open wherever nothing taller than the spot stands at the test's reach (an open-sided canopy keeps its side light; a cliff or the house beside a porch still blocks). 0 = as before (stronger darkening under covers). Applies immediately.
+
+[_Shaders.AmbientOcclusion.RT]
+Enabled = false                        # UNOFFICIAL (2026-10-28, the DXVK fork, ray tracing): ambient occlusion and sky visibility from rays traced against the real scene instead of the screen: what is off screen, behind the first surface or thinner than it looks still darkens, and no light leaks through walls. Takes the place of the screen estimate of AmbientLight (or of this AO when AmbientLight is off) and of Skylighting's top-down map; the strength and fade settings stay theirs. Needs the DXVK fork's d3d9.dll with ray tracing, [Main.Main.Performance] NvrDxvkPasses on and a GPU with ray queries (AMD RDNA2+, NVIDIA RTX, Intel Arc); anywhere else it does nothing and the current AO runs (logged once). Applies immediately
+RayCount = 2                           # [1-16] Rays per pixel (half resolution) and frame for the occlusion. More: less grain before the blur and history smooth it, cost grows with the count (2: as good as 4 after the smoothing, about 40 % cheaper). Applies immediately
+Distance = 120.0                       # [8-1000] How far (game units, about 70 = 1 m) a ray looks for something that occludes. Longer: broader, softer occlusion (under cars, in rooms); shorter: contact shadows only, cheaper. Applies immediately
+Sky = true                             # The sky visibility (Skylighting, which must be on) from rays too, instead of its top-down map: overhangs, bridges and the inside of buildings block the sky by their real shape. Applies immediately
+SkyRays = 16                           # [8 or 16] Rays per pixel for the sky visibility (fixed directions round the normal: no grain, no flicker). 8: one ring, cheaper. Applies immediately
+SkyDistance = 800.0                    # [64-8000] How far (game units) a sky ray looks for cover (Skylighting's Distance). Applies immediately
+DebugView = 0                          # Test views: 1 the ray-traced visibility alone, before strength (through AmbientLight's occlusion view, or as this AO); 2 the ray-traced sky visibility (through Skylighting's view 1); 3 black where rays began inside something (depth and scene disagree), else grey by the mean hit distance; 4 and 5 (test only) the rays' input: view distance / 2000 and the normal's up component (white up, black down, grey sideways); 6 the bounce light alone (GI on); 7 the same with every bounce hit lit as if off screen (shows RadianceCache's whole share). 0 = off.
+
+GI = false                             # UNOFFICIAL (2026-10-29, ray tracing, needs Enabled above and AmbientLight): one bounce of light from what is really around a spot, on screen or not: a sunlit wall tints the shaded ground beside it, a lamp-lit floor lights the underside of a table. One ray per pixel (half resolution) and frame, smoothed over frames by AmbientLight. Applies immediately
+GIDistance = 1500.0                    # [100-8000] How far (game units) a bounce ray looks for a surface that sends light back. Applies immediately
+GIStrength = 1.0                       # [0-4] How much bounce light is added (x the surface's own colour), as ComputeGIStrength. Applies immediately
+GIOffscreen = 0.1                      # [0-1] Bounce rays that hit something on screen take the light the game drew there (the same light ComputeGI uses); for hits off screen the light is worked out from the sun and the lamps, times this (the worked-out light is far brighter than the game's own: about 29 times in Lucky 38). 0: only what is on screen bounces. Applies immediately
+GIClamp = 1.0                          # [0.05-4] The brightest one bounce ray may bring back (luminance, 1 = white in the game's frame): a ray that lands on a lamp's glow otherwise lights one pixel far more than its neighbours (flickering specks). Lower: calmer, but bright surfaces bounce less. Applies immediately
+Denoise = true                         # The ray-traced occlusion through the shared RT denoiser (a temporal pass and three edge-aware smoothing passes, as the RT sun shadows use) before the occlusion is applied: calm from few rays. Off: the raw rays (AmbientLight's own blur and history still smooth them). Applies immediately
+Interleave = 1                         # 1, 2 or 4: trace every pixel each frame, or every 2nd (a checkerboard), or every 4th (one of each 2 x 2, in turn); the others keep their last result and the smoothing over frames blends them. 2 or 4 cut the ray cost by about half or three quarters; when you turn fast the shading catches up over a few frames. Applies immediately
+AOAlpha = 1                            # 0, 1 or 2: alpha-tested meshes (leaves, fences, signs) for the occlusion rays: 0 left out, 1 solid (cheap: a leaf card occludes whole), 2 tested against their texture's alpha (exact, about 3x the occlusion cost). Needs [Main.Main.RayTracing] AlphaTested; applies immediately
+DenoiseKernel = 3                      # 3 or 5: the smoothing filter's size (3 is about 2.5x cheaper, a little less smooth). Applies immediately
+GlowGI = 0.0                           # 0-4: glowing surfaces (neon signs, lit windows, lamp globes, screens) light their surroundings through the bounce light, with their own colour, this strong; also when they are off screen. 0 = off. Needs GI; best with [Main.Main.RayTracing] HitTextures. Applies immediately
+GlowDirect = 0.0                       # 0-8: glowing objects (neon signs, lit windows, lamp globes, screens) light nearby floors and walls directly in their own colour, with soft shadows (the 32 strongest in view of the camera, one picked per pixel). 0 = off. Needs GI with GIReuse above 0. Applies immediately
+GISpatial = 0                          # 0-4: with GIReuse, also merge this many neighbouring pixels' bounce samples (ReSTIR's spatial step): less noise, no extra rays; may leak a little light into contact shadows. Applies immediately
+GIReuse = 8                            # 0-32: the bounce light reuses good samples from earlier frames on the same surface (ReSTIR GI), at most this many frames back: much less noise for the same rays; a light switched off fades over that many frames. 0 = no reuse (the old way). With GIInterleave 4 it is cheaper than full-rate GI and clean in motion (the old way smears there). Applies immediately
+GIInterleave = 1                       # 1, 2 or 4: the bounce rays (GI) in every, every 2nd or every 4th block of pixels each frame, in turn (on top of Interleave); the others keep their last bounce light, which the smoothing blends. The bounce rays are about two thirds of the ray tracing's cost. Applies immediately
+GIAmbient = 0.0                        # [0-1] How much of the ambient light a bounce ray's surface sends back too (0: only the sun and the lamps it gets: the game's ambient already stands for the indirect light; 1 brightened Lucky 38 by about 25 %). Applies immediately
+RadianceCache = false                  # UNOFFICIAL (2026-10-31, ray tracing, needs GI and GIReuse above): light that bounces more than once. A grid of light cells round you (32 x 32 x 16, fixed in the world) keeps what light reaches each spot after one, two, three... bounces (each cell traces rays to what it sees, lit by the sun, the lamps and the grid itself); bounce rays that hit something off screen add it, so a room lit from behind you or a corner two bounces from the sun is no longer black. Applies immediately
+CacheStrength = 1.0                    # [0-2] How much of the grid's light a bounce ray's surface sends back. Applies immediately
+CacheCellSize = 128.0                  # [32-512] Size of one grid cell in game units (128: about 1.8 m; the grid covers 32 x 32 x 16 cells round you). Smaller: finer, shorter reach. Applies immediately
+CacheRays = 8                          # [1-32] Rays a cell traces when it is updated (1 in CacheSpread cells each frame). More: less flicker in the cells, more cost. Applies immediately
+CacheFrames = 16                       # [1-32] How many updates a cell's light averages at most (more: steadier; fewer: follows a lamp switched on or off sooner). Applies immediately
+CacheExteriors = false                 # [true/false] UNOFFICIAL (2026-10-31): the radiance cache outdoors too. Off = interiors only (outdoors most bounce rays land on screen, where the lit frame already holds the light, and the cache cost 7.8 ms a frame on an iGPU in Goodsprings). Applies immediately
+CacheSpread = 8                        # [1, 2, 4, 8, 16, 32] Updates 1 in this many cells a frame (indoors). Higher: cheaper, slower to follow a lamp switched on or off. Applies immediately
+CacheRaysExterior = 4                  # [1-32] CacheRays outdoors (with CacheExteriors). Applies immediately
+CacheSpreadExterior = 8                # [1, 2, 4, 8, 16, 32] CacheSpread outdoors (with CacheExteriors). Applies immediately
+GIMovingHistory = 4                    # 0-16, with [Main.Main.RayTracing] DenoiseBackbone on: the bounce light's smoothing over frames keeps at most this many frames on people and things that move themselves (a walking NPC: the bounce light on it changes as it walks, and 16 frames of it trail behind). 0 = no limit. Applies immediately
+
+[_Shaders.AmbientOcclusion.FastPaths]
+Enabled = true                         # UNOFFICIAL (2026-10-17): the same ambient occlusion for less GPU time outdoors: sky and distant pixels really skip the occlusion samples and both blurs (the shader compiler had turned that early exit into work every pixel did). Off = the original passes. Applies immediately
+
+[_Shaders.AmbientOcclusion.Status]
+Enabled = true                          # Shadows based on object proximity/creases for more realistic light contribution.
+

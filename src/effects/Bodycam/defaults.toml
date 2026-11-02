@@ -1,0 +1,114 @@
+[_Shaders.Bodycam.Main]
+Fisheye = 0.45                         # UNOFFICIAL [0-1]: how much the wide lens bends straight lines outward towards the edges. Main = by day; Night and Interiors have their own value of every setting here (all but TextSize).
+FitEdges = 0.9                         # [0-1] Zooms in so the bent picture still fills the screen (1: no black corners from the bend; 0: none).
+Border = 0.95                          # [0-1] A soft black oval round the picture, like looking through the camera's frame. 0: none.
+Fringe = 3.1                           # [0-10] Colour fringes (red and blue apart) towards the edges, in pixels at 1080p.
+EdgeBlur = 1.6                         # [0-2] The cheap lens blurs towards the edges.
+LensBlur = 0.5                         # [0-2] A mild blur over the whole picture (the cheap lens is never quite in focus). 0 off, 1 about 2.5 pixels at 1080p.
+Vignette = 0.75                        # [0-1] Darker corners.
+Sharpen = 0.5                          # [0-3] The camera's oversharpening: halos along edges.
+Exposure = 0.75                        # [0.5-3] By day: overexposure, brighter than the game, highlights clipping. (Night and Interiors have their own.)
+Contrast = 1.25                        # [0.5-2] By day: contrast round mid-grey (harsh above 1).
+Saturation = 0.7                       # [0-2] By day: colour, below 1 washed out.
+Lift = 0.2                             # [0-1.5] By day: raises the dark tones (as a camera's auto exposure does in the dark); black and white stay.
+Cool = 1.0                             # [0-1] By day: takes the yellow out of New Vegas's own colour grade, towards the neutral whites of real footage.
+Glow = 0.8                             # [0-2] Bright areas bleed over what is near them.
+Grain = 2.0                            # [0-2] Sensor noise, changing 30 times a second, stronger in the dark.
+Blocks = 0.2                           # [0-1] Video-compression blocks in dark, flat areas.
+MotionBlur = 0.5                       # [0-3] Smear while the view turns. 0: none.
+LensDirt = 0.4                         # [0-2] Smudges on the lens that light up in bright light.
+Tint = 0.55                            # [0-1] A faint green cast.
+Text = 0.0                             # [0-1] The timestamp in the top right (the game's date and clock). 0: none.
+TextSize = 4.0                         # [1-12] Size of the timestamp's pixels, at 1080p.
+VideoFps = 30                          # [0-60] Video frame rate: each frame is held until the next is due, as recorded footage plays (the game keeps running at full speed underneath). 0: off, every frame drawn.
+AutoExposure = 0.8                     # [0-1] The camera's exposure lags behind the light: stepping into the sun blows the picture out before it settles, going indoors it goes dark first. In steady light it changes nothing. 0: off.
+ExposureSpeed = 1.5                    # [0.1-10] Seconds the exposure takes to catch up (most of the way in about twice this).
+Breakup = 0.1                          # [0-2] The video compression breaks down while the view turns fast or you run: bigger blocks over everything. 0: off.
+RollingShutter = 0.1                   # [0-3] Rolling-shutter wobble: upright things lean while the view pans fast, the picture squashes on fast tilts. 0: off.
+Bounce = 1.0                           # [0-2] The camera is strapped to the chest: the picture bobs with each step and leans into turns (the picture only: your aim is not moved). 0: off.
+GunJolt = 1.0                          # [0-3] Each shot jolts the mount: the picture kicks and springs back. 0: off.
+Overload = 1.0                         # [0-2] A muzzle flash overloads the sensor: the frame washes out for a moment, then the exposure dips before settling. 0: off.
+LowLight = 0.0                         # [0-1] Low-light mode: nearly black and white, shadows lifted, much more grain (mostly a Night setting). 0: off.
+LightSmear = 0.3                       # [0-2] Very bright lights bleed into vertical streaks, as cheap sensors do (stronger with LowLight). 0: off.
+Hiccups = 0.3                          # [0-1] Encoder hiccups: now and then a frozen frame or a short burst of broken blocks (more often while moving); higher = more often. 0: off.
+Autofocus = 0.8                        # [0-2] Autofocus hunting: when what is in the middle of the picture gets much nearer or further, the picture goes soft and pulls back into focus. 0: off.
+WideView = 0.0                         # [0, 60-150] Main only: the world's field of view while Bodycam is on (body cameras see much wider than the game). Eased in and out, left alone while aiming and in menus; your game's own value comes back when Bodycam is off. Only the live value is changed, never your INI. 0: the game's own (try 100).
+Mic = 0.0                              # [0-1] Main only: all the game's sound as if picked up by the camera's own cheap microphone (the knobs below), while Bodycam is on. 0: off; 1: all mic.
+MicTone = 0.7                          # [0-1] The small mic's band: 0 full range, 1 a tiny phone-like mic (bass and treble cut).
+MicCompression = 0.7                   # [0-1] Automatic gain: quiet sounds brought up, loud ones held down; it pumps after a gunshot.
+MicGain = 6.0                          # [-24 to 24] dB into the mic's cheap preamp: higher clips (distorts) loud sounds sooner.
+MicBits = 10                           # [0, 2-16] Bitcrush: the bits kept (lower = grittier). 0: off.
+MicSampleRate = 16000                  # [0, 500-48000] Hz the mic is sampled at (lower = duller, lo-fi). 0: off.
+MicHiss = 0.3                          # [0-1] Background hiss.
+
+[_Shaders.Bodycam.Night]
+Fisheye = 0.45                         # At night outdoors (blended with the day values through dawn and dusk): every Main effect has its own value here (same ranges as Main).
+FitEdges = 0.9
+Border = 0.95
+Fringe = 3.1
+EdgeBlur = 1.6
+LensBlur = 0.5
+Vignette = 0.75
+Sharpen = 0.5
+Exposure = 0.7                         # [0.5-3] At night outdoors (blended with the day values through dawn and dusk).
+Contrast = 1.1                         # [0.5-2]
+Saturation = 0.8                       # [0-2]
+Lift = 0.4                             # [0-1.5] Raises the dark tones so the night is not crushed to black.
+Cool = 0.4                             # [0-1]
+Glow = 0.8
+Grain = 2.0
+Blocks = 0.3
+MotionBlur = 0.5
+LensDirt = 0.4
+Tint = 0.55
+Text = 0.0
+VideoFps = 30                          
+AutoExposure = 0.8                     
+ExposureSpeed = 1.5                    
+Breakup = 1.0                          
+RollingShutter = 1.0                   
+Bounce = 1.0
+GunJolt = 1.0
+Overload = 1.2
+LowLight = 0.6
+LightSmear = 1.0
+Hiccups = 0.3
+Autofocus = 0.8
+
+[_Shaders.Bodycam.Interiors]
+Fisheye = 0.45                         # Indoors: every Main effect has its own value here (same ranges as Main).
+FitEdges = 0.9
+Border = 0.95
+Fringe = 3.1
+EdgeBlur = 1.6
+LensBlur = 0.5
+Vignette = 0.75
+Sharpen = 0.5
+Exposure = 1.25                        # [0.5-3] Indoors.
+Contrast = 1.25                        # [0.5-2]
+Saturation = 0.6                       # [0-2]
+Lift = 0.3                             # [0-1.5]
+Cool = 0.3                             # [0-1]
+Glow = 0.8
+Grain = 2.0
+Blocks = 0.2
+MotionBlur = 0.5
+LensDirt = 0.4
+Tint = 0.55
+Text = 0.0
+VideoFps = 30                          
+AutoExposure = 0.8                     
+ExposureSpeed = 1.5                    
+Breakup = 1.0                          
+RollingShutter = 1.0                   
+Bounce = 1.0
+GunJolt = 1.0
+Overload = 1.0
+LowLight = 0.2
+LightSmear = 0.6
+Hiccups = 0.3
+Autofocus = 0.8
+
+[_Shaders.Bodycam.Status]
+Enabled = false                        # UNOFFICIAL: police body-camera look (wide bent lens, oversharpened, noisy compressed video, timestamp).
+

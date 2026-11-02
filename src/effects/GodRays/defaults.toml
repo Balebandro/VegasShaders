@@ -1,0 +1,27 @@
+[_Shaders.GodRays.Main]
+SkipEmpty = false                     # UNOFFICIAL (2026-10-16), DROPPED (off): skip the god rays' blurs when the light mask is empty. Measured in game: the mask is never empty in daylight, so it only added a 0.07 ms check. Applies immediately
+SkipIdle = true                       # PLAYTEST ON (2026-10-18; release default off): UNOFFICIAL, MAY CHANGE THE IMAGE: draw no god rays at all while the sun is high (20+ degrees up) and well outside the view (12+ degrees beyond the frame) and the sky is too dim to cast rays. Then the rays are exactly nothing and the picture is the one without them; every 4th frame a cheap check (sky mask + a 1-pixel occlusion query, ~0.15 ms, answered a frame later without waiting) tells whether the sky is still dim. Measured at game hours 8-16: the god rays cost ~0.45 ms, with this on ~0.04 ms on frames where the sun is not in view; nothing changes when the sun is in view (the full effect runs on that very frame). Not exact in one case: the sky turning bright within a few frames without the sun (a lightning flash): the rays then start up to ~8 frames late. Also makes the god rays pass return its input exactly where the rays are 0 (the old pass darkens most texels by one fp16 step, ~0.05 %). Needs occlusion queries, otherwise does nothing. Applies immediately
+ProbeLog = 0                          # UNOFFICIAL DIAGNOSTIC (development builds only, release builds ignore it): leave 0. 1 = every 8th frame the largest sky-mask and light-mask values are read back (a GPU stall) and logged as GODRAYS PROBE.
+DayMultiplier = 1.0                   # Strength of godrays during the day.
+LightShaftPasses = 8                  # Not used.
+Luminance = 0.8                       # Treshold for minimum luminosity of areas casting rays. Lower means more of the sky will cast rays.
+NightMultiplier = 0.5                 # Strength of godrays during the night.
+RayDensity = 1.0                      # Curve for reduction of the intensity of godrays near the sunglare.
+RayIntensity = 1.0                    # Multiplier for the intensity of the bright areas being blurred to create the rays.
+RayLength = 1.0                       # Multiplier for the length of rays.
+RayVisibility = 50.0                  # Exponent for the godrays contrast.
+SunGlareEnabled = true                # Strength of the effect will be scaled with the weather sunglare setting.
+TimeEnabled = false                    # Strength of the effect will be strongest around sunset/sunrise and not at all during noon.
+SunsetGlareFix = true                 # UNOFFICIAL (2026-10-29), CHANGES THE IMAGE: the sun glare the god rays start from gets the sunset colour boost ([Shaders.Sky.Main] SunsetR / G / B, red by default) at sunrise and sunset only, as the sun itself does. false = as before: the whole boost with the sun high and none at sunset (a red tint in the glare and the rays all day). Applies immediately.
+
+[_Shaders.GodRays.Coloring]
+RayR = 1.0                            # Red channel for custom coloring of the godrays. Use Saturate setting to tweak the global influence.
+RayG = 1.0                            # Green channel for custom coloring of the godrays. Use Saturate setting to tweak the global influence.
+RayB = 1.0                            # Blue channel for custom coloring of the godrays. Use Saturate setting to tweak the global influence.
+Saturate = 0.0                        # Influence of the coloring setting. 0: use the sky/sun color 1: use only the specified color.
+
+
+[_Shaders.GodRays.Status]
+Enabled = true                        # Screenspace godrays/volumetric rays.
+
+

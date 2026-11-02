@@ -1,0 +1,15 @@
+# NVR DXVK debug template: RenderDoc captures with NVR's named groups.
+# Copy this file next to the fork's d3d9.dll and rename it to dxvk.conf (a test slot: put both in the FORK_D3D9 folder).
+# Needs a fork d3d9.dll built with patch 0015 (0014 before the 10-27 renumbering) (nvr.debugEnv); with an older fork set DXVK_DEBUG=markers in RenderDoc's
+# "Environment Variables" box instead. Also turn on NVR's [Main.Develop.Main] GpuDebugLabels = true.
+# Guide: docs/next/FORK-DEBUG-CAPTURE.md
+
+# D3DPERF_BeginEvent/EndEvent become Vulkan debug labels (also DXVK's own internal labels). Small CPU cost; debug only.
+nvr.debugEnv = "DXVK_DEBUG=markers"
+
+# Optional: overlays that hook Vulkan (RivaTuner, Overwolf, OBS, Steam overlay) can break a capture. Uncomment to switch
+# them off for this game only (keep RenderDoc's own layer: do NOT use ~implicit~ here). Use this line INSTEAD of the one above.
+# nvr.debugEnv = "DXVK_DEBUG=markers|VK_LOADER_LAYERS_DISABLE=VK_LAYER_RTSS,VK_LAYER_OW_*,VK_LAYER_OBS_HOOK,VK_LAYER_VALVE_steam_overlay"
+
+# Depth on NVIDIA with a fork WITHOUT the RESZ-on-every-vendor patch (0007-NVR-RESZ...): uncomment.
+# d3d9.customVendorId = 1002

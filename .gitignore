@@ -1,0 +1,12 @@
+*/Debug
+*/Release
+packages
+.vs/*
+*.aps
+*.fx
+/build/*
+Configurator/target
+*.pso
+*.vso
+# no-limits replacements are generated per build/settings (tools/nvr-dxvk/replace/nolimits.py); not committed
+src/hlsl/NewVegas/Compute/Replace/
