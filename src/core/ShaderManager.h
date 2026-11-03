@@ -126,6 +126,7 @@ public:
 	bool					LoadShader(NiD3DVertexShader* vertexShader);
 	bool					LoadShader(NiD3DPixelShader* pixelShader);
 	void					ReloadEffects();	// disposes and loads every effect again
+	void					ReloadShaders();	// UNOFFICIAL 2026-10-25 (test only): every replaced game shader loaded again ('reloadshaders')
 	ShaderCollection*		GetShaderCollection(const char* shaderName);
 	float					GetTransitionValue(float dayValue, float nightValue, float interiorValue);
 	bool					ShouldRenderShadowMaps();	// whether the shadow pass runs this frame
@@ -303,6 +304,7 @@ public:
     bool                    orthoSkyRequired = false;	// UNOFFICIAL 2026-10-17 Skylighting v2: the ortho map, amortised and clean (ShadowManager)
     bool                    orthoSkyFresh = false;		// ... and v2 was not on last frame: redraw the map now
 	bool					avglumaRequired, EffectReloadQueued;
+	bool					ShaderReloadQueued = false;	// UNOFFICIAL 2026-10-25 (test only): 'reloadshaders' in a shot list (SettingShots.h), done at the frame's end
 	// The lamps the shaders light with this frame (GetNearbyLights).
 	D3DXVECTOR4				SpotLightPosition[SpotLightsMax], SpotLightColor[SpotLightsMax], SpotLightDirection[SpotLightsMax];
 	D3DXVECTOR4				VolumetricData;		// xyz march light position, w first person strength floor

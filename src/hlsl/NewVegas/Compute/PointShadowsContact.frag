@@ -1,78 +1,73 @@
-// PointShadows technique 2 (LampContact) as a Vulkan pass (needs NVR DXVK): the D3D9 ContactPS of Effects/PointShadows.fx.hlsl,
-// line for line. Binding 0 = depth, binding 1 = normals; multiplied onto the mask (blend: destination x source).
+// PointShadows technique 2 (LampContact) as a Vulkan pass (needs NVR DXVK): Effects/PointShadows.fx.hlsl's LampContactPS, line for
+// line. The pass multiplies the lamp mask in the buffer by its result (blend: multiply). effects/PointShadows.cpp ExtRender runs it.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "PointShadowsCommon.glsl"
 
-layout(set = 1, binding = 0) uniform texture2D t_depth;
-layout(set = 1, binding = 1) uniform texture2D t_normals;
+layout(set = 1, binding = 0) uniform texture2D t_depth;      // TESR_DepthBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 1) uniform texture2D t_normals;    // TESR_NormalsBuffer (POINT, CLAMP)
 
 layout(push_constant) uniform Push {
-    uint linearSampler;   // 0
-    uint pointSampler;    // 4
-    uint mode;            // 8
+    uint linearSampler;   // 0: LINEAR, CLAMP heap index (filled by the host)
+    uint pointSampler;    // 4: POINT, CLAMP heap index
+    uint mode;            // 8: unused here
     uint pad;
 } pc;
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
-float depthAt(vec2 p) {
-    return textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.linearSampler)), p, 0.0).r * cb.cameraData.y;
+// PointShadows.fx: ContactProject (undoes toWorld: a camera-relative point -> its screen position and view depth)
+vec3 contactProject(vec3 r) {
+    vec3 v = mat3(cb.viewTransform) * r;   // HLSL mul(r, (float3x3)TESR_ViewTransform)
+    return vec3((v.x / v.z * cb.projectionTransform[0][0]) * 0.5 + 0.5, (v.y / v.z * cb.projectionTransform[1][1]) * -0.5 + 0.5, v.z);
 }
 
-void main() {
-    float dist = depthAt(uv);
-    float fade = clamp((dist - cb.lampContactFade.x) * cb.lampContactFade.y, 0.0, 1.0) *
-        clamp((cb.lampContactFade.z - dist) * cb.lampContactFade.w, 0.0, 1.0);
-    if (fade <= 0.0) { o_color = vec4(1.0); return; }
+// PointShadows.fx: ContactOpen (how open the way from this pixel toward a lamp is; 1 open, 0 blocked right at the pixel)
+float contactOpen(texture2D depthTex, sampler samp, vec3 r0, vec3 worldPos, vec3 n, vec3 lampWorld, vec2 uv, float pixelDepth) {
+    vec3 toLamp = lampWorld - worldPos;
+    float dist = length(toLamp);
+    vec3 dir = toLamp / dist;
+    if (dot(dir, n) < 0.1) return 1.0;
 
-    // Lamp selection (world space): the brightest of slots 0..10 by (1 - s)^2 x light, over the light of all slots 0..11.
-    vec3 pos = cb.cameraPosition.xyz + toWorldDir(uv) * dist;
-    float total = 0.0, best = 0.0, bestRadius = 0.0;
-    vec3 bestLamp = vec3(0.0);
-    for (int k = 0; k < 12; k++) {
-        vec4 lp = cb.shadowLightPosition[k];
-        vec4 col = cb.lightColor[k];
-        if (!(lp.w > 0.0)) continue;
-        vec3 t = lp.xyz - pos;
-        float s2 = clamp(dot(t, t) / (lp.w * lp.w), 0.0, 1.0);
-        float share = (1.0 - s2) * (1.0 - s2) * lumaOf(col.rgb) * col.w;
-        total += share;
-        if (k < 11 && share > best) { best = share; bestRadius = lp.w; bestLamp = lp.xyz; }
-    }
-    if (bestRadius <= 0.0 || best <= cb.lampContactBias.w * total) { o_color = vec4(1.0); return; }
-
-    // View space from here on: D3D mul(float4(v,0), M) is M * v here.
-    vec3 viewPos = (cb.viewTransform * vec4(toWorldDir(uv) * dist, 0.0)).xyz;
-    vec3 nView = texture(sampler2D(t_normals, NVR_SAMPLER(pc.pointSampler)), uv).xyz * 2.0 - 1.0;
-    vec3 toLampWorld = bestLamp - pos;
-    float lampDist = max(length(toLampWorld), 1e-6);
-    vec3 dirView = (cb.viewTransform * vec4(toLampWorld / lampDist, 0.0)).xyz;
-    dirView = dirView * inversesqrt(max(dot(dirView, dirView), 1e-8));
-    if (dot(dirView, nView) < 0.1) { o_color = vec4(1.0); return; }
-
-    float marchLength = min(cb.lampContact.y, 0.5 * lampDist);
-    vec3 start = viewPos + nView * (cb.lampContact.w + cb.lampContactBias.z * dist);
-    float ign = fract(cb.lampContactNoise.z * fract(dot(uv, cb.lampContactNoise.xy)));
-    float jitter = cb.lampContactNoise.w > 0.5 ? ign : 0.5;
-
-    float blocked = 0.0;
+    float len = min(cb.lampContact.y, dist * 0.5);
+    float jitter = mix(0.5, fract(cb.lampContactNoise.z * fract(dot(uv, cb.lampContactNoise.xy))), cb.lampContactNoise.w);
+    vec3 start = r0 + n * (cb.lampContact.w + pixelDepth * cb.lampContactBias.z);
+    float occ = 0.0;
     for (int i = 0; i < 6; i++) {
         float t = (float(i) + jitter) / 6.0;
-        vec3 p = start + dirView * (marchLength * t);
-        if (p.z <= 1e-3) break;
-        vec4 q = cb.projectionTransform * vec4(p, 1.0);	// D3D mul(float4(p,1), P)
-        vec3 proj = q.xyz / q.w;
-        vec2 sp = vec2(proj.x * 0.5 + 0.5, 0.5 - 0.5 * proj.y);
-        if (any(lessThan(sp, vec2(0.0))) || any(greaterThan(sp, vec2(1.0)))) break;
-        float stored = depthAt(sp);
-        float gap = p.z - stored;
-        float bias = cb.lampContactBias.x + cb.lampContactBias.y * p.z;
-        if (gap > bias && gap < cb.lampContact.z) blocked = max(blocked, 1.0 - t);
+        vec3 s = contactProject(start + dir * (len * t));
+        if (s.z < 1.0 || any(lessThan(s.xy, vec2(0.0))) || any(greaterThan(s.xy, vec2(1.0)))) break;
+        float delta = s.z - textureLod(sampler2D(depthTex, samp), s.xy, 0.0).x * cb.cameraData.y;	// (readDepthLod)
+        occ = max(occ, (delta > cb.lampContactBias.x + s.z * cb.lampContactBias.y && delta < cb.lampContact.z) ? 1.0 - t : 0.0);
     }
+    return 1.0 - occ;
+}
 
-    float shade = cb.lampContact.x * fade * blocked * (best / max(total, 1e-6));
-    float v = clamp(1.0 - shade, 0.0, 1.0);
-    o_color = vec4(v, v, v, 1.0);
+#define LINEAR_CLAMP NVR_SAMPLER(pc.linearSampler)
+#define POINT_CLAMP NVR_SAMPLER(pc.pointSampler)
+
+void main() {
+    float depth = readDepthAt(t_depth, LINEAR_CLAMP, uv);
+    float fade = clamp((depth - cb.lampContactFade.x) * cb.lampContactFade.y, 0.0, 1.0) * clamp((cb.lampContactFade.z - depth) * cb.lampContactFade.w, 0.0, 1.0);
+    float keep = 1.0;
+    if (fade > 0.0) {
+        vec3 cameraVector = toWorld(uv) * depth;
+        vec3 worldPos = cb.cameraPosition.xyz + cameraVector;
+        float total = 0.0, b1 = 0.0;
+        vec3 L1 = vec3(0.0);
+        for (int i = 0; i < 11; i++) {
+            vec4 lp = cb.shadowLightPosition[i];
+            vec3 lightDir = lp.xyz - worldPos;
+            float s2 = clamp(dot(lightDir, lightDir) / max(lp.w * lp.w, 1.0), 0.0, 1.0);
+            float a = lp.w > 0.0 ? (1.0 - s2) * (1.0 - s2) * luma(cb.lightColor[i].rgb) * cb.lightColor[i].w : 0.0;
+            total += a;
+            if (a > b1) { b1 = a; L1 = lp.xyz; }
+        }
+        if (b1 > cb.lampContactBias.w * total && b1 > 0.0) {
+            float blocked = b1 * (1.0 - contactOpen(t_depth, LINEAR_CLAMP, cameraVector, worldPos, worldNormalAt(t_normals, POINT_CLAMP, uv), L1, uv, depth));
+            keep = 1.0 - cb.lampContact.x * fade * clamp(blocked / total, 0.0, 1.0);
+        }
+    }
+    o_color = vec4(keep, keep, keep, 1.0);
 }

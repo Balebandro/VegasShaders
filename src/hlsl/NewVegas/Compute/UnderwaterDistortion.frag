@@ -1,34 +1,38 @@
-// Underwater pass 4, the wobble (NVR DXVK). Effects/Underwater.fx.hlsl Wobble, line for line. Last pass: may write the game target.
-// Push: LINEAR CLAMP sampler index at 0.
+// Underwater pass 5, the water's wobble (needs NVR DXVK): Effects/Underwater.fx.hlsl WaterDistortion line for line. effects/Underwater.cpp
+// ExtRender. t_rendered is the current image (the water pass's result), t_source the frame before the effect, t_depth CombineDepth's.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : enable
 #include "Common.glsl"
+#include "Underwater.glsl"
 
-layout(set = 1, binding = 0) uniform texture2D t_rendered;   // TESR_RenderedBuffer (the water result)
-layout(set = 1, binding = 1) uniform texture2D t_source;     // TESR_SourceBuffer
-layout(set = 1, binding = 2) uniform texture2D t_depth;      // TESR_DepthBuffer
+layout(set = 1, binding = 0) uniform texture2D t_rendered;   // TESR_RenderedBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 1) uniform texture2D t_source;     // TESR_SourceBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 2) uniform texture2D t_depth;      // TESR_DepthBuffer (LINEAR, CLAMP)
 
 layout(push_constant) uniform Push {
-    uint linearIndex;     // 0
-    uint pad0;            // 4
-    uint pad1;            // 8
-    uint pad2;            // 12
+    uint linearIndex;     // 0: LINEAR, CLAMP
+    uint pad[3];          // 4
 } pc;
-
-#include "Underwater.glsl"
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec3 eye = cb.cameraPosition.xyz;
-    vec3 P = eye + toWorld(uv) * readDepthAt(t_depth, pc.linearIndex, uv);
-    if (abovePixel(eye, P)) {
-        o_color = sampleLod(t_source, pc.linearIndex, uv);
+    float depth = readDepth(uv, t_depth, pc.linearIndex);
+    vec3 eyeVector = toWorld(uv);
+    vec3 worldPos = cb.cameraPosition.xyz + eyeVector * depth;
+    vec4 color = texture(sampler2D(t_source, NVR_SAMPLER(pc.linearIndex)), uv);
+    if (aboveWater(cb.cameraPosition.z, worldPos.z, cb.waterSettings.x)) {
+        o_color = color;
         return;
     }
-    float wobble = cb.gameTime.z * cb.waveParams.z * 1.5;
-    vec2 amplitude = vec2(0.001);
-    vec2 offset = vec2(sin(wobble * 3.0 + uv.y * 60.0), cos(wobble * 3.0 + uv.x * 60.0)) * amplitude;
-    o_color = sampleLod(t_rendered, pc.linearIndex, uv + offset);
+
+    float frame = cb.gameTime.z * cb.waveParams.z * 1.5;
+    vec2 uvD = uv;
+    uvD.x += sin(frame * 3.0 + uv.x * 60.0) * 0.001;
+    uvD.y += cos(frame * 3.0 + uv.y * 60.0) * 0.001;
+    color = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.linearIndex)), uvD);
+    color.a = 1.0;
+    o_color = color;
 }

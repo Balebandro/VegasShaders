@@ -1,82 +1,104 @@
-// ShadowsExteriors: the final apply of the outdoor sun-shadow term (rewritten 2026-11-02, wave 3, from
-// src/effects/ShadowsExteriors/README.md). One unnamed technique, one pass, pixel shader Shadow, as
-// ShadowsExterior.cpp requests it (technique index 0). Multiplies the frame by the sun-shadow factor (red of the shadow buffer,
-// with the lamp term in green), with shadows tinted toward the sky colour, after the SunFar factor.
-// Open: the Vulkan pass (Compute/ShadowsExteriors.frag) is not written in this wave; the sun-producer's sky value is assumed.
+// Image space shadows shader for Oblivion Reloaded
+# define viewshadows 0
+
+float4 TESR_ReciprocalResolution;
+float4 TESR_WaterSettings; //x: water height in the cell, y: water depth darkness, z: is camera underwater
+float4 TESR_ShadowData; // x: quality, y: darkness, z: nearmap resolution, w: farmap resolution
+float4 TESR_ShadowFade; // x: fading at sunrise/sunset, y:disabled shadows, z: pointlights shadows
+float4 TESR_SkyColor;
+float4 TESR_SunAmbient;
+float4 TESR_SunColor;
+float4 TESR_ShadowScreenSpaceData;
+
+sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_DepthBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = ANISOTROPIC; MIPFILTER = LINEAR; };
+sampler2D TESR_PointShadowBuffer : register(s2)  = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_NormalsBuffer : register(s3) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+// UNOFFICIAL 2026-10-19 SunFar (SunFar.fx.hlsl): the land's and the clouds' shadow, a factor on the stored colour, read while
+// TESR_SunFarApply.x is 1 (this frame's). The fifth TESR_ sampler: NVR binds them in declaration order.
+float4 TESR_SunFarApply;
+sampler2D TESR_SunFarBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+
+
+static const float DARKNESS = max(0.0,1-TESR_ShadowData.y);
+
+struct VSOUT
+{
+	float4 vertPos : POSITION;
+	float4 normal : TEXCOORD1;
+	float2 UVCoord : TEXCOORD0;
+};
+
+struct VSIN
+{
+	float4 vertPos : POSITION0;
+	float2 UVCoord : TEXCOORD0;
+};
 
 #include "Includes/Helpers.hlsl"
-
-// ---- samplers: declaration order is the binding order ----
-sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { MinFilter = LINEAR; MagFilter = LINEAR; MipFilter = NONE; AddressU = CLAMP; AddressV = CLAMP; };
-sampler2D TESR_DepthBuffer : register(s1) = sampler_state { MinFilter = LINEAR; MagFilter = LINEAR; MipFilter = NONE; AddressU = CLAMP; AddressV = CLAMP; };
-sampler2D TESR_PointShadowBuffer : register(s2) = sampler_state { MinFilter = LINEAR; MagFilter = LINEAR; MipFilter = NONE; AddressU = CLAMP; AddressV = CLAMP; };
-sampler2D TESR_NormalsBuffer : register(s3) = sampler_state { MinFilter = LINEAR; MagFilter = LINEAR; MipFilter = NONE; AddressU = CLAMP; AddressV = CLAMP; };
-sampler2D TESR_SunFarBuffer : register(s4) = sampler_state { MinFilter = POINT; MagFilter = POINT; MipFilter = NONE; AddressU = CLAMP; AddressV = CLAMP; };
-
-// ---- constants (registered by ShadowsExteriorEffect) ----
-float4 TESR_WaterSettings;      // x water height, z 1 when the camera is underwater
-float4 TESR_ShadowData;         // y Darkness (the darkness is 1 - y at the shadow floor)
-float4 TESR_ShadowFade;         // x sun fade (1 = no shadow), z point-light shadows on
-float4 TESR_SkyColor;           // rgb sky colour (gamma encoded)
-float4 TESR_SunAmbient;         // rgb sun ambient colour (only the luminance is used)
-float4 TESR_SunFarApply;        // x 1 when the SunFar factor was written this frame
-
-// Depth.hlsl: readDepth, reconstructWorldPosition, TESR_CameraData, TESR_CameraPosition, the transforms. Normals.hlsl: GetNormal.
 #include "Includes/Depth.hlsl"
 #include "Includes/Normals.hlsl"
+#include "Includes/Shadows.hlsl"
 
-// ---- vertex shader: the frame quad (ShaderManager::CreateFrameVertex) ----
-struct VSIN { float3 pos : POSITION; float2 uv : TEXCOORD0; };
-struct VSOUT { float4 pos : POSITION; float2 uv : TEXCOORD0; };
-VSOUT FrameVS(VSIN IN) {
-	VSOUT o;
-	o.pos = float4(IN.pos, 1.0f);
-	o.uv = IN.uv;
-	return o;
-}
 
-// Shadow (the one pass).
-float4 Shadow(float2 uv : TEXCOORD0) : COLOR0 {
-	float3 frame = tex2D(TESR_RenderedBuffer, uv).rgb;
-
-	// SunFar factor first: a per-channel multiply, a lerp from 1 by SunFarApply.x.
-	float3 sunFar = tex2D(TESR_SunFarBuffer, uv).rgb;
-	frame *= lerp(float3(1, 1, 1), sunFar, saturate(TESR_SunFarApply.x));
-
-	// Sun factor: red of the shadow buffer, faded toward 1 by the sun fade; green is the point-light term.
-	float2 sb = tex2D(TESR_PointShadowBuffer, uv).rg;
-	float sun = lerp(sb.r, 1.0f, saturate(TESR_ShadowFade.x));
-	float floorLevel = max(0.0f, 1.0f - TESR_ShadowData.y);       // the darkness floor
-	float lamp = sb.g * saturate(TESR_ShadowFade.z);
-	float lit = saturate(sun + lamp);
-	float f = lerp(floorLevel, 1.0f, lit);                        // from the floor (no sun, no lamp) to 1 (full sun)
-
-	// Water exception (underwater only): the water plane keeps its light. The surface is the one whose world normal points
-	// along -Z (as the spec states), at the water height.
-	float underwater = step(0.5f, TESR_WaterSettings.z);
-	float dN = readDepth(uv);
-	float3 rel = reconstructWorldPosition(uv, dN).xyz;
-	float3 worldN = normalize(GetNormal(uv));
-	float h = TESR_CameraPosition.z + rel.z;
-	float onWater = step(abs(h - TESR_WaterSettings.x), 2.0f) * step(0.999f, dot(worldN, float3(0, 0, -1)));
-	f = lerp(f, 1.0f, underwater * onWater);
-
-	// Shadow colour: linearised (gamma 2.2); a tint toward the sky (luminance x factor x sky) and a plain darkening (frame x
-	// factor), blended by saturate(factor + 0.5) so that as the factor falls the result moves toward the tint.
-	float3 lin = pow(max(frame, 0.0f), 2.2f);
-	float3 skyLin = pow(max(TESR_SkyColor.rgb, 0.0f), 2.2f);
-	float3 tint = luma(lin) * f * skyLin;
-	float3 plain = lin * f;
-	float w = saturate(f + 0.5f);
-	float3 col = lerp(tint, plain, w);
-	return float4(pow(max(col, 0.0f), 1.0f / 2.2f), 1.0f);
-}
-
-technique
+VSOUT FrameVS(VSIN IN)
 {
-	pass Shadow
-	{
+	VSOUT OUT = (VSOUT)0.0f;
+	OUT.vertPos = IN.vertPos;
+	OUT.UVCoord = IN.UVCoord;
+	return OUT;
+}
+
+/*
+ * Load Shadows Buffer and filter water surfaces 
+ * returns a shadow value from darkness setting value (full shadow) to 1 (full light)
+*/
+float4 Shadow(VSOUT IN) : COLOR0
+{
+	float4 color = tex2D(TESR_RenderedBuffer, IN.UVCoord);
+	float2 uv = IN.UVCoord;
+	color.rgb *= lerp(1.0f, tex2Dlod(TESR_SunFarBuffer, float4(uv, 0.0f, 0.0f)).rgb, saturate(TESR_SunFarApply.x));	// UNOFFICIAL 2026-10-19 SunFar (no branch on the flag: the composites have no boolean register to spare with the physical sky compiled in; 0 or 1)
+
+	// World position and normals are only needed for the underwater water-plane exception.
+	// Keeping them behind this coherent branch removes two texture reads and two matrix/vector
+	// reconstructions from every ordinary exterior pixel.
+	[branch] if (TESR_WaterSettings.z == 1) {
+		float depth = readDepthLod(uv);
+		float3 camera_vector = toWorld(uv) * depth;
+		float4 world_pos = float4(TESR_CameraPosition.xyz + camera_vector, 1.0f);
+		float3 world_normal = GetWorldNormalLod(uv);
+		if (world_pos.z < (TESR_WaterSettings.x + 2) && world_pos.z > (TESR_WaterSettings.x - 2) && dot(world_normal, float3(0, 0, -1)) > 0.999) return color;
+	}
+
+	float2 Shadow = tex2D(TESR_PointShadowBuffer, IN.UVCoord).rg;
+	Shadow.r = lerp(TESR_ShadowFade.x, 1.0f, Shadow.r); // fade shadows to light when sun is low
+
+	// scale shadows strength to ambient before adding attenuation for pointlights (ShadowFade.z means point Lights are on)
+	float ambient = lerp(1, luma(TESR_SunAmbient), DARKNESS * TESR_ShadowFade.z); // linearise
+	Shadow.r = lerp(0, ambient, Shadow.r); //scale brightest areas to the ambient so it can be lit further with attenuation
+	Shadow.r += Shadow.g; // Apply poing light attenuation (includes point light shadows)
+
+	Shadow.r = lerp(DARKNESS, 1.0, Shadow.r); 	// brighten shadow value from 0 to darkness from config value
+
+	Shadow.r = saturate(Shadow.r);
+
+#if viewshadows == 1
+	return Shadow;
+#endif
+    color.rgb = pows(color.rgb, 2.2); // linearise
+    float4 skyColor = float4(pows(TESR_SkyColor.rgb, 2.2),TESR_SkyColor.w); // linearise
+	// tint shadowed areas with Sky color before blending
+	float4 colorShadow = luma(color.rgb) * Shadow.r * skyColor;
+	colorShadow.rgb = lerp(colorShadow, color * Shadow.r, saturate(Shadow.r + 0.5)).rgb;// bias the transition between the 2 colors to make it less noticeable
+    colorShadow.rgb = pows(max(0.0,colorShadow.rgb), 1.0/2.2); // delinearise
+	return float4(colorShadow.rgb, 1.0); 
+}
+
+
+technique {
+	pass {
 		VertexShader = compile vs_3_0 FrameVS();
 		PixelShader = compile ps_3_0 Shadow();
 	}
 }
+ 

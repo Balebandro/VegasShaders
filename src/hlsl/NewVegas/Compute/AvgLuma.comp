@@ -1,123 +1,182 @@
-// AvgLuma as a compute reduction (needs NVR DXVK): Effects/AvgLuma.fx.hlsl's pass with the exact average of every pixel.
-// Phase 0: one partial sum of the linear BT.709 luminance per 16 x 16 tile. Phase 1 (one group): the total, then the pass's
-// per-frame logic (smoothing, adaptation, focus), written to the state buffer that C++ copies into TESR_AvgLumaBuffer.
-// The state layout is shared with AvgLumaHistogram.comp: 32 bytes: vec4 cur (newLuma, animatedLuma, focus, 1), two uints
-// (cur packed as four half floats: the texel's bytes at offset 16), float average (offset 24), float share (offset 28).
-// effects/AvgLuma.cpp RenderCompute fills the push block (128 bytes).
+// AvgLuma as a compute pass (needs NVR DXVK: the NVR extension on DXVK's d3d9.dll).
+//
+// Same output as Effects/AvgLuma.fx.hlsl, into the same 1x1 TESR_AvgLumaBuffer
+// (r: this frame's luma averaged over 8 frames, g: the animated luma the exposure
+// pass reads, b: the animated focal distance for depth of field, a: 1), except that
+// the screen's average luminance is EXACT: every pixel is read once and summed in a
+// two-phase shared-memory reduction, where the D3D9 pass bilinearly samples 112 points.
+// The frame-to-frame smoothing, the adaptation speeds and the focal distance are the
+// pass's own code, line for line (linearize and luma from Includes/Helpers.hlsl,
+// readDepth from Includes/Depth.hlsl: linear depth / farZ in the depth buffer's first channel).
+//
+// Build: glslangValidator -V --target-env vulkan1.1 -o AvgLuma.spv AvgLuma.comp
+// (the .spv next to this file is what NVR loads: Shaders\NewVegasReloaded\Compute\AvgLuma.spv)
+//
+// Dispatch (core/DxvkCompute.h, effects/AvgLuma.cpp):
+//   phase 0: groups (ceil(w/16), ceil(h/16)): one partial sum per 16x16 tile
+//   phase 1: one group: sum of partials, then the pass's per-frame logic; writes StateOut (32 bytes)
+//   then NVR copies StateOut.packed (8 bytes at offset 16) into the 1x1 RGBA16F texture.
+
 #version 450
-#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_nonuniform_qualifier : enable
 #extension GL_EXT_samplerless_texture_functions : enable
-#include "Common.glsl"
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(set = 1, binding = 0) uniform texture2D t_color;		// TESR_RenderedBuffer
-layout(set = 1, binding = 1) uniform texture2D t_depth;		// TESR_DepthBuffer (CombineDepth's output)
-layout(std430, set = 1, binding = 2) buffer Partials { float partial[]; };
+// Sampler heap (DXVK's; the index comes through the push block)
+layout(set = 0, binding = 0) uniform sampler s_samplers[];
 
-struct State {
-    vec4 cur;
-    uvec2 packed;
-    float average;
-    float share;
+layout(set = 1, binding = 0) uniform texture2D t_color;   // TESR_RenderedBuffer (the chain's current image)
+layout(set = 1, binding = 1) uniform texture2D t_depth;   // TESR_DepthBuffer
+
+layout(set = 1, binding = 2, std430) buffer Partials {
+    float partial[];                                    // one per tile; phase 0 writes, phase 1 reads
 };
-layout(std430, set = 1, binding = 3) readonly buffer StateIn { State stateIn; };
-layout(std430, set = 1, binding = 4) writeonly buffer StateOut { State stateOut; };
+
+layout(set = 1, binding = 3, std430) readonly buffer StateIn {
+    vec4  prev;                                         // last frame's (newLuma, animatedLuma, focus, 1)
+    uvec2 prevPacked;
+};
+
+layout(set = 1, binding = 4, std430) writeonly buffer StateOut {
+    vec4  cur;                                          // this frame's (newLuma, animatedLuma, focus, 1)
+    uvec2 packed;                                       // the same as four half floats: the texture's texel
+    float average;                                      // this frame's exact average luma alone (for the check tool)
+    float pad;
+};
 
 layout(push_constant) uniform Push {
-    uint width;				// 0
-    uint height;			// 4
-    uint groupsX;			// 8
-    uint groupsY;			// 12
-    uint phase;				// 16: 0 tile sums, 1 total and the frame's logic
-    uint samplerIndex;		// 20: LINEAR, CLAMP
-    uint pad0;
-    uint pad1;
-    vec4 motionBlurData;	// 32
-    vec4 depthOfFieldData;	// 48
-    vec4 gameTime;			// 64: w frame time
-    vec4 exposureData;		// 80: z dark adaptation, w light adaptation
-    vec4 cameraData;		// 96: y far
-    vec4 histogram;			// 112: unused here
-} pc;
+    uint  width;                                        // 0
+    uint  height;                                       // 4
+    uint  groupsX;                                      // 8
+    uint  groupsY;                                      // 12
+    uint  phase;                                        // 16
+    uint  samplerIndex;                                 // 20: linear, clamp (low 16 bits)
+    uint  pad0;                                         // 24
+    uint  pad1;                                         // 28
+    vec4  motionBlurData;                               // 32: TESR_MotionBlurData
+    vec4  depthOfFieldData;                             // 48: TESR_DepthOfFieldData
+    vec4  gameTime;                                     // 64: TESR_GameTime (w: frame time)
+    vec4  exposureData;                                 // 80: TESR_ExposureData (z: dark adapt speed, w: light adapt speed)
+    vec4  cameraData;                                   // 96: TESR_CameraData (x: nearZ, y: farZ)
+} pc;                                                   // 112 bytes
 
-shared float sumTile[256];
+shared float s_sum[256];
 
-// The twelve taps (the same as the D3D9 pass): a golden-angle spiral, offsets from the centre in screen units.
-vec2 tapOffset(int i) {
-    float angle = float(i) * 2.39996323;
-    float radius = 0.5 * sqrt((float(i) + 0.5) / 12.0);
-    return vec2(cos(angle), sin(angle)) * radius;
+// ---- Helpers.hlsl ----------------------------------------------------------------
+vec3 linearize(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(abs((c + 0.055) / 1.055), vec3(2.4));
+    return mix(hi, lo, lessThanEqual(c, vec3(0.04045)));   // lo where c <= 0.04045
 }
 
-// Linear depth (game units) at a screen uv.
-float depthAt(vec2 uv) {
-    return textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).x * pc.cameraData.y;
+float luma(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));          // BT.709
+}
+
+// ---- Depth.hlsl ------------------------------------------------------------------
+float readDepth(vec2 uv) {
+    float farZ = pc.cameraData.y;
+    return texture(sampler2D(t_depth, s_samplers[pc.samplerIndex & 0xFFFFu]), uv).x * farZ;
+}
+
+// ---- AvgLuma.fx.hlsl -------------------------------------------------------------
+const vec2 taps[12] = vec2[12](
+    vec2(-0.326212, -0.405810),
+    vec2(-0.840144, -0.073580),
+    vec2(-0.695914,  0.457137),
+    vec2(-0.203345,  0.620716),
+    vec2( 0.962340, -0.194983),
+    vec2( 0.473434, -0.480026),
+    vec2( 0.519456,  0.767022),
+    vec2( 0.185461, -0.893124),
+    vec2( 0.507431,  0.064425),
+    vec2( 0.896420,  0.412458),
+    vec2(-0.321940, -0.932615),
+    vec2(-0.791559, -0.597710)
+);
+
+const vec2 center = vec2(0.5, 0.5);
+
+// returns a value from start to end within a min and max step from start
+float stepTo(float startValue, float endValue, float minStep, float maxStep) {
+    minStep = abs(minStep) * -1.0;
+    maxStep = abs(maxStep);
+    float diff = clamp(endValue - startValue, minStep, maxStep);
+    return startValue + diff;
+}
+
+// calculates the current focal distance for depth of field shader and animates the value.
+float getFocalDistance(float oldFocus) {
+    float hyperFocalDistance = max(0.0000001, pc.depthOfFieldData.x * 1000.0);
+
+    vec2 speed = clamp(abs(pc.motionBlurData.xy), 0.0, 1.0) + 0.1;
+
+    float centerDepth = readDepth(center);
+    float depth = centerDepth;
+    vec2 samplingRange = speed;
+    for (int i = 0; i < 12; i++)
+        depth += readDepth(center + 0.3 * taps[i] * samplingRange);
+    depth /= 12.0;
+
+    depth = centerDepth > depth ? centerDepth : depth;
+    depth = clamp(depth / hyperFocalDistance, 0.0, 1.0);
+
+    float step = pow(max(oldFocus, depth), 0.1);
+    return stepTo(oldFocus, depth, 3.0 * step * pc.gameTime.w, 1.0 * step * pc.gameTime.w);
+}
+
+void reduceShared() {
+    // s_sum[gl_LocalInvocationIndex] holds this thread's value; leaves the total in s_sum[0]
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (gl_LocalInvocationIndex < s)
+            s_sum[gl_LocalInvocationIndex] += s_sum[gl_LocalInvocationIndex + s];
+        barrier();
+    }
 }
 
 void main() {
-    uint lid = gl_LocalInvocationIndex;
-
     if (pc.phase == 0u) {
-        ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-        float v = 0.0;
-        if (p.x < int(pc.width) && p.y < int(pc.height))
-            v = luma(linearize(texelFetch(t_color, p, 0).rgb));
-        sumTile[lid] = v;
-        barrier();
-        for (uint s = 128u; s > 0u; s >>= 1u) {
-            if (lid < s) sumTile[lid] += sumTile[lid + s];
-            barrier();
+        // One 16x16 tile per group: the sum of its pixels' linear luma.
+        ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+        float value = 0.0;
+        if (pos.x < int(pc.width) && pos.y < int(pc.height))
+            value = luma(linearize(texelFetch(t_color, pos, 0).rgb));
+
+        s_sum[gl_LocalInvocationIndex] = value;
+        reduceShared();
+
+        if (gl_LocalInvocationIndex == 0u)
+            partial[gl_WorkGroupID.y * pc.groupsX + gl_WorkGroupID.x] = s_sum[0];
+    }
+    else {
+        // One group: the exact average, then the pass's own per-frame logic.
+        uint tiles = pc.groupsX * pc.groupsY;
+        float sum = 0.0;
+        for (uint i = gl_LocalInvocationIndex; i < tiles; i += 256u)
+            sum += partial[i];
+
+        s_sum[gl_LocalInvocationIndex] = sum;
+        reduceShared();
+
+        if (gl_LocalInvocationIndex == 0u) {
+            float average_ = s_sum[0] / float(pc.width * pc.height);
+
+            vec2 oldLuma = prev.rg;
+            float newLuma = (average_ + (7.0 * oldLuma.r)) / 8.0;  // average over 8 frames
+
+            float decreaseRate = -pc.exposureData.z;
+            float increaseRate = pc.exposureData.w;
+            float animatedLuma = stepTo(oldLuma.g, newLuma, pc.gameTime.w * decreaseRate, pc.gameTime.w * increaseRate);
+
+            float focus = getFocalDistance(prev.b);
+
+            vec4 result = vec4(newLuma, animatedLuma, focus, 1.0);
+            cur = result;
+            packed = uvec2(packHalf2x16(result.rg), packHalf2x16(result.ba));
+            average = average_;
+            pad = 0.0;
         }
-        if (lid == 0u) partial[gl_WorkGroupID.y * pc.groupsX + gl_WorkGroupID.x] = sumTile[0];
-        return;
     }
-
-    // Phase 1: the total of the tile sums, the exact average, then the per-frame logic on one thread.
-    uint tiles = pc.groupsX * pc.groupsY;
-    float total = 0.0;
-    for (uint i = lid; i < tiles; i += 256u) total += partial[i];
-    sumTile[lid] = total;
-    barrier();
-    for (uint s = 128u; s > 0u; s >>= 1u) {
-        if (lid < s) sumTile[lid] += sumTile[lid + s];
-        barrier();
-    }
-    if (lid != 0u) return;
-
-    float average = sumTile[0] / (float(pc.width) * float(pc.height));
-
-    // Smoothing: one-eighth of the new average each frame.
-    vec4 prev = stateIn.cur;
-    float newLuma = (average + 7.0 * prev.x) / 8.0;
-
-    // Adaptation: at most dt x DarkAdapt down and dt x LightAdapt up per frame.
-    float dt = pc.gameTime.w;
-    float delta = newLuma - prev.y;
-    float animatedLuma = delta < 0.0 ?
-        prev.y + max(delta, -dt * pc.exposureData.z) :
-        prev.y + min(delta, dt * pc.exposureData.w);
-
-    // Focus: the centre and twelve taps spread by the camera's rotation speed (a centre farther than the mean wins).
-    vec2 speed = clamp(abs(pc.motionBlurData.xy), vec2(0.0), vec2(1.0)) + 0.1;
-    float centreDepth = depthAt(vec2(0.5));
-    float depthSum = centreDepth;
-    for (int d = 0; d < 12; d++)
-        depthSum += depthAt(vec2(0.5) + 0.3 * tapOffset(d) * speed);
-    float meanDepth = depthSum / 12.0;
-    float depth = centreDepth > meanDepth ? centreDepth : meanDepth;
-    float hyperFocal = max(1.0e-7, pc.depthOfFieldData.x * 1000.0);
-    depth = clamp(depth / hyperFocal, 0.0, 1.0);
-
-    float step = pow(max(prev.z, depth), 0.1);
-    float focusDelta = depth - prev.z;
-    float focus = focusDelta < 0.0 ?
-        prev.z + max(focusDelta, -3.0 * step * dt) :
-        prev.z + min(focusDelta, step * dt);
-
-    vec4 cur = vec4(newLuma, animatedLuma, focus, 1.0);
-    stateOut.cur = cur;
-    stateOut.packed = uvec2(packHalf2x16(cur.xy), packHalf2x16(cur.zw));
-    stateOut.average = average;
-    stateOut.share = 1.0;
 }

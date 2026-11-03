@@ -25,6 +25,7 @@
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (RayReconstructionFrameBegin)
 #include "EffectChain.h"	// UNOFFICIAL 2026-11-02 the post-process chain as step tables
+#include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the cell serial its latches wait for
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 
 /**
@@ -507,6 +508,7 @@ void ShaderManager::UpdateConstants() {
 	TemporalBackbone::Update();	// UNOFFICIAL 2026-11-01 once a frame (reads isCameraCut): FrameIndex, TemporalResolve, HistoryValid, TESR_FrameNoise
 	if (firstCallOfFrame && GameState.isCellChanged) {
 		TheSettingManager->SettingsChanged = true;	// a new cell: every effect reads its settings again
+		FailOnce::NextCell();	// UNOFFICIAL 2026-11-02 RetryFailedEffects: parts that failed in the last cell may try again
 		// Preset resolve+apply as early in this function as possible -- before
 		// anything below reads SettingsMain, so nothing this frame observes a
 		// stale value (docs/preset-manager-design.md § "Application mechanism").
@@ -767,6 +769,27 @@ template <typename ShaderEx> static void LeaveToGame(ShaderEx* shader) {
 template <typename ShaderEx> static bool HasAnyRecord(ShaderEx* shader) {
 	return shader->ShaderProg[ShaderRecordType::Default] || shader->ShaderProg[ShaderRecordType::Exterior] ||
 		shader->ShaderProg[ShaderRecordType::Interior];
+}
+
+/*
+* UNOFFICIAL 2026-10-25 (test only, bench warm slot: work\bench\deep-roadmap\multirun\README.md "Warm slot"): every replaced game
+* shader of every collection compiled again from its .hlsl (ShaderRecord::LoadShader recompiles a shader whose preprocessed source
+* changed, the cache answers the rest), the same way it was loaded at start (LoadShader: templates, interior records). Called at the
+* frame's end (NiDX9Renderer__Do_EndFrame), never during a draw. A shader that no longer compiles keeps no record: the game's own draws.
+*/
+void ShaderManager::ReloadShaders() {
+	auto timer = TimeLogger();
+	unsigned vs = 0, ps = 0;
+	for (const auto& Named : ShaderNames) {
+		ShaderCollection* collection = Named.second ? *Named.second : nullptr;
+		if (!collection) continue;
+		std::vector<NiD3DVertexShaderEx*> vertex; vertex.swap(collection->VertexShaderList);
+		std::vector<NiD3DPixelShaderEx*> pixel; pixel.swap(collection->PixelShaderList);
+		for (NiD3DVertexShaderEx* s : vertex) { s->DisposeShader(); LoadShader(s); vs++; }
+		for (NiD3DPixelShaderEx* s : pixel) { s->DisposeShader(); LoadShader(s); ps++; }
+	}
+	Logger::Log("RELOAD SHADERS: %u vertex and %u pixel shaders loaded again from their .hlsl", vs, ps);
+	timer.LogTime("ShaderManager::ReloadShaders");
 }
 
 /*

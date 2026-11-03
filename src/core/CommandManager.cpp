@@ -213,7 +213,9 @@ void CommandManager::Initialize(const PluginInterface* iface) {
 	TheCommandManager = new CommandManager();
 
 	void* executers[] = { RunIsThirdPerson };
-	// Registration order defines the opcode numbers (base 0x3000). Do not reorder.
+	// Registration order defines the opcode numbers (base 0x3000). Do not reorder, remove or insert: other mods' compiled scripts
+	// store these numbers, not the names (Cartographer calls NVRSetSetting 0x3006, NVRSetSettingS 0x3007, NVRGetSetting 0x3005, as
+	// in the original New Vegas Reloaded). New commands go at the end only. The static_assert below holds the count.
 	CommandInfo* infos[] = {
 		&InfoGetVersion,
 		&InfoGetLocationName,
@@ -231,6 +233,7 @@ void CommandManager::Initialize(const PluginInterface* iface) {
 		&InfoCameraLookAtPosition,
 		&InfoCameraReset,
 	};
+	static_assert(sizeof(infos) / sizeof(infos[0]) == 15, "the original mod's 15 commands, in its order (opcodes 0x3000-0x300E): append new ones and raise this");
 	void* papyrus[] = { Papyrus_SetExtraEffectEnabled, Papyrus_SetCustomConstant };
 	TheCommandManager->RegisterCommands(iface, executers, infos, sizeof(infos) / sizeof(infos[0]), papyrus);
 

@@ -55,7 +55,10 @@ the newest log for lines containing `error X`.
 
 - <kbd>O</kbd> opens the menu: File (Save, Revert), View (text size, skin), Tools (presets, lighting, dev tools),
   Help (About and credits). Changes apply at once; **Save** keeps them.
-- **Menu skins:** View > Skin. Built in: Default, Pip-Boy and Vault-Tec. Export writes the current skin to
+- **Menu skins:** View > Skin. Built in: Default, Pip-Boy, Vault-Tec, Amber Terminal, NCR, Legion, Brotherhood,
+  Strip Neon, Midnight, High Contrast and Light. View > Skin > Own colours changes any single part (background, panel,
+  field, accent, text, heading, border, slider, selection, rounding, opacity, background picture) on top of whichever skin
+  is picked; the same `Custom...` keys are on the Main.Menu.Style page. Export writes the current look to
   `Data\VegasShaders\Skins\` as a small file you can edit (colours, rounding, an optional background picture).
 - **F10** starts and stops the performance meter; the cost of each effect goes to the log.
 - **Bug reports:** attach the log of the session (`VegasShaders-Logs` in the game folder).

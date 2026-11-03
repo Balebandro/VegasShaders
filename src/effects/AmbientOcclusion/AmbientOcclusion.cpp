@@ -1,6 +1,7 @@
 #include "AmbientOcclusion.h"
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../../core/GpuProfiler.h"
+#include "../../core/FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/RtAmbient.h"
@@ -847,8 +848,8 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 // the blurs read, as Estimate's) + this frame's history. False: nothing usable was drawn (Estimate runs); a failed draw does not take the
 // other Vulkan passes down (ExtFailed is put back) but ends the RT AO for the session.
 bool AmbientOcclusionEffect::ExtEstimateRT(IDirect3DDevice9* Device, IDirect3DTexture9* const* Textures, IDirect3DSurface9* const* Surfaces, const D3DSURFACE_DESC& Target) {
-	static bool rtFailed = false;
-	if (rtFailed) return false;
+	static FailOnce::Latch rtFailed{ "AmbientOcclusion RT estimate" };	// UNOFFICIAL 2026-11-02 RetryFailedEffects (was a bool until restart)
+	if (rtFailed.Blocked()) return false;
 	IDirect3DBaseTexture9* depth = SlotTexture("TESR_DepthBuffer");
 	if (!depth || !Textures[1] || !Surfaces[0] || !Surfaces[1]) return false;
 	if (rtHistoryWidth != Target.Width || rtHistoryHeight != Target.Height) {
@@ -891,8 +892,7 @@ bool AmbientOcclusionEffect::ExtEstimateRT(IDirect3DDevice9* Device, IDirect3DTe
 	}
 	if (!drawn) {
 		ExtFailed = wasFailed;
-		rtFailed = true;
-		Logger::Log("UNOFFICIAL RT AO: the RT estimate failed to draw; AmbientOcclusion's own estimate runs from now on.");
+		rtFailed.Set("the RT estimate failed to draw: AmbientOcclusion's own estimate runs");
 		return false;
 	}
 	if (rrRaw) {	// UNOFFICIAL 2026-10-30 DLSS RR (above)
@@ -914,11 +914,11 @@ bool AmbientOcclusionEffect::ExtEstimateRT(IDirect3DDevice9* Device, IDirect3DTe
 // UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT] Sky: SkyVisibilityV2's place, rays instead of the ortho map
 // (AmbientOcclusionSky.frag's inputs less the map; AmbientOcclusionSkyRT.frag). Same failure rule as ExtEstimateRT.
 bool AmbientOcclusionEffect::ExtSkyVisibilityRT(IDirect3DSurface9* Target, IDirect3DTexture9* SunMask, IDirect3DTexture9* SmoothedNormals) {
-	static bool rtFailed = false;
+	static FailOnce::Latch rtFailed{ "Skylighting RT sky pass" };	// UNOFFICIAL 2026-11-02 RetryFailedEffects (was a bool until restart)
 	D3DSURFACE_DESC desc = {};
 	IDirect3DBaseTexture9* depth = SlotTexture("TESR_DepthBuffer");
 	IDirect3DBaseTexture9* normals = SlotTexture("TESR_NormalsBuffer");
-	if (rtFailed || !depth || !normals || !Target || FAILED(Target->GetDesc(&desc)) || !desc.Width || !desc.Height) return false;
+	if (rtFailed.Blocked() || !depth || !normals || !Target || FAILED(Target->GetDesc(&desc)) || !desc.Width || !desc.Height) return false;
 	IDirect3DTexture9* raw = RtRaw();
 	if (!raw) return false;
 	MakePipelineRT(extSkyRT, "AmbientOcclusionSkyRT", 6, 1);
@@ -933,8 +933,7 @@ bool AmbientOcclusionEffect::ExtSkyVisibilityRT(IDirect3DSurface9* Target, IDire
 	const bool wasFailed = ExtFailed;
 	if (Resources(resources, count, inputs, 6, extSkyUniforms.Buffer) && ExtDrawTo(extSkyRT.Pipeline, &Target, 1, resources, count, &push, sizeof(push))) return true;
 	ExtFailed = wasFailed;
-	rtFailed = true;
-	Logger::Log("UNOFFICIAL RT AO: the RT sky pass failed to draw; Skylighting's ortho map pass runs from now on.");
+	rtFailed.Set("the RT sky pass failed to draw: Skylighting's ortho map pass runs");
 	return false;
 }
 

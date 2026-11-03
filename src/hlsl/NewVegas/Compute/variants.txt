@@ -45,6 +45,9 @@ SMAAEdges m1 -DSMAA_EDGE_MODE=1
 SMAAEdges m2 -DSMAA_EDGE_MODE=2
 SMAAEdges m3 -DSMAA_EDGE_MODE=3
 SMAAEdges m4 -DSMAA_EDGE_MODE=4
+# AmbientOcclusion's estimate: PackedEstimate / GTAOEstimate (AmbientOcclusion.glsl pc.gtaoEstimate).
+AmbientOcclusionEstimate g0 -DAO_GTAO=0
+AmbientOcclusionEstimate g1 -DAO_GTAO=1
 # PointShadows: merged / batch (AddShadowedLamps) / half-resolution mask (PointShadows.frag pc.mode).
 PointShadows m0 -DPOINT_SHADOW_MODE=0
 PointShadows m1 -DPOINT_SHADOW_MODE=1

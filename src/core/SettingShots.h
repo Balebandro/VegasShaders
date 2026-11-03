@@ -21,6 +21,11 @@
 //                                                needs ReShade's D3D9 runtime (ReShadeIntegration.cpp calls CaptureFinal), or
 //                                                (2026-10-18) its Vulkan runtime under DXVK (capture_screenshot there).
 //   world                                        (2026-10-16) each shot also saves the world scene's HDR target raw (.world, CaptureWorld)
+//   record                                       (2026-10-17) the shot's frame is also RECORDED whole for tests/frame_replay.exe: when its
+//                                                frames are done, the next frame (Present to Present) is written to
+//                                                NeonSelfTest_<run>_ab_<NN>_<slug>.nvrf (FrameRecorder.h) and the picture is taken on the
+//                                                frame after. Before the first 'shot' it applies to every shot, after one only to that shot.
+//                                                Use with 'profile' (the GPU split marks need the F10 profile on); not with 'world'.
 //   stage                                        (2026-10-18) each shot also saves the HDR picture right after the AmbientLight step
 //                                                (whether it ran or not) raw, as <slug>-al.world (CaptureStage; the same file format)
 //   noreload                                     (2026-10-21) a shot with no set/effect lines skips the settings reload (LoadSettings)
@@ -37,6 +42,23 @@
 //                                                a weaker CPU emulated in the same launch. NOT undone: it stays for the later shots.
 //   facemoon                                     (2026-10-25, moon behind clouds) at the start of the shot the player looks at the moon
 //                                                (player.setangle x and z from the moon's position in the sky)
+//   reloadshaders                                (2026-10-25, bench warm slot) at the start of the shot every replaced game shader and
+//                                                every effect is compiled again from its .hlsl (changed files only; the cache answers the
+//                                                rest), at the end of that frame: a shader-only change tested without a new launch. Give
+//                                                the shot a 'wait' (compiles take frames). NOT undone.
+//   aim <ref form id> [height]                   (2026-10-25, bench framing check) at the start of the shot the camera turns to look at
+//                                                that reference (+ height units up), from where the camera is: the subject is in the
+//                                                picture even when the spot or a moveto left the view a little off. NOT undone.
+//   require onscreen <ref form id> [margin]      (2026-10-25) before the picture: the reference's position must be inside the view,
+//                                                margin = the fraction of the half-screen kept free at the edges (default 0.1). If not,
+//                                                the camera is aimed at it and the shot waits 60 more frames, once; still off: the picture
+//                                                is saved as <slug>-OFFFRAME and a FRAMING line is logged (the launcher reports it).
+//   require detail                               (2026-10-25) the picture's middle third must not be flat (luma spread >= 4 of 255: not a
+//                                                plain wall, sky or empty world); else saved as <slug>-FLAT with a FRAMING line.
+//   flickerwatch [spike]                         (2026-10-25, bench sweep mode) FlickerWatch (FlickerWatch.h) on for the whole run, indoors
+//                                                and out, with its spike score: a one-frame jump of a 4x3 picture cell away from both
+//                                                neighbouring frames by more than <spike> (default 0.05 = 5 %). Each shot logs
+//                                                "FLICKER SHOT '<slug>': n frames, n spikes, max x %" (multirun\sweep.py scores the log)
 //   turn <degrees per second>                    (2026-10-25, cloudflicker) the player turns on the spot at this rate for the whole run
 //                                                (player.setangle z on the main loop each tick), so the camera pans as in play
 //   capture [frames]                           (2026-10-26, debug capture) asks RenderDoc for a capture of this shot's picture frame
@@ -69,7 +91,9 @@
 #include "GpuProfiler.h"
 #include "ImGuiManager.h"
 #include "CpuSplit.h"
+#include "FrameRecorder.h"	// UNOFFICIAL, test only: 'record' (2026-10-17, frame replay rig)
 #include "CpuSampler.h"
+#include "FlickerWatch.h"	// 2026-10-25 bench sweep mode ('flickerwatch')
 
 namespace SettingShots {
 
@@ -78,7 +102,8 @@ namespace SettingShots {
 
 	struct Change { bool effect = false, console = false, coverage = false; std::string section, key, value; };
 	struct Shot { std::string slug; std::vector<Change> changes; std::string menu; bool menuTests = false; int frames = 0; DWORD_PTR affinity = 0; int capture = 0;
-		bool renderdoc = false; std::string renderdocPath; bool keep = false; int landFrames = 0; };	// landFrames: 'landflicker' (2026-10-30)	// menu: 2026-10-19; frames: 'wait' (2026-10-21); affinity: cpulimits (2026-10-21); capture: RenderDoc frames (2026-10-26); renderdoc: 2026-10-26
+		bool renderdoc = false; std::string renderdocPath; bool keep = false; int landFrames = 0; bool record = false;
+		bool reload = false; UInt32 aimRef = 0; float aimHeight = 0.0f; UInt32 needRef = 0; float needMargin = 0.1f; bool needDetail = false; bool retried = false; };	// reload ('reloadshaders'), aim/need*: framing check (2026-10-25, bench warm slot)	// landFrames: 'landflicker' (2026-10-30)	// menu: 2026-10-19; frames: 'wait' (2026-10-21); affinity: cpulimits (2026-10-21); capture: RenderDoc frames (2026-10-26); renderdoc: 2026-10-26
 	struct Undo { bool effect = false; std::string section, key; UInt32 type = 0; bool b = false; int i = 0; float f = 0.0f; std::string s; };
 	struct Job { std::vector<unsigned> bgra; unsigned width = 0, height = 0; char path[MAX_PATH] = ""; };
 
@@ -131,9 +156,12 @@ namespace SettingShots {
 	inline IDirect3DSurface9* WorldReadback = nullptr;
 	inline D3DSURFACE_DESC WorldDesc = {};
 
+	inline bool RecordAll = false;				// 'record' before the first shot (2026-10-17)
+	inline size_t RecordArmed = (size_t)-1, RecordFinished = (size_t)-1;
+
 	inline bool Parse(std::string& error) {
 		Kept.clear();
-		List.clear(); Frames = 120; FinalPicture = false; WorldCapture = false; WorldTaken = (size_t)-1; PreImageSpaceTaken = (size_t)-1; StageCapture = false; StageTaken = (size_t)-1; NoReload = false; TurnRate = 0.0f; WalkRate = 0.0f; WalkPeriod = 2.0f;
+		List.clear(); Frames = 120; RecordAll = false; RecordArmed = RecordFinished = (size_t)-1; FinalPicture = false; WorldCapture = false; WorldTaken = (size_t)-1; PreImageSpaceTaken = (size_t)-1; StageCapture = false; StageTaken = (size_t)-1; NoReload = false; TurnRate = 0.0f; FlickerWatch::Forced = false; WalkRate = 0.0f; WalkPeriod = 2.0f;
 		if (FinalState.load() == 3) { delete FinalJob; FinalJob = nullptr; }
 		FinalState.store(0);
 		std::ifstream in(RequestFile);
@@ -154,9 +182,33 @@ namespace SettingShots {
 			else if (command == "stage") StageCapture = true;
 			else if (command == "noreload") NoReload = true;
 			else if (command == "keep") { if (List.empty()) { error = "line " + std::to_string(number) + ": 'keep' before any 'shot'"; return false; } List.back().keep = true; }
+			else if (command == "reloadshaders") {	// 2026-10-25 bench warm slot
+				if (List.empty()) { error = "line " + std::to_string(number) + ": a reloadshaders before the first 'shot'"; return false; }
+				List.back().reload = true;
+			}
+			else if (command == "aim") {	// 2026-10-25 bench framing check
+				if (List.empty()) { error = "line " + std::to_string(number) + ": an aim before the first 'shot'"; return false; }
+				std::string ref; words >> ref; List.back().aimRef = strtoul(ref.c_str(), nullptr, 16); words >> List.back().aimHeight;
+				if (!List.back().aimRef) { error = "line " + std::to_string(number) + ": aim needs a reference form id (hex)"; return false; }
+			}
+			else if (command == "require") {	// 2026-10-25 bench framing check
+				if (List.empty()) { error = "line " + std::to_string(number) + ": a require before the first 'shot'"; return false; }
+				std::string what; words >> what;
+				if (what == "onscreen") {
+					std::string ref; words >> ref; List.back().needRef = strtoul(ref.c_str(), nullptr, 16);
+					float margin = 0.1f; if (words >> margin) List.back().needMargin = std::clamp(margin, 0.0f, 0.9f);
+					if (!List.back().needRef) { error = "line " + std::to_string(number) + ": require onscreen needs a reference form id (hex)"; return false; }
+				}
+				else if (what == "detail") List.back().needDetail = true;
+				else { error = "line " + std::to_string(number) + ": require onscreen <ref> [margin] | require detail"; return false; }
+			}
+			else if (command == "flickerwatch") {	// 2026-10-25 bench sweep mode
+				FlickerWatch::Forced = true; float spike = 0.05f; if (words >> spike) FlickerWatch::SpikeThreshold = std::clamp(spike, 0.005f, 0.5f);
+			}
 			else if (command == "turn") { words >> TurnRate; TurnRate = std::clamp(TurnRate, -360.0f, 360.0f); }
 			else if (command == "walk") { words >> WalkRate >> WalkPeriod; WalkRate = std::clamp(WalkRate, -2000.0f, 2000.0f); WalkPeriod = std::clamp(WalkPeriod, 0.1f, 60.0f); }
-			else if (command == "shot") { Shot s; words >> s.slug; if (s.slug.empty()) s.slug = "shot"; List.push_back(s); }
+			else if (command == "record") { if (List.empty()) RecordAll = true; else List.back().record = true; }
+			else if (command == "shot") { Shot s; words >> s.slug; if (s.slug.empty()) s.slug = "shot"; s.record = RecordAll; List.push_back(s); }
 			// 2026-10-19: 'menu <section>' = this shot's picture is NVR's menu open at that page ("@NewInPatch" = the new tab),
 			// taken after the menu is drawn (CaptureMenu); 'menutests' also ticks Display > "Show test settings" for it.
 			// 2026-10-27: 'menu game' = the back buffer with the GAME's menus on it (race menu, Pip-Boy...), NVR's menu stays shut.
@@ -256,10 +308,46 @@ namespace SettingShots {
 	// The frames the current shot waits before its picture: its own 'wait', or the list's 'frames'.
 	inline int ShotFrames() { return Index < List.size() && List[Index].frames > 0 ? List[Index].frames : Frames; }
 
+	// 2026-10-25 bench framing check: a reference's position (LookupFormByID, the game's 0x4839C0), where it is on screen, and the
+	// console angles that look at it from the camera.
+	inline TESObjectREFR* Reference(UInt32 id) {
+		TESForm* form = CdeclCall<TESForm*>(0x4839C0, id);
+		return form && form->formType >= 0x3A && form->formType <= 0x40 ? (TESObjectREFR*)form : nullptr;	// REFR 0x3A, ACHR, ACRE, the projectile refs, PFLA 0x40 (FNV form types)
+	}
+	inline bool OnScreen(const NiPoint3& p, float margin, float& sx, float& sy) {
+		const D3DXMATRIX& v = TheRenderManager->ViewMatrix;
+		const D3DXVECTOR4& c = TheRenderManager->CameraPosition;
+		const float dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
+		const float x = dx * v._11 + dy * v._21 + dz * v._31, y = dx * v._12 + dy * v._22 + dz * v._32, z = dx * v._13 + dy * v._23 + dz * v._33;
+		const float aspect = TheRenderManager->height ? (float)TheRenderManager->width / (float)TheRenderManager->height : 1.7778f;
+		const float th = tanf(TheRenderManager->FOVData.w * 0.5f), tv = th / aspect;	// (cameraFOV read as the horizontal one: the stricter case)
+		sx = z > 1.0f ? x / (z * th) : 99.0f; sy = z > 1.0f ? y / (z * tv) : 99.0f;	// -1..1 = inside
+		return z > 1.0f && fabsf(sx) <= 1.0f - margin && fabsf(sy) <= 1.0f - margin;
+	}
+	inline void AimAt(UInt32 id, float height) {
+		TESObjectREFR* r = Reference(id);
+		if (!r) { Logger::Log("SETTING SHOTS %s: aim: no reference %08X", Run, id); return; }
+		const D3DXVECTOR4& c = TheRenderManager->CameraPosition;
+		const float dx = r->pos.x - c.x, dy = r->pos.y - c.y, dz = r->pos.z + height - c.z;
+		const float yaw = D3DXToDegree(atan2f(dx, dy)), pitch = D3DXToDegree(atan2f(-dz, sqrtf(dx * dx + dy * dy)));
+		char line[96];
+		sprintf_s(line, "player.setangle z %.3f", yaw < 0.0f ? yaw + 360.0f : yaw); Commands.push_back(line);
+		sprintf_s(line, "player.setangle x %.3f", pitch); Commands.push_back(line);
+		Moves = true;
+		Logger::Log("SETTING SHOTS %s: aim at %08X (%.0f units away): yaw %.2f, pitch %.2f", Run, id, sqrtf(dx * dx + dy * dy + dz * dz), yaw, pitch);
+	}
+
 	// One shot's changes, the old values kept for Revert.
 	inline void Apply(const Shot& s) {
 		Commands.clear();
 		Moves = false;
+		FlickerWatch::ShotFrames = 0; FlickerWatch::ShotSpikes = 0; FlickerWatch::ShotMax = 0.0f; FlickerWatch::ShotMaxCell = -1; FlickerWatch::SkipFrames = 10; strncpy_s(FlickerWatch::Label, s.slug.c_str(), _TRUNCATE);	// 2026-10-25
+		if (s.aimRef) AimAt(s.aimRef, s.aimHeight);	// 2026-10-25 framing (the console lines run with this shot's others)
+		if (s.reload) {	// 2026-10-25: done at this frame's end (Render.cpp NiDX9Renderer__Do_EndFrame)
+			TheShaderManager->ShaderReloadQueued = true;
+			TheShaderManager->EffectReloadQueued = true;
+			Logger::Log("SETTING SHOTS %s: shot '%s': shaders and effects compiled again from their .hlsl at this frame's end", Run, s.slug.c_str());
+		}
 		if (s.affinity) {	// 2026-10-21 cpulimits: a weaker CPU, this process only
 			DWORD_PTR process = 0, system = 0;
 			GetProcessAffinityMask(GetCurrentProcess(), &process, &system);
@@ -351,6 +439,8 @@ namespace SettingShots {
 
 	inline void Stop(const char* why) {
 		Logger::Log("SETTING SHOTS %s: stopped, %s", Run, why);
+		FrameRecorder::Journal::Stop();
+		GpuTimer::MarkerHook = nullptr;
 		RestoreKept();
 		Revert();
 		Running = false;
@@ -771,6 +861,7 @@ namespace SettingShots {
 			AllQueued = false;
 			Reader.Release();
 			ReleaseWorld();
+			FrameRecorder::Journal::Stop();	// 'record': the upload journal is not needed any more
 			Logger::Log("SETTING SHOTS %s: done, every picture written", Run);
 			Notify(kLinkPictures, Run);
 		}
@@ -824,18 +915,59 @@ namespace SettingShots {
 	}
 
 	inline void NextShot() {
+		if (FlickerWatch::Forced && Index < List.size())	// 2026-10-25 bench sweep mode: this shot's flicker score
+			Logger::Log("FLICKER SHOT '%s': %u frames, %u spikes, max %.2f%% (cell %d)", List[Index].slug.c_str(), FlickerWatch::ShotFrames, FlickerWatch::ShotSpikes,
+				FlickerWatch::ShotMax * 100.0f, FlickerWatch::ShotMaxCell);
 		if (Index + 1 >= List.size()) RestoreKept();
 		Revert();
 		Index++;
 		Frame = 0;
 		if (Index < List.size()) Apply(List[Index]);
-		else { Running = false; AllQueued = true; }
+		else { Running = false; AllQueued = true; FlickerWatch::Forced = false; }
+	}
+
+	// 2026-10-25 'require detail': the luma spread of the picture's middle third (0-255).
+	inline float MiddleSpread(const Job* job) {
+		double sum = 0, sum2 = 0; unsigned n = 0;
+		for (unsigned y = job->height / 3; y < job->height * 2 / 3; y += 2)
+			for (unsigned x = job->width / 3; x < job->width * 2 / 3; x += 2) {
+				const unsigned p = job->bgra[(size_t)y * job->width + x];
+				const double l = 0.0722 * (p & 255) + 0.7152 * ((p >> 8) & 255) + 0.2126 * ((p >> 16) & 255);
+				sum += l; sum2 += l * l; n++;
+			}
+		return n ? (float)sqrt((std::max)(0.0, sum2 / n - (sum / n) * (sum / n))) : 0.0f;
+	}
+
+	// 2026-10-25 'require onscreen': checked when the shot's frames are done; once: aim at it and 60 more frames; then -OFFFRAME.
+	inline bool FramingHolds() {
+		Shot& shot = List[Index];
+		if (!shot.needRef) return true;
+		TESObjectREFR* r = Reference(shot.needRef);
+		float sx = 0, sy = 0;
+		if (r && OnScreen(r->pos, shot.needMargin, sx, sy)) {
+			if (shot.retried) Logger::Log("SETTING SHOTS %s: FRAMING shot '%s': %08X on screen after the retry (%.2f, %.2f)", Run, shot.slug.c_str(), shot.needRef, sx, sy);
+			return true;
+		}
+		if (!shot.retried && r) {
+			shot.retried = true;
+			Logger::Log("SETTING SHOTS %s: FRAMING shot '%s': %08X off screen (%.2f, %.2f): aiming at it, 60 more frames", Run, shot.slug.c_str(), shot.needRef, sx, sy);
+			AimAt(shot.needRef, shot.aimHeight);
+			Frame = (std::max)(0, ShotFrames() - 60);
+			return false;
+		}
+		Logger::Log("SETTING SHOTS %s: FRAMING shot '%s': %08X %s: saved as -OFFFRAME", Run, shot.slug.c_str(), shot.needRef, r ? "still off screen" : "is not a loaded reference");
+		shot.slug += "-OFFFRAME";
+		return true;
 	}
 
 	inline void TakeShot(IDirect3DSurface9* surface) {
 		Job* job = new (std::nothrow) Job();
 		if (job && Reader.Read(TheRenderManager->device, surface, job->bgra, job->width, job->height)) {
 			LogCaptured(TheFrameRateManager->FrameNumber, "this frame's picture");
+			if (List[Index].needDetail && !job->bgra.empty()) {
+				const float spread = MiddleSpread(job);
+				if (spread < 4.0f) { Logger::Log("SETTING SHOTS %s: FRAMING shot '%s': the middle of the picture is flat (luma spread %.2f < 4): saved as -FLAT", Run, List[Index].slug.c_str(), spread); List[Index].slug += "-FLAT"; }
+			}
 			QueueJob(job);
 		}
 		else {
@@ -845,9 +977,34 @@ namespace SettingShots {
 		NextShot();
 	}
 
+	inline void RecorderMarker(const char* name, bool begin) { FrameRecorder::Mark(begin ? FrameFormat::kMarkBegin : FrameFormat::kMarkEnd, name); }
+
+	// 'record' (2026-10-17): true while the shot's picture must wait for its recorded frame. The frame after this one is recorded
+	// (FrameRecorder arms now and starts at this frame's Present); the picture is taken once the recording is written.
+	inline bool RecordGate() {
+		const Shot& shot = List[Index];
+		if (!shot.record || RecordFinished == Index) return false;
+		if (RecordArmed != Index) {
+			char path[MAX_PATH];
+			sprintf_s(path, ".\\" VS_LOGS_FOLDER "\\NeonSelfTest_%s_ab_%02u_%s.nvrf", Run, (unsigned)Index, shot.slug.c_str());
+			if (!FrameRecorder::Arm(TheRenderManager->device, path)) { Logger::Log("SETTING SHOTS %s: shot '%s': frame NOT recorded (recorder unavailable)", Run, shot.slug.c_str()); RecordFinished = Index; return false; }
+			RecordArmed = Index;
+			GpuTimer::MarkerHook = &RecorderMarker;
+			Logger::Log("SETTING SHOTS %s: shot '%s': recording the next frame", Run, shot.slug.c_str());
+			return true;
+		}
+		if (FrameRecorder::State == FrameRecorder::kArmed || FrameRecorder::State == FrameRecorder::kRecording) return true;
+		RecordFinished = Index;
+		GpuTimer::MarkerHook = nullptr;
+		Logger::Log("SETTING SHOTS %s: shot '%s': frame recording %s", Run, shot.slug.c_str(), FrameRecorder::State == FrameRecorder::kDone ? "written" : "FAILED");
+		return false;
+	}
+
 	// Render.cpp, the finished picture before the HUD (where the neon self-test takes its Final shots).
 	inline void Capture(IDirect3DSurface9* surface) {
 		if (!Running || Frame < ShotFrames() || !surface) return;
+		if (!FramingHolds()) return;	// 'require onscreen' (2026-10-25)
+		if (RecordGate()) return;	// 'record': the shot's frame first
 		if (!List[Index].menu.empty()) return;	// 2026-10-19: taken after the menu is drawn (CaptureMenu)
 		if (FinalPicture) { int idle = 0; FinalState.compare_exchange_strong(idle, 1); return; }	// taken at the present instead, the settings still the shot's
 		TakeShot(surface);

@@ -61,7 +61,9 @@ namespace RmaosDraw { static void Upload(); }	// UNOFFICIAL _rmaos maps (below)
 static GpuTimer PreSceneTimer("Pre-scene (to world scene)");
 static bool PreSceneTimerActive = false;
 static bool PreSceneLabelOpen = false;	// UNOFFICIAL 2026-10-26 GpuDebugLabels: the pre-scene group (GpuDebug.h)
+static bool PreSceneMarker = false;	// UNOFFICIAL, test only: the frame recorder's marker for this manual timer
 static void EndPreSceneTimer() {
+	if (PreSceneMarker) { PreSceneMarker = false; if (GpuTimer::MarkerHook) GpuTimer::MarkerHook(PreSceneTimer.GetName(), false); }
 	if (PreSceneLabelOpen) { PreSceneLabelOpen = false; GpuDebug::End(); }
 	if (!PreSceneTimerActive) return;
 	PreSceneTimer.End();
@@ -119,6 +121,24 @@ namespace ShaderSplit {
 	static double LastBindEnd = 0.0, MaxGapMs = 0.0;
 
 	static unsigned char KeyOf(unsigned context, unsigned label, bool nvr) { return (unsigned char)((context * MaxLabels + label) * 2 + (nvr ? 1 : 0)); }
+
+	// UNOFFICIAL 2026-10-17, test only: the same family changes as marks in a recorded frame (FrameRecorder.h), named like the
+	// GPU SPLIT lines ("world scene/GRASS/vanilla"), tracked on their own so they do not depend on the timeline having a slot.
+	static unsigned char RecKey = GpuTimeline::NoKey;
+	static unsigned char RecSaved[8];
+	static void RecMark(unsigned char key) {
+#if NVR_TEST_TOOLS
+		if (key == RecKey) return;
+		RecKey = key;
+		if (!FrameRecorder::Active()) return;
+		char name[64];
+		if (key == GpuTimeline::NoKey) strcpy_s(name, "(none)");
+		else sprintf_s(name, "%s/%s/%s", ContextNames[(key / 2) / MaxLabels], LabelNames[(key / 2) % MaxLabels], (key & 1) ? "NVR" : "vanilla");
+		FrameRecorder::Mark(FrameFormat::kMarkSplit, name);
+#else
+		(void)key;
+#endif
+	}
 
 	static void Append(char* buffer, size_t size, size_t& used, const char* format, ...);
 
@@ -359,6 +379,7 @@ namespace ShaderSplit {
 		Depth = 0;
 		CurrentContext = Outside;
 		CurrentKey = GpuTimeline::NoKey;
+		RecKey = GpuTimeline::NoKey;
 		Frame = {};
 		PendingMultiLight = -1;
 		PendingTerrainSlots = -1;
@@ -392,11 +413,12 @@ namespace ShaderSplit {
 
 	// The game pass being drawn (nests: the stack restores the outer pass and its current family).
 	static void BeginContext(Context context) {
-		if (Depth < 8) { SavedContext[Depth] = CurrentContext; SavedKey[Depth] = CurrentKey; }
+		if (Depth < 8) { SavedContext[Depth] = CurrentContext; SavedKey[Depth] = CurrentKey; RecSaved[Depth] = RecKey; }
 		Depth++;
 		CurrentContext = context;
 		CurrentKey = Timeline.InFrame() ? KeyOf(context, 0, false) : GpuTimeline::NoKey;
 		Timeline.Mark(CurrentKey);
+		RecMark(KeyOf(context, 0, false));
 	}
 
 	static void EndContext() {
@@ -405,6 +427,7 @@ namespace ShaderSplit {
 		CurrentContext = Depth < 8 ? SavedContext[Depth] : (unsigned char)Outside;
 		CurrentKey = Depth < 8 ? SavedKey[Depth] : GpuTimeline::NoKey;
 		Timeline.Mark(CurrentKey);
+		RecMark(Depth < 8 ? RecSaved[Depth] : GpuTimeline::NoKey);
 	}
 
 	// Called from SetShadersHook once the pixel shader for the pass is chosen. Start: when the hook began.
@@ -419,6 +442,9 @@ namespace ShaderSplit {
 			firstUse = Seen.insert(((UInt64)(uintptr_t)handle << 2) | (context & 3)).second;
 			if (firstUse) FirstUsesSession++;
 		}
+#if NVR_TEST_TOOLS
+		if (context != Outside && FrameRecorder::Active()) RecMark(KeyOf(context, LabelFor(shader), nvr));	// UNOFFICIAL, test only
+#endif
 		if (!FrameProfiled) return;
 
 		// The previous pass drew between the end of its bind and the start of this one.
@@ -662,6 +688,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	GpuProfileScope gpu(frameTimer, TheRenderManager->device);
 	PreSceneLabelOpen = GpuDebug::Labels && GpuDebug::Begin(PreSceneTimer.GetName());
 	PreSceneTimerActive = PreSceneTimer.Begin(TheRenderManager->device);
+	if (GpuTimer::MarkerHook) { GpuTimer::MarkerHook(PreSceneTimer.GetName(), true); PreSceneMarker = true; }	// UNOFFICIAL, test only
 	WorldRenderedThisFrame = false;
 	FrameWorldCalls = FrameFirstPersonCalls = FrameImageSpaceCalls = 0;
 	TerrainProbe::NewFrame();	// UNOFFICIAL 2026-10-17 terrain study, diagnostic
@@ -2914,6 +2941,19 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 			else PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
 		}
 	}
+#if NVR_TEST_TOOLS
+	if (FrameRecorder::Active()) {	// UNOFFICIAL, test only: the recorded frame's shader names (FrameRecorder.h)
+		char name[160];
+		if (VertexShader && VertexShader->ShaderHandle) {
+			sprintf_s(name, "%s %s", VertexShader->Name ? VertexShader->Name : "?", (void*)VertexShader->ShaderHandle != (void*)VertexShader->ShaderHandleBackup ? "(NVR)" : "(vanilla)");
+			FrameRecorder::NameShader(VertexShader->ShaderHandle, name);
+		}
+		if (PixelShader && PixelShader->ShaderHandle) {
+			sprintf_s(name, "%s %s", PixelShader->Name ? PixelShader->Name : "?", (void*)PixelShader->ShaderHandle != (void*)PixelShader->ShaderHandleBackup ? "(NVR)" : "(vanilla)");
+			FrameRecorder::NameShader(PixelShader->ShaderHandle, name);
+		}
+	}
+#endif
 	ShaderSplit::OnBind(PixelShader, PixelShader2, bindStart);
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) TerrainShaders::NoteWorldBind();	// UNOFFICIAL terrain blending diagnostic
 	ReflectionProbe::OnBind(Geometry, PixelShader ? PixelShader->Name : nullptr, VertexShader ? VertexShader->Name : nullptr);
@@ -4068,6 +4108,10 @@ bool __fastcall NiDX9Renderer__Do_EndFrame(NiDX9Renderer* apThis, void*) {
 
 	// Reload effects if queued.
 	ShaderManager* shaders = TheShaderManager;
+	if (shaders && shaders->ShaderReloadQueued) {	// UNOFFICIAL 2026-10-25 'reloadshaders' (SettingShots.h)
+		shaders->ShaderReloadQueued = false;
+		shaders->ReloadShaders();
+	}
 	if (shaders && shaders->EffectReloadQueued) {
 		shaders->ReloadEffects();
 		shaders->EffectReloadQueued = false;

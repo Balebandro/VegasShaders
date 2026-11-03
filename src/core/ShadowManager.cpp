@@ -2320,7 +2320,9 @@ void ShadowManager::RenderShadowMaps() {
 		alphaPass->VertexShader = ShadowMapVertex;
 		alphaPass->PixelShader = ShadowMapPixel;
 		skinnedGeoPass->VertexShader = ShadowMapVertex;
-		skinnedGeoPass->PixelShader = ShadowMapOpaquePixel;
+		// UNOFFICIAL 2026-11-02 SkinnedAlphaTest (RenderPass.h): on, skinned casters take the clip shader (opaque ones never discard).
+		SkinnedGeoShadowRenderPass::AlphaTest = TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "SkinnedAlphaTest") != 0;
+		skinnedGeoPass->PixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowMapPixel : ShadowMapOpaquePixel;
 		speedTreePass->VertexShader = ShadowMapVertex;
 		speedTreePass->PixelShader = ShadowMapPixel;
 		terrainLODPass->VertexShader = ShadowMapVertex;
@@ -2910,7 +2912,9 @@ void ShadowManager::RenderShadowMaps() {
 	alphaPass->VertexShader = ShadowCubeMapVertex;
 	alphaPass->PixelShader = ShadowCubeMapPixel;
 	skinnedGeoPass->VertexShader = ShadowCubeMapVertex;
-	skinnedGeoPass->PixelShader = ShadowCubeMapOpaquePixel;
+	// UNOFFICIAL 2026-11-02 SkinnedAlphaTest (RenderPass.h), lamp cube maps
+	SkinnedGeoShadowRenderPass::AlphaTest = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Main", "SkinnedAlphaTest") != 0;
+	skinnedGeoPass->PixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowCubeMapPixel : ShadowCubeMapOpaquePixel;
 	speedTreePass->VertexShader = ShadowCubeMapVertex;
 	speedTreePass->PixelShader = ShadowCubeMapPixel;
 

@@ -1,101 +1,143 @@
-// BloomLegacy: a soft bloom on the tonemapped picture (the older, Oblivion Reloaded style). Four passes in one technique:
-// 1 the bright pass (no clamp, so negative values take part in the blur on purpose), 2 a horizontal and 3 a vertical blur,
-// 4 the combine: the glow is added over the picture, which is darkened where the glow is.
+// Bloom for Oblivion Reloaded
 
-uniform float4 TESR_BloomLegacyData;    // x Luminance; y MiddleGray; z WhiteCutOff (the category for the time of day)
-uniform float4 TESR_BloomLegacyValues;  // x BloomIntensity; y OriginalIntensity; z BloomSaturation; w OriginalSaturation
-uniform float4 TESR_ReciprocalResolution;
+#define viewbloom 0
 
-uniform sampler2D TESR_RenderedBuffer : register(s0) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_SourceBuffer   : register(s1) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+float4 TESR_ReciprocalResolution;
+float4 TESR_BloomLegacyData;
+float4 TESR_BloomLegacyValues;
 
-// RenderScale: the blur taps are kept inside the drawn part of a rect frame (no-op on native frames).
-#include "includes/RenderRect.hlsl"
+sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_SourceBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 
-struct VSOUT { float4 vertPos : POSITION; float2 UVCoord : TEXCOORD0; };
-
-struct VSIN { float4 vertPos : POSITION0; float2 UVCoord : TEXCOORD0; };
-
-VSOUT FrameVS(VSIN px)
+static const float2 OffsetMaskH = float2(1.0f, 0.0f);
+static const float2 OffsetMaskV = float2(0.0f, 1.0f);
+ 
+struct VSOUT
 {
-	VSOUT res = (VSOUT)0.0f;
-	res.vertPos = px.vertPos;
-	res.UVCoord = px.UVCoord;
-	return res;
+	float4 vertPos : POSITION;
+	float2 UVCoord : TEXCOORD0;
+};
+ 
+struct VSIN
+{
+	float4 vertPos : POSITION0;
+	float2 UVCoord : TEXCOORD0;
+};
+ 
+VSOUT FrameVS(VSIN IN)
+{
+	VSOUT OUT = (VSOUT)0.0f;
+	OUT.vertPos = IN.vertPos;
+	OUT.UVCoord = IN.UVCoord;
+	return OUT;
 }
 
-float Luma709(float3 c) { return dot(c, float3(0.2126f, 0.7152f, 0.0722f)); }
+static const int cKernelSize = 13;
 
-// Pass 1: the bright pass. Scale to the middle grey, boost by the white cut-off, then map to (x - 5) / (10 + |x|): negative for most of the
-// picture, zero at 5 and approaching 1 for very bright values.
-float4 BrightPS(VSOUT px) : COLOR0
+static const float BlurWeights[cKernelSize] = 
 {
-	const float3 c = tex2D(TESR_RenderedBuffer, px.UVCoord).rgb;
-	const float scl = TESR_BloomLegacyData.y / (TESR_BloomLegacyData.x + 0.001f);
-	const float cut_v = max(TESR_BloomLegacyData.z, 0.001f);   // guard: a zero cut-off would divide by zero
-	const float3 v = c * scl;
-	const float3 boosted_v = v * (1.0f + v / (cut_v * cut_v));
-	return float4((boosted_v - 5.0f) / (10.0f + max(boosted_v, 0.0f)), 1.0f);
+    0.002216,
+    0.008764,
+    0.026995,
+    0.064759,
+    0.120985,
+    0.176033,
+    0.199471,
+    0.176033,
+    0.120985,
+    0.064759,
+    0.026995,
+    0.008764,
+    0.002216,
+};
+ 
+static const float2 BlurOffsets[cKernelSize] = 
+{
+	float2(-6.0f * TESR_ReciprocalResolution.x, -6.0f * TESR_ReciprocalResolution.y),
+	float2(-5.0f * TESR_ReciprocalResolution.x, -5.0f * TESR_ReciprocalResolution.y),
+	float2(-4.0f * TESR_ReciprocalResolution.x, -4.0f * TESR_ReciprocalResolution.y),
+	float2(-3.0f * TESR_ReciprocalResolution.x, -3.0f * TESR_ReciprocalResolution.y),
+	float2(-2.0f * TESR_ReciprocalResolution.x, -2.0f * TESR_ReciprocalResolution.y),
+	float2(-1.0f * TESR_ReciprocalResolution.x, -1.0f * TESR_ReciprocalResolution.y),
+	float2( 0.0f * TESR_ReciprocalResolution.x,  0.0f * TESR_ReciprocalResolution.y),
+	float2( 1.0f * TESR_ReciprocalResolution.x,  1.0f * TESR_ReciprocalResolution.y),
+	float2( 2.0f * TESR_ReciprocalResolution.x,  2.0f * TESR_ReciprocalResolution.y),
+	float2( 3.0f * TESR_ReciprocalResolution.x,  3.0f * TESR_ReciprocalResolution.y),
+	float2( 4.0f * TESR_ReciprocalResolution.x,  4.0f * TESR_ReciprocalResolution.y),
+	float2( 5.0f * TESR_ReciprocalResolution.x,  5.0f * TESR_ReciprocalResolution.y),
+	float2( 6.0f * TESR_ReciprocalResolution.x,  6.0f * TESR_ReciprocalResolution.y)
+};
+
+float3 AdjustSaturation(float3 color, float saturation)
+{
+	float grey = dot(color, float3(0.2126f, 0.7152f, 0.0722f)); // same as our "luma()" helper function
+	
+	return lerp(grey, color, saturation);
 }
 
-// Passes 2 and 3: a 13-tap separable blur (a Gaussian of sigma 2.1 texels, weights normalised). Taps are kept inside the drawn part.
-float3 BlurLine(float2 uv, float2 direction_v)
+float4 BloomPass(VSOUT IN) : COLOR0
 {
-	const float2 texel_v = TESR_ReciprocalResolution.xy;
-	const float2 step_v = texel_v * direction_v;
-	float3 sum_v = 0.0f;
-	float total_f = 0.0f;
-	[unroll] for (int i = -6; i <= 6; i++) {
-		const float w = exp(-(float)(i * i) / 8.82f);
-		sum_v += w * tex2D(TESR_RenderedBuffer, clampToRectIfOn(uv + step_v * (float)i, texel_v)).rgb;
-		total_f += w;
-	}
-	return sum_v / total_f;
+    float3 Color = tex2D(TESR_RenderedBuffer, IN.UVCoord).rgb;
+
+    Color *= TESR_BloomLegacyData.y / (TESR_BloomLegacyData.x + 0.001);
+    Color *= (1 + (Color / (TESR_BloomLegacyData.z * TESR_BloomLegacyData.z)));
+    Color -= 5;
+    Color /= (10 + max(Color, 0));
+
+    return float4(Color, 1);
 }
 
-float4 BlurHorizontalPS(VSOUT px) : COLOR0 { return float4(BlurLine(px.UVCoord, float2(1.0f, 0.0f)), 1.0f); }
-float4 BlurVerticalPS(VSOUT px) : COLOR0 { return float4(BlurLine(px.UVCoord, float2(0.0f, 1.0f)), 1.0f); }
-
-// Pass 4: the glow (clamped to 0..1, saturation and intensity) added over the original (saturation and intensity), which is darkened
-// where the glow is by max(max(original, 1) - glow, 0) per channel.
-float4 CombinePS(VSOUT px) : COLOR0
+float4 BlurPass(VSOUT IN, uniform float2 OffsetMask) : COLOR0
 {
-	const float3 blurred_v = tex2D(TESR_RenderedBuffer, px.UVCoord).rgb;
-	const float3 original_v = tex2D(TESR_SourceBuffer, px.UVCoord).rgb;
+	float3 Color = 0;
+ 
+    for (int i = 0; i < cKernelSize; i++)
+    {
+		Color += tex2D(TESR_RenderedBuffer, IN.UVCoord + BlurOffsets[i] * OffsetMask).rgb * BlurWeights[i];
+    }
 
-	const float3 glow_v = saturate(blurred_v);
-	const float glow_luma = Luma709(glow_v);
-	const float3 bloom_colour = lerp(float3(glow_luma, glow_luma, glow_luma), glow_v, TESR_BloomLegacyValues.z) * TESR_BloomLegacyValues.x;
-
-	const float original_luma = Luma709(original_v);
-	const float3 original_colour = lerp(float3(original_luma, original_luma, original_luma), original_v, TESR_BloomLegacyValues.w) * TESR_BloomLegacyValues.y;
-	const float3 darkening_v = max(max(original_v, 1.0f) - glow_v, 0.0f);
-
-	return float4(original_colour * darkening_v + bloom_colour, 1.0f);
+    return float4(Color, 1.0f);
 }
 
-technique BloomLegacy
+float4 CombinePass(VSOUT IN) : COLOR0
 {
-	pass Bright
+	float3 bloomColor = saturate(tex2D(TESR_RenderedBuffer, IN.UVCoord).rgb); // Needs saturate() to not go crazy as the bloom wasn't targeting the 0-1 range
+	float3 originalColor = tex2D(TESR_SourceBuffer, IN.UVCoord).rgb;
+	
+	bloomColor = AdjustSaturation(bloomColor, TESR_BloomLegacyValues.z) * TESR_BloomLegacyValues.x;
+	originalColor = AdjustSaturation(originalColor, TESR_BloomLegacyValues.w) * TESR_BloomLegacyValues.y;
+	originalColor *= max((max(originalColor, 1) - bloomColor), 0); // darken the background by the inverse bloom channel value (relative to the background max, to support HDR backgrounds beyond 1)
+	
+	#if viewbloom
+		return float4(bloomColor, 1.0f);
+	#endif
+	
+	return float4(originalColor + bloomColor, 1.0f);
+}
+ 
+technique
+{
+	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 BrightPS( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 BloomPass();
 	}
-	pass BlurHorizontal
+	
+	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 BlurHorizontalPS( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 BlurPass( OffsetMaskH );
 	}
-	pass BlurVertical
+	
+	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 BlurVerticalPS( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 BlurPass( OffsetMaskV );
 	}
-	pass Combine
+	
+	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 CombinePS( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 CombinePass();
 	}
 }

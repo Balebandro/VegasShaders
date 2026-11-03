@@ -1,134 +1,149 @@
-// Precipitations: falling rain streaks laid over the view, in 14 layers on cylinders round the camera.
-// Written from the spec (rw-tools/specs/Precipitations.md). Samplers keep the spec's declaration order; the C++ binds them by name.
-// The spec gives the behaviour, not every formula: the cell hash, the streak shape and the refraction scale below are this shader's
-// own choices, chosen to fit the spec's ranges (see the report that goes with this file).
+// Rain fullscreen shader for Oblivion Reloaded
+#define RainLayers 15
 
-uniform float4 TESR_RainData;		// x rain amount, y VerticalScale, z Speed, w Opacity
-uniform float4 TESR_RainAspect;		// x Refraction, y Coloring, z (Bloom, not read), w SkipHiddenLayers
-uniform float4 TESR_GameTime;		// z animation clock
-uniform float4 TESR_SunDirection;	// direction toward the sun
-uniform float4 TESR_SunColor;
-uniform float4x4 TESR_ShadowCameraToLightTransformOrtho;
+float4x4 TESR_WorldViewProjectionTransform;
+float4x4 TESR_ShadowCameraToLightTransformOrtho;
+float4 TESR_ReciprocalResolution;
+float4 TESR_GameTime;
+float4 TESR_RainData; // x:rain amount, set by weather (0 to 1), y: vertical scale, z: speed of rainfall w: opacity
+float4 TESR_RainAspect; // x:refraction amount, y: base color, w: UNOFFICIAL SkipHiddenLayers (1: on)
+float4 TESR_FogColor;
+float4 TESR_SunDirection;
+float4 TESR_SunColor;
 
-uniform sampler2D TESR_SourceBuffer : register(s0) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_RenderedBuffer : register(s1) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_DepthBuffer : register(s2) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_OrthoMapBuffer : register(s3) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_BloomBuffer : register(s4) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+sampler2D TESR_SourceBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_RenderedBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_DepthBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_OrthoMapBuffer : register(s3) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_BloomBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 
-#include "includes/Helpers.hlsl"
-#include "includes/Depth.hlsl"
+static const float PI = 3.14159265;
+static const float timetick = TESR_GameTime.z;
+static const float hscale = 0.004f * TESR_RainData.y; // low values stretch the volume vertically
+static const float3x3 p = float3x3(30.323122,30.323122,30.323122,30.323122,30.323122,30.323122,30.323122,30.323122,30.323122);
+static const float DEPTH = 100; // distance step between each layer
+static const float SPEED = TESR_RainData.z; // speed multiplier for falling animation 
 
-struct VSOUT { float4 vertPos : POSITION; float2 UVCoord : TEXCOORD0; };
-
-struct VSIN { float4 vertPos : POSITION0; float2 UVCoord : TEXCOORD0; };
-
-VSOUT FrameVS(VSIN px)
+struct VSOUT
 {
-	VSOUT res = (VSOUT)0.0f;
-	res.vertPos = px.vertPos;
-	res.UVCoord = px.UVCoord;
-	return res;
+	float4 vertPos : POSITION;
+	float2 UVCoord : TEXCOORD0;
+};
+
+struct VSIN
+{
+	float4 vertPos : POSITION0;
+	float2 UVCoord : TEXCOORD0;
+};
+
+VSOUT FrameVS(VSIN IN)
+{
+	VSOUT OUT = (VSOUT)0.0f;
+	OUT.vertPos = IN.vertPos;
+	OUT.UVCoord = IN.UVCoord;
+	return OUT;
 }
 
-static const int RainLayers = 14;	// layers 1 to 14 at 100 x i game units along the ray
+#include "Includes/Depth.hlsl"
+#include "Includes/Helpers.hlsl"
 
-float RainHash(float2 p)
+// convert world position to a coordinate on a cylinder around the player
+float2 cylindrical(float3 world)
 {
-	return frac(sin(dot(p, float2(127.1f, 311.7f))) * 43758.5453f);
+	float u = -atan2(world.y, world.x) / PI; 
+	float v = world.z / length(world.xy);
+	return float2(compress(u), hscale * v);
 }
 
-// The ortho map test at a camera-relative point: visible (1) when the map's top surface is not closer to the sun than the point
-// (bias 0.0001) and the point lies inside the map. Outside the map the point shows no rain (the spec's rule for this effect).
-float RainSunOpen(float3 rel_v)
-{
-	float4 o = mul(float4(rel_v, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
-	o.xyz /= (abs(o.w) < 1.0e-6f ? 1.0e-6f : o.w);
-	float2 uv = float2(o.x * 0.5f + 0.5f, o.y * -0.5f + 0.5f);
-	if (abs(o.x) > 1.0f || abs(o.y) > 1.0f || o.z < 0.0f || o.z > 1.0f) return 0.0f;
-	float top_v = tex2Dlod(TESR_OrthoMapBuffer, float4(uv, 0.0f, 0.0f)).r;
-	return step(o.z - 0.0001f, top_v);
+// checks wether a point is underneath something occluding
+float GetOrtho(float4 OrthoPos) {	
+	OrthoPos.xyz /= OrthoPos.w;
+    float outofbounds = (OrthoPos.x < -1.0f || OrthoPos.x > 1.0f ||
+        OrthoPos.y < -1.0f || OrthoPos.y > 1.0f ||
+        OrthoPos.z <  0.0f || OrthoPos.z > 1.0f);
+ 
+    OrthoPos.x = OrthoPos.x *  0.5f + 0.5f;
+    OrthoPos.y = OrthoPos.y * -0.5f + 0.5f;
+	// UNOFFICIAL 2026-10-17: level 0 explicitly (the ortho map has only that level), so the read may sit in Rain()'s per-layer branch.
+	float Ortho = tex2Dlod(TESR_OrthoMapBuffer, float4(OrthoPos.xy, 0, 0)).r;
+	return (Ortho > OrthoPos.z - 0.0001) * (1 - outofbounds); 
 }
 
-float4 RainPS(VSOUT px) : COLOR0
+float4 Rain( VSOUT IN ) : COLOR0
 {
-	float2 uv = px.UVCoord;
-	float4 src_c = tex2D(TESR_SourceBuffer, uv);
-	float ray_depth = getHomogenousDepth(uv);		// distance along the ray through the pixel (game units)
-	float3 dir = normalize(toWorld(uv));
+	float4 color = linearize(tex2D(TESR_SourceBuffer, IN.UVCoord));
+	int iterations = RainLayers;
 
-	float amount_v = 0.0f;		// total drop coverage over the layers
-	float rain_amount = TESR_RainData.x;
-	float vertical_scale = TESR_RainData.y;
-	float speed_v = TESR_RainData.z;
-	float opacity_v = TESR_RainData.w;
-	float clock_v = TESR_GameTime.z;
+	// calculating the ray along which the  volumetric rain will be calculated
+	
+    float3 rayStart = toWorld(IN.UVCoord);
+    float3 rayEnd = rayStart * DEPTH * iterations;
+    float4 orthoStart = mul(float4(rayStart.xyz, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
+    float4 orthoEnd = mul(float4(rayEnd.xyz, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
+    float4 step = (orthoEnd - orthoStart) / iterations;
+	
+	// each iteration adds a cylindrical layer of drops
+    float depth = readDepth(IN.UVCoord);
+	float2 uv = cylindrical(rayStart.xyz); // converts world coordinates to cylinder coordinates around the player
 
-	if (rain_amount > 0.0f)
-	{
-		[loop] for (int i = 1; i <= RainLayers; i++)
-		{
-			float len_v = 100.0f * i;
-			// A layer shows only where the pixel's surface is further away than the layer. SkipHiddenLayers only saves the work.
-			float visible_layer = len_v < ray_depth ? 1.0f : 0.0f;
-			if (TESR_RainAspect.w > 0.5f && visible_layer < 0.5f) continue;
+	float totalRain = 0.0f;
 
-			float3 rel_p = dir * len_v;
-			float horiz_v = max(length(rel_p.xy), 1.0f);
-			// Cylinder mapping: azimuth into 0 to 1 with a half-turn offset; height over horizontal distance.
-			float u_v = atan2(rel_p.y, rel_p.x) / (2.0f * PI) + 0.5f;
-			float v = rel_p.z / horiz_v * 0.004f * vertical_scale;
+	[unroll]
+	for (int i = 1; i < iterations; i++){
+		// UNOFFICIAL 2026-10-17 SkipHiddenLayers (TESR_RainAspect.w): a layer behind the pixel adds exactly 0 (the drop is multiplied
+		// by (depth > DEPTH * i) below), so its work is skipped. Off: every layer is worked out as before.
+		[branch] if (depth > DEPTH * i || TESR_RainAspect.w < 0.5f) {
+		float2 noiseSurfacePosition = uv * (1.0f + i * DEPTH); // scale cylinder coordinates with iterations
+		noiseSurfacePosition += float2(noiseSurfacePosition.y * (fmod(i * 107.238917f, 1.0f) - 0.5f), SPEED * timetick); // animate y offset, not sure what x does?
 
-			float layer_speed = 1.0f + 0.1f * i;
-			float2 grid_v = float2(64.0f, 32.0f);
-			float2 g_v = float2(u_v * grid_v.x + RainHash(float2(i, 3.0f)) * 17.0f, v * grid_v.y - speed_v * clock_v * layer_speed * 4.0f);
-			float2 cell_v = floor(g_v);
-			float2 f = frac(g_v) - 0.5f;
+		// creating the noise with magic
+		float3 m = float3(floor(noiseSurfacePosition), i); // places the drops at the same distance from the camera?
+		float3 mp = m/max(frac(mul(p, m)), 1e-4); // bayer matrix? grid of grey values stretch depending on the world positions
+		// UNOFFICIAL 2026-10-16: every row of p is the same, so mul(p, m) = 30.32 x (m.x + m.y + m.z) and frac() is exactly 0 in the
+		// cells where that sum is 0 (reachable: the x offset above can go negative): a divide by 0 (inf/NaN drops). Guarded.
+		float3 rainNoise = frac(mp); //r.x is a random generated grid of different darknesses
 
-			float h_v = RainHash(cell_v + float2(i * 7.0f, i * 13.0f));
-			if (h_v < 0.55f) continue;		// only some cells hold a drop
-			float brightness_v = RainHash(cell_v + float2(3.1f, 9.7f)) / (1.0f + 0.2f * i);
+        // determin drop shape
+		float2 shape = abs(fmod(noiseSurfacePosition, 1.0f) + rainNoise.xy - 1.0f);
+		shape += 0.01f * abs(2.0f * frac(10.0f * noiseSurfacePosition.yx) - 1.0f); // shape is a horizontal gradient on each square 
+		float dropGradient = 0.6f * max(shape.x - shape.y, shape.x + shape.y) + max(shape.x, shape.y) - 0.01f; // creates a circular gradient on each square of the noise grid to focus the drop
+		float edge = 0.005f + 0.05f * min(1.0f * i, 4.0f * TESR_RainData.x); // can't be 0 or smoothstep will fail. the smaller this value, the smaller the drops
 
-			// Drop size grows with the layer index and the rain amount; never zero (the smooth step breaks at zero).
-			float edge_v = 0.05f * min((float)i, 4.0f * rain_amount) + 0.005f;
-			float streak_x = smoothstep(edge_v, 0.0f, abs(f.x));
-			float streak_y = smoothstep(0.5f, 0.15f, abs(f.y));
-			float drop_v = streak_x * streak_y * brightness_v;
-
-			amount_v += drop_v * RainSunOpen(rel_p) * rain_amount * visible_layer;
+		// add new drop influence to the fragment, by extracting the brightest spots in the gradients grid using the edge parameter
+		float drop = smoothstep(edge, -edge, dropGradient) * (rainNoise.x / (1.0f + 0.2f * i)); // fade opacity with each iteration
+		drop *= GetOrtho(orthoStart + step * i) * (depth > DEPTH * i); // depth and ortho check for rain
+		totalRain += drop;
 		}
 	}
-	amount_v = saturate(amount_v);
 
-	// Everything below only matters where drops are; other pixels keep the source picture.
-	if (amount_v <= 0.0f) return float4(src_c.rgb, 1.0f);
+	// a rain tint color that scales with the sun direction
+	float4 sunColor = linearize(TESR_SunColor);
+	float4 rainColor = lerp(float(0.5).xxxx, sunColor * 2, pow(shades(normalize(rayStart.xyz), TESR_SunDirection.xyz), 2));
 
-	float refr_c = TESR_RainAspect.x;
-	float2 shifted_v = uv + float2(amount_v * refr_c * 0.004f, -amount_v * refr_c * 0.004f);
-	float3 refr_l = linearize(max(tex2D(TESR_SourceBuffer, shifted_v).rgb, 0.0f));
-	float3 bloom_l = tex2D(TESR_BloomBuffer, shifted_v).rgb;	// added as read, no conversion
+	// sample the bloom buffer and the source buffer with refracted UV to shade the rain with
+	float2 refractedUV = IN.UVCoord + float2(totalRain * TESR_RainAspect.x, -totalRain * TESR_RainAspect.x);
+	float4 refractedColor = linearize(tex2D(TESR_SourceBuffer, refractedUV));
+	refractedColor += tex2D(TESR_BloomBuffer, refractedUV);
 
-	// Drop tint: mid grey toward twice the sun colour, by the square of the sun's alignment with the ray.
-	float sun_align = saturate(dot(dir, normalize(TESR_SunDirection.xyz)));
-	float3 sun_l = linearize(max(TESR_SunColor.rgb, 0.0f));
-	float3 tint_rgb = lerp(float3(0.5f, 0.5f, 0.5f), 2.0f * sun_l, sun_align * sun_align);
-
-	float3 drop_col = refr_l + bloom_l + tint_rgb * TESR_RainAspect.y * 0.02f;
-	float3 orig_l = linearize(max(src_c.rgb, 0.0f));
-	float3 out_l = lerp(orig_l, drop_col, amount_v * opacity_v);
-	return float4(delinearize(max(out_l, 0.0f)), 1.0f);
+	return delinearize(lerp(color, refractedColor + rainColor * TESR_RainAspect.y * 0.02, totalRain* TESR_RainData.w));
 }
+
+
+
+
+
+
+
 
 technique
 {
+
+	
+	
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 RainPS( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 Rain();
 	}
 }

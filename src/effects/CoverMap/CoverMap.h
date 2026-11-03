@@ -86,7 +86,8 @@ private:
 	int					current = 0;
 	int					mapResolution = 0;
 	bool				mapUnorm = true;			// A16B16G16R16 (else the A16B16G16R16F fallback: coarser steps)
-	bool				mapFailed = false;
+	bool				mapFailed = false;			// the card draws into fewer than 2 targets at once (for the session)
+	FailOnce::Latch		mapMakeFailed{ "Persistent wetness/snow cover map" };	// UNOFFICIAL 2026-11-02 RetryFailedEffects: its textures could not be made
 	bool				mapValid = false;			// the current map holds data (else the next update starts every texel)
 
 	// the window of the last update (world texel index of its first texel), its reference height
@@ -124,4 +125,5 @@ private:
 };
 
 extern CoverMapEffect* TheCoverMap;
-extern unsigned int CoverMapOrthoFrame;	// ShadowManager: the frame whose ortho map was drawn (or moved) for the rain / snow effects
+extern unsigned int CoverMapOrthoFrame;	// ShadowManager: the frame whose ortho map was drawn (or moved) for the rain / snow effects#include "../../core/FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects
+

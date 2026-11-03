@@ -84,6 +84,7 @@ HealthCoeff = 0.5
 HealthEnabled = false
 
 [_Main.Main.Misc]
+RetryFailedEffects = true             # UNOFFICIAL BUG FIX (2026-11-02), live: a part of an effect that switched itself off after an error (a texture or target that could not be made, a pass that failed to draw: CapturedNormals, DeferredLamps frame copy, exact pass sums, GodRays dedicated / packed passes, AO and Skylighting RT passes, the wet/snow cover map) tries again after the next cell change, up to 3 times. Each failure is listed in the menu's status bar. false = as before: off until the game restarts.
 ForceMSAA = false           # Override game setting to force MSAA.
 RenderEffects = true        # Toggle rendering of all effects.
 LockpickEffects = false     # UNOFFICIAL (2026-11-01), live: the mod's effects and object shaders (PBR) while the lockpick screen is open. false = the game's own picture and shaders there (the lock came out black with PBR) (the mod's effects made the lock view look wrong, above all with a real-time-menus mod that keeps the world drawing behind the lock). true = as before.
@@ -126,6 +127,7 @@ SettingsCache = true         # UNOFFICIAL (2026-10-30), live: each setting's val
 SkinnedShadowFaceTest = true # UNOFFICIAL: lamp shadows (interior cube maps) draw characters only into the cube faces their skeleton can reach, instead of all six; bounds rebuilt from the bones each frame, so the shadows are the same. Big CPU saving with many NPCs near lamps. Live: F10 logs a POINT SHADOWS skinned casters line. Turn off if a character's shadow ever goes missing near a lamp.
 ParallelShaderCompile = true # UNOFFICIAL: at game start, the mod's shaders and (since 2026-10-28, after Conor's fork) its effects are prepared and compiled on all your CPU cores at once instead of one after another (the same shaders and cache files, only sooner: a start without a shader cache takes about as long as the slowest effect, VolumetricClouds, instead of all of them in a row). Off: one at a time, as before.
 NewEffectCompiler = true    # UNOFFICIAL (2026-10-29): the mod's effects are compiled with Windows' own shader compiler (d3dcompiler_47, on every Windows 10 and 11) instead of the old D3DX one: the big effects take seconds instead of minutes on a start without a shader cache (the snow effect took over 8 minutes, enough to look like the game would not start). Where it is missing or refuses an effect, the old compiler is used as before (logged). false = the old compiler only. Switching recompiles the effects once by itself (no need to clear the cache).
+EffectNoPreshaders = false    # UNOFFICIAL (2026-11-02), test only: the effects are compiled without preshaders (the CPU-side expressions stay in the shaders), so a frame recorded for the frame replay tool holds their raw settings and a rewritten effect can be swapped in and checked on it. A little slower; ignored by release builds. Switching recompiles the effects once by itself.
 ShaderWarmUp = false        # UNOFFICIAL, EXPERIMENTAL (did not remove the hitches in the first test: the driver compiles per drawing setup, which the test draw does not match): at the main menu, draw each shader you have used in play once into a tiny hidden target, so the graphics driver compiles it there instead of the first time it appears in the world (that first compile was the 50-250 ms hitch when new areas came into view). The list fills as you play (Shaders\VegasShaders\Shaders\Cache\WarmUp.txt). Skipped with DXVK, which compiles shaders ahead anyway. Same picture.
 ShaderWarmUp2 = 0           # UNOFFICIAL, EXPERIMENTAL (2026-10-18): a shader preloader for plain Direct3D 9 (DXVK does this by itself). The graphics driver finishes each shader's compile the first time it is drawn, once per drawing setup, which made the 50-250 ms stutters when new places came into view. 1 = record: every new drawing setup is written to Shaders\VegasShaders\Shaders\Cache\WarmUp2.txt as you play. 2 = record + warm up: at the main menu those setups are drawn once into a hidden target, so the driver compiles them there instead of in the world (the menu may pause for a moment). 0 = off. Restart to change. Skipped with DXVK. Same picture.
 ShaderWarmUp2BudgetMs = 150 # UNOFFICIAL (2026-10-18): with ShaderWarmUp2 = 2, the warm-up time per main-menu frame in ms (the rest is done in the next frames while the menu is up).
@@ -292,8 +294,22 @@ TextShadowColorEnabled = '50,50,50'     # Custom shadow color for enabled/disabl
 TextShadowColorNormal = '50,50,50'      # Custom shadow color for normal text.
 TextShadowColorSelected = '50,50,50'    # Custom shadow color for selected text.
 TextSize = 22                           # Font size for normal text.
-SidebarWidth = 260                      # UNOFFICIAL (2026-10-25): width of the menu's left column (effects and shaders)
-Skin = "Default"                        # (2026-11-02) the menu's look: Default, Pip-Boy, Vault-Tec, or the Name of a skin file in Data\VegasShaders\Skins\ (the Export button next to the dropdown writes one to start from: colours, rounding, a background picture). in pixels. Drag the gap between the two columns to change it; double-click it for 260 again.
+SidebarWidth = 260                      # UNOFFICIAL (2026-10-25): width of the menu's left column (effects and shaders) in pixels. Drag the gap between the two columns to change it; double-click it for 260 again.
+Skin = "Default"                        # (2026-11-02) the menu's look: Default, Pip-Boy, Vault-Tec, Amber Terminal, NCR, Legion, Brotherhood, Strip Neon, Midnight, High Contrast, Light, or the Name of a skin file in Data\VegasShaders\Skins\ (View > Skin > Export writes one to start from: colours, rounding, a background picture). The Custom keys below change single parts on top of whichever skin is picked.
+CustomBackground = ""                   # (2026-11-02) your own colour for the menu window's background, as R,G,B (0-255). Empty = the skin's. Also under View > Skin > Own colours.
+CustomPanel = ""                        # (2026-11-02) your own colour for the sidebar, the settings list and the menu bar, R,G,B. Empty = the skin's.
+CustomField = ""                        # (2026-11-02) your own colour for sliders, boxes and buttons, R,G,B. Empty = the skin's.
+CustomAccent = ""                       # (2026-11-02) your own accent colour (ticks, hovered buttons, tabs, the selected entry's tint), R,G,B. Empty = the skin's.
+CustomText = ""                         # (2026-11-02) your own text colour, R,G,B (greyed text is mixed from it and the background). Empty = the skin's.
+CustomHeading = ""                      # (2026-11-02) your own colour for titles, group headings and links, R,G,B. Empty = the skin's.
+CustomBorder = ""                       # (2026-11-02) your own colour for borders and separators, R,G,B. Empty = the skin's.
+CustomSlider = ""                       # (2026-11-02) your own colour for slider handles, R,G,B. Empty = the skin's.
+CustomSelection = ""                    # (2026-11-02) your own colour for the bar behind the selected or hovered entry, R,G,B. Empty = the skin's.
+CustomRounding = -1.0                   # (2026-11-02) your own corner radius for the menu in pixels (0 = square, up to 16). -1 = the skin's.
+CustomOpacity = 0.0                     # (2026-11-02) your own opacity for the menu window (0.5-1). 0 = the skin's.
+CustomImage = ""                        # (2026-11-02) your own background picture for the menu: a file in Data\VegasShaders\Skins\ or a full path (png, jpg, dds, bmp). "none" = no picture, empty = the skin's.
+CustomImageOpacity = -1.0               # (2026-11-02) how strongly the background picture shows (0-1). -1 = the skin's.
+CustomImageFit = ""                     # (2026-11-02) how the background picture fills the window: cover, contain or stretch. Empty = the skin's.
 TextSizeStatus = 12                     # Font size for enabled/disabled text.
 TitleColumnSize = 850                   # Custom size for title column.
 
@@ -1299,6 +1315,7 @@ Radius = 1200                        # [200-4000] Half the width of the box roun
 Splashes = true                      # A landed rain drop is a small splash for 0.4 s (a snow flake settles for 4 s). Off: it simply starts again at the top.
 
 [_Shaders.ShadowsExteriors.Main]
+SkinnedAlphaTest = true                # UNOFFICIAL BUG FIX (2026-11-02), live: in sun shadows, characters' alpha-tested parts (hair cards, fringes, ragged cloth) cast only where their texture is solid, as alpha-tested objects already did. false = the whole card casts, as before.
 TwoSidedCasters = false                # UNOFFICIAL: sun shadows (and the volumetric light, which reads them) are cast by both sides of every object. Fixes sunlight and light shafts shining through one-sided walls (the game uses them where you never see the other side). Same picture for closed objects; a little more shadow-map drawing.
 Quality = 4                          # Quality preset - 0: Low, 1: Medium, 2: High, 3: Full, 4: Custom (UNOFFICIAL 2026-10-27: every preset uses PCF sun shadow maps; the presets set distance and resolution; the old VSM / EVSM modes and their Mode, Format, Prefilter and MSAA settings are gone)
 Enabled = true                       # Enable sun shadows using rendered shadow maps.
@@ -1552,6 +1569,7 @@ Quality = 1                          # Not currently used.
 ShadowCubeMapSize = 512              # The resolution of one face for the point light shadow cubemaps.
 Statics = true                       # Wether to include objects with "Statics" flag when rendering shadowmaps.
 TorchesCastShadows = true            # Used in Oblivion to enable shadows on torches.
+SkinnedAlphaTest = true              # UNOFFICIAL BUG FIX (2026-11-02), live: in lamp shadows, characters' alpha-tested parts (hair cards, fringes, ragged cloth) cast only where their texture is solid. Before, the whole card cast, so hair under a lamp sat in its own shadow and came out near black. false = as before.
 TwoSidedCasters = false              # UNOFFICIAL (2026-10-29), live, TEST: lamp shadows drawn from both sides of every object, as the sun's are. Without it a lamp's shadow map kept the side of each object turned AWAY from the lamp, so open or thin things (cups, glasses, bowls, characters near a lamp) cast rings or shadows that trace the inside of the mesh. false = as before.
 DrawDistance = 4000                  # Max distance for point light shadow rendering.
 PlayerShadowThirdPerson = true       # Enable shadows for Player Model in third person in pointlights shadows
@@ -1951,6 +1969,7 @@ ReflectionDebug = 0                    # UNOFFICIAL [0-2]: checking only. 1: in 
 Enabled = false                        # UNOFFICIAL, EXPERIMENTAL (2026-10-11): real 3D clouds high above the ground, lit by the sun and the sky, moving with the wind and following the weather, in place of the game's flat cloud pictures. About 1 ms at 2560x1440 on a GTX 1070. Exteriors only.
 
 [_Shaders.Bodycam.Main]
+FreeViewRestore = true               # UNOFFICIAL BUG FIX (2026-11-02), live: WideView remembers your field of view only while you are not aiming or in a menu, so switching Bodycam off gives back your own FOV. false = as before (switched on while aiming, the zoomed FOV stayed after switching it off).
 Fisheye = 0.45                         # UNOFFICIAL [0-1]: how much the wide lens bends straight lines outward towards the edges. Main = by day; Night and Interiors have their own value of every setting here (all but TextSize).
 FitEdges = 0.9                         # [0-1] Zooms in so the bent picture still fills the screen (1: no black corners from the bend; 0: none).
 Border = 0.95                          # [0-1] A soft black oval round the picture, like looking through the camera's frame. 0: none.

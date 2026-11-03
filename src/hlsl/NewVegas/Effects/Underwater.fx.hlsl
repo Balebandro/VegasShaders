@@ -1,309 +1,268 @@
-// Underwater effect (TESReloaded), D3D9 side.
-// Five passes in one unnamed technique (index 0), as src/effects/Underwater.cpp expects:
-//   pass 0  god rays        into the upper-left quarter of the frame (the ray image)
-//   pass 1  blur, vertical  the quarter only
-//   pass 2  blur, horizontal the quarter only
-//   pass 3  water           the whole frame: murk, caustics, absorption, god-ray add, encode and dither
-//   pass 4  wobble          the whole frame, last (it may write straight into the game target)
-// Above the water every pass returns the source frame (the effect is then a no-op there).
-// Vulkan twin: Compute/UnderwaterGodrays.frag, UnderwaterBlur.frag, UnderwaterWater.frag, UnderwaterDistortion.frag
-// and the shared Compute/Underwater.glsl. Keep the two in step.
+// Underwater post passes: quarter-resolution god rays, the water surface shade (caustics,
+// depth fog, absorption and in-scatter) and the refraction wobble used behind the surface.
+float4 TESR_ReciprocalResolution;
+float4 TESR_SunDirection;
+float4 TESR_GameTime;
+float4 TESR_WaterCoefficients; // r g b scattering
+float4 TESR_SunColor;
+float4 TESR_FogColor;
+// float4 TESR_FogData; // x: near fog distance, y:far fog distance, z: sun glare, w: fog power
+float4 TESR_WaterFog; // x: near fog distance, y:far fog distance, z: sun glare, w: fog power
+float4 TESR_WaterVolume; // x; causticsStrength, y:shore factor, z:turbidity, w: causticsStrengthS
+float4 TESR_WaveParams;
+float4 TESR_WaterSettings; // x: caustic strength, y:depthDarkness, w: refraction, z: caustic strength S ?
+float4 TESR_WaterShallowColor; // Shallow color used by the game for water
+float4 TESR_WaterDeepColor; // Deep color used by the game for water
+float4 TESR_DebugVar;
+float4 TESR_HorizonColor;
+float4 TESR_SunAmount;
+float4 TESR_SkyColor;
 
-uniform float4 TESR_ReciprocalResolution;
-uniform float4 TESR_SunDirection;	// xyz: unit vector to the sun (z up)
-uniform float4 TESR_SunColor;		// rgb: sun colour (game values, linearised here)
-uniform float4 TESR_GameTime;		// x: game clock (ms), z: frame value used by the wobble
-uniform float4 TESR_WaterCoefficients;	// xyz: extinction per channel, w: scattering amount
-uniform float4 TESR_WaterFog;		// x: near, y: far distance of the underwater fog
-uniform float4 TESR_WaterVolume;	// x: caustic strength, z: turbidity, w: god-ray strength
-uniform float4 TESR_WaveParams;		// z: wave speed
-uniform float4 TESR_WaterSettings;	// x: water surface height, y: depth darkness (not read), z: underwater flag (not read)
-uniform float4 TESR_WaterShallowColor;
-uniform float4 TESR_WaterDeepColor;
-uniform float4 TESR_HorizonColor;
-uniform float4 TESR_SkyColor;
+#include "Includes/Helpers.hlsl"
 
-// Samplers: the register numbers are the slots the C++ binds (declaration order is not used).
-uniform sampler2D TESR_RenderedBuffer : register(s0) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
-uniform sampler2D TESR_SourceBuffer : register(s1) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
-uniform sampler2D TESR_DepthBuffer : register(s2) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
-// Declared and loaded as before; the active passes do not read it (the C++ still binds it by name).
-uniform sampler2D TESR_WavesSampler : register(s3) < string ResourceName = "Water\water_NRM.dds"; > = sampler_state {
-    ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = ANISOTROPIC; MINFILTER = ANISOTROPIC; MIPFILTER = LINEAR; };
-uniform sampler2D TESR_NormalsBuffer : register(s4) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = POINT; };
-uniform sampler2D TESR_BlueNoiseSampler : register(s5) < string ResourceName = "Effects\bluenoise256.dds"; > = sampler_state {
-    ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = POINT; };
-uniform sampler2D TESR_CausticsSampler : register(s6) < string ResourceName = "Water\caust_001.dds"; > = sampler_state {
-    ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = ANISOTROPIC; MINFILTER = ANISOTROPIC; MIPFILTER = LINEAR; };
-uniform sampler2D TESR_PointShadowBuffer : register(s7) = sampler_state {
-    ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = ANISOTROPIC; MINFILTER = ANISOTROPIC; MIPFILTER = LINEAR; };
+sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_SourceBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_DepthBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_WavesSampler : register(s3) < string ResourceName = "Water\water_NRM.dds"; > = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; ADDRESSW = WRAP; MAGFILTER = ANISOTROPIC; MINFILTER = ANISOTROPIC; MIPFILTER = ANISOTROPIC; } ;
+sampler2D TESR_NormalsBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = NONE; MINFILTER = NONE; MIPFILTER = NONE; };
+sampler2D TESR_BlueNoiseSampler : register(s5) < string ResourceName = "Effects\bluenoise256.dds"; > = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = NONE; MINFILTER = NONE; MIPFILTER = NONE; };
+sampler2D TESR_CausticsSampler : register(s6) < string ResourceName = "Water\caust_001.dds"; > = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = ANISOTROPIC; MINFILTER = ANISOTROPIC; MIPFILTER = ANISOTROPIC; };
+sampler2D TESR_PointShadowBuffer : register(s7) = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = ANISOTROPIC; MINFILTER = ANISOTROPIC; MIPFILTER = ANISOTROPIC; };
 
-struct VSOUT { float4 vertPos : POSITION; float2 UVCoord : TEXCOORD0; };
+static const float frame = TESR_GameTime.z * TESR_WaveParams.z * 1.5;
+static const float4x4 ditherTable = {
+	{ 0.0588, 0.5294, 0.1765, 0.6471 },
+	{ 0.7647, 0.2941, 0.8824, 0.4118 },
+	{ 0.2353, 0.7059, 0.1176, 0.5882 },
+	{ 0.9412, 0.4706, 0.8235, 0.3259 }
+};
 
-struct VSIN { float4 vertPos : POSITION0; float2 UVCoord : TEXCOORD0; };
+static const float causticsGain = TESR_WaterVolume.x;
+static const float shoreK = TESR_WaterVolume.y;
+static const float murk = TESR_WaterVolume.z;
+static const float rayGain = TESR_WaterVolume.w;
+static const float3 extinction = TESR_WaterCoefficients.xyz;// * turbidity;
+static const float scatterK = TESR_WaterCoefficients.w;// * turbidity;
+static const float waveScale = TESR_WaveParams.y;
+static const float darkK = TESR_WaterSettings.y;
+static const float3 upAxis = float3(0, 0, 1);
+static const float sunLum = luma(pows(TESR_SunColor.rgb,2.2)); // linearise
 
-VSOUT FrameVS(VSIN px)
-{
+struct VSOUT {
+	float4 clipPos : POSITION;
+	float2 UVCoord : TEXCOORD0;
+};
+
+struct VSIN {
+	float4 clipPos : POSITION0;
+	float2 UVCoord : TEXCOORD0;
+};
+
+VSOUT FrameVS(VSIN src) {
 	VSOUT res = (VSOUT)0.0f;
-	res.vertPos = px.vertPos;
-	res.UVCoord = px.UVCoord;
+	res.clipPos = src.clipPos;
+	res.UVCoord = src.UVCoord;
 	return res;
 }
 
-// Depth.hlsl brings TESR_DepthBuffer-based readDepth, toWorld (the view ray, not normalised: its forward
-// component is 1, so the scene point is camera + toWorld(uv) * readDepth(uv)), the camera and projection
-// matrices and the RenderScale helpers. It must come after the depth sampler is declared.
-#include "includes/Helpers.hlsl"
-#include "includes/Depth.hlsl"
+#include "Includes/Depth.hlsl"
+#include "Includes/Normals.hlsl"
+#include "Includes/Blur.hlsl"
+#include "Includes/Sky.hlsl"
 
-// ---- helpers (mirrored in Compute/Underwater.glsl) ----
-
-// The ray image: its pixels are the upper-left quarter of the picture (rect coordinates).
-bool inQuarter(float2 uv)
+// Blue-noise lookup in screen space; the 256 texel tile repeats across the frame.
+float3 blueAt(float2 p)
 {
-	return all(uv >= 0.0f) && all(uv <= 0.5f * TESR_RenderScale.xy);
+	return tex2D(TESR_BlueNoiseSampler, (p/256 + 0.5) / TESR_ReciprocalResolution.xy).xyz;
 }
 
-float3 sunDirection()
-{
-	return normalize(TESR_SunDirection.xyz);
+// Sky radiance rebuilt for refraction, since the vanilla buffer already carries water tint.
+// Blends horizon and zenith colours by view elevation, then adds the sun glow.
+float3 skyFromView(float3 viewDir, float3 sunCol){
+	float3 sky = lerp(linearize(TESR_HorizonColor).rgb, linearize(TESR_SkyColor).rgb, pow(shade(viewDir, float3(0, 0, 1)), 0.5));
+	sky += sunCol * pows(shades(viewDir, TESR_SunDirection.xyz), 12);
+	return sky;
 }
 
-// Scene point of a pixel, and whether it is above the water (the source frame is kept there).
-// Camera well below the surface: everything is underwater. Camera well above: everything is above.
-// In between: the pixel is above the water only when it sits above the surface band (W - 0.6).
-bool abovePixel(float3 eye_v, float3 P)
-{
-	float W = TESR_WaterSettings.x;
-	if (eye_v.z > W + 4.0f) return true;
-	if (eye_v.z < W - 4.0f) return false;
-	return P.z > W - 0.6f;
+float4 waveSample(float2 uv) {
+	float2 origin = uv;
+
+	float wScale = TESR_WaveParams.y;
+	float chop = TESR_WaveParams.x;
+	float drift = TESR_GameTime.x * 0.002 * TESR_WaveParams.z;
+	float smallK = 0.5;
+	float bigK = 2;
+	float4 wA = expand(tex2D(TESR_WavesSampler, origin * smallK * wScale + normalize(float2(1, 4)) * drift));
+	float4 wB = expand(tex2D(TESR_WavesSampler, origin * bigK * wScale + normalize(float2(-3, -2)) * drift));
+
+	// merge the two octaves
+	wA = float4(wB.xy + wA.xy,  1, 1);
+	wA.xy *= chop;
+
+	wA = normalize(wA);
+	return wA;
 }
 
-// 4x4 ordered dither: Bayer matrix from the 2x2 one, values 0..15.
-float Bayer2(float a, float b)
-{
-	return (b < 0.5f) ? a * 2.0f : 3.0f - 2.0f * a;
+// Caustic intensity at a world position, found by projecting the point up to the surface
+// along the sun direction and sampling two drifting layers there.
+float causticAt(float3 p){
+	float dz = TESR_WaterSettings.z - p.z;
+	p += (dz/TESR_SunDirection.z) * TESR_SunDirection.xyz;
+
+	float drift = TESR_GameTime.x * 0.01 * TESR_WaveParams.z;
+	float sc = 0.002;
+
+	float l1 = tex2D(TESR_CausticsSampler, p.xy * sc  + drift * normalize(float2(-1.2, - 2.5))).r;
+	float l2 = tex2D(TESR_CausticsSampler, p.xy * sc * 1.2  + drift * normalize(float2(0.5, 2))).r;
+
+	return pows(min(l1, l2), 1.3) * 4.0; //strengthen the definition and strength of the caustics
 }
 
-float Bayer4(float2 p)
-{
-	float2 qq = fmod(floor(p), 4.0f);
-	float2 lo_v = fmod(qq, 2.0f);
-	float2 hi_v = floor(qq * 0.5f);
-	return 4.0f * Bayer2(lo_v.x, lo_v.y) + Bayer2(hi_v.x, hi_v.y);
-}
 
-// Blur taps: Gaussian, centre weight 0.115, taps 1..6 steps out (sigma about 3.79 texels of two-texel steps).
-float TapWeight(int i)
-{
-	if (i == 1) return 0.111075f;
-	if (i == 2) return 0.100087f;
-	if (i == 3) return 0.084136f;
-	if (i == 4) return 0.065981f;
-	if (i == 5) return 0.048273f;
-	return 0.032948f;
-}
+float4 Godrays( VSOUT IN) : COLOR0 {
+	// volumetric god rays rendered at quarter resolution
+	float2 uvG = IN.UVCoord * 2;
+	clip( (uvG <= TESR_RenderScale.xy) - 1);	// UNOFFICIAL 2026-10-27 RenderScale v2: a quarter of the drawn part
 
-// ---- pass 0: god rays into the upper-left quarter ----
-// A quarter pixel at uv computes the shaft for the full-frame pixel at 2 * uv (the ray image is half resolution
-// per axis, so a full-frame pixel reads it at uv * 0.5). Shafts are integrated along the view ray from the camera
-// to the scene, only where the ray is under the water, using the caustic light the sun throws there.
-float4 Godrays(VSOUT px, float2 vpos : VPOS) : COLOR0
-{
-	float2 uv = px.UVCoord;
-	if (!inQuarter(uv)) return tex2Dlod(TESR_RenderedBuffer, float4(uv, 0.0f, 0.0f));
+	float3 viewDir = toWorld(uvG);
+	float sceneDist = length(readDepth(uvG) * viewDir);
 
-	float2 local_p = uv * 2.0f;
-	float3 eye_v = TESR_CameraPosition.xyz;
-	float W = TESR_WaterSettings.x;
-	float3 dir_v = toWorld(local_p);
-	float view_z = readDepth(local_p);
-	float len_v = length(dir_v) * view_z;
-	float3 dir = dir_v / max(length(dir_v), 1.0e-6f);
-	float max_t = min(len_v, 4000.0f);
-	float step_len = max_t / 49.0f;
+	float maxRay = 1000;
+	float stepLen = maxRay / 50;
+	float3 stepVec = viewDir * stepLen;
 
-	float3 sun_rgb = sunDirection();
-	float sun_z = max(sun_rgb.z, 0.05f);
-	float sun_up = saturate(sun_rgb.z * 6.0f);
-	float drift_v = TESR_GameTime.x * 0.001f * TESR_WaveParams.z * 0.02f;
+	float4 acc = float4(0, 0, 0, 1);
 
-	float acc_v = 0.0f;
-	[loop] for (int i = 0; i < 49; i++)
-	{
-		// one blue-noise read per step: jitters the step so the shafts do not band
-		float noise_v = tex2Dlod(TESR_BlueNoiseSampler, float4((vpos + float2(17.0f, 31.0f) * i) / 256.0f, 0.0f, 0.0f)).r;
-		float t = ((float)i + noise_v) * step_len;
-		float3 p = eye_v + dir * t;
-		float under_v = step(p.z, W);	// 1 where the point is below the surface
-		// the sun ray through p meets the surface at q; its caustic pattern is the light reaching p
-		float3 qq = p + sun_rgb * (max(W - p.z, 0.0f) / sun_z);
-		float tmp_c1 = tex2Dlod(TESR_CausticsSampler, float4(qq.xy / 600.0f + float2(drift_v, drift_v * 0.7f), 0.0f, 0.0f)).r;
-		float tmp_c2 = tex2Dlod(TESR_CausticsSampler, float4(qq.xy / 720.0f - float2(drift_v * 0.8f, drift_v), 0.0f, 0.0f)).r;
-		acc_v += min(tmp_c1, tmp_c2) * under_v * exp(-t * 0.0008f);
+	float3 samplePos = TESR_CameraPosition.xyz;
+	[unroll]
+	for (float k=1; k < 50; k++){
+		samplePos += stepVec * lerp(0.5, 1, blueAt(uvG + TESR_ReciprocalResolution.xx * k));
+		float dist = stepLen * k;
+		float depthFadeS = smoothstep(800, 0, TESR_WaterSettings.x - samplePos.z);
+		float distFadeS = 1 - dist/maxRay;
+		float4 rayCol = lerp(float4(0, 0, 0, 1), float4(1, 1, 1, 1), distFadeS) * sunLum * 0.06;
+		acc += causticAt(samplePos) * rayCol * depthFadeS * distFadeS * (dist < sceneDist);
 	}
-	float ray_v = 2.0f * acc_v / 49.0f * sun_up;
-	return float4(ray_v, 0.0f, 0.0f, 1.0f);
+
+	return float4(smoothstep(0.1, 0.4, acc).rgb, 1); // clamp the values to increase the strength and improve blending
 }
 
-// ---- passes 1 and 2: 12-tap blur of the ray image (quarter only) ----
-float4 Blur(float2 uv, float2 mask_v)
-{
-	float4 current_v = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0.0f, 0.0f));
-	if (!inQuarter(uv)) return current_v;
 
-	float2 step_uv = mask_v * 2.0f * TESR_ReciprocalResolution.xy;	// two full-resolution texels per tap
-	float4 acc_v = current_v * 0.115f;
-	float wsum_v = 0.115f;
-	[unroll] for (int i = 1; i <= 6; i++)
-	{
-		float w = TapWeight(i);
-		float2 a = uv + step_uv * (float)i;
-		float2 b = uv - step_uv * (float)i;
-		if (inQuarter(a))
-		{
-			acc_v += tex2Dlod(TESR_RenderedBuffer, float4(a, 0.0f, 0.0f)) * w;
-			wsum_v += w;
-		}
-		if (inQuarter(b))
-		{
-			acc_v += tex2Dlod(TESR_RenderedBuffer, float4(b, 0.0f, 0.0f)) * w;
-			wsum_v += w;
-		}
-	}
-	return acc_v / wsum_v;
+float aboveWater(float eyeZ, float pointZ, float waterZ, float d){
+	if (eyeZ < waterZ - 4.0) return false;
+	return eyeZ > (waterZ + 4.0) || pointZ > (waterZ - 0.6);
 }
 
-float4 BlurVertical(VSOUT px) : COLOR0
-{
-	return Blur(px.UVCoord, float2(0.0f, 1.0f));
+
+float4 Water( VSOUT IN ) : COLOR0 {
+	float d0 = readDepth(IN.UVCoord);
+	float3 rayV = toWorld(IN.UVCoord);
+	float3 vdir = normalize(rayV);
+	float3 wpos = TESR_CameraPosition.xyz + rayV * d0;
+	float fogD = length(rayV * d0); // a depth measure that's at the same distance from the camera at all angles
+	float wDepth = TESR_WaterSettings.x - wpos.z;
+	float3 floorN = GetWorldNormal(IN.UVCoord);
+
+	float4 col = tex2D(TESR_SourceBuffer, IN.UVCoord);
+	if (aboveWater(TESR_CameraPosition.z, wpos.z, TESR_WaterSettings.x, d0)) return col;
+
+	col = linearize(col); //linearise
+
+	// vertical exponential depth fog used to darken bottom
+	float dens = 0.08;
+	float falloffK = 0.00225; // tie to darkness setting?
+	float fogAmt = saturate((dens/falloffK) * exp(-TESR_CameraPosition.z*falloffK) * (1.0 - exp( -fogD*vdir.z*falloffK ))/vdir.z);
+
+	float3 deepCol = linearize(TESR_WaterDeepColor).rgb;
+	float3 shallowCol = linearize(TESR_WaterShallowColor).rgb;
+	float3 sunC = linearize(TESR_SunColor).rgb;
+
+	// horizontal scattering
+	float3 skyC = skyFromView(vdir, sunC);
+
+	// interpolate fog color between shallow and deep water based on viewing angle. Shallow waters get tinted with the sky
+	float vFade = saturate(compress(dot(vdir, upAxis) * 1.5)); // fade from deep to shallow based on viewing angle
+	float sunFade = compress(dot(vdir.xyz, TESR_SunDirection.xyz)); // fade based on proximity to the sun angle
+
+	float3 fogC = lerp(deepCol, shallowCol + skyC * 0.2, vFade); // mix in some sky color into shallow fog
+	fogC *= sunLum * (0.4 + (1 - 0.4) * sunFade) * extinction; //scale fog brightness with sunluma/sun direction and apply user setting modifiers
+	float3 scat = (1 - fogC) * scatterK; // lerp colors at different speed
+	float linFog = saturate(invlerp(TESR_WaterFog.x, TESR_WaterFog.y, fogD));
+
+	// fading parameters for caustics and god rays
+	float floorAng = (smoothstep(0.5,1, dot(floorN, upAxis)) + smoothstep(0.8,1, dot(floorN, TESR_SunDirection.xyz))) / 2;
+	float dFade = smoothstep(800, 0, wDepth);
+	float distFade = invlerp(6000, 0, fogD);
+
+	float2 shad = tex2D(TESR_PointShadowBuffer, IN.UVCoord).rg; // only sample point light shadows
+	float caus = causticAt(wpos) * shad.r;
+
+	col.rgb += col * pows(caus, 2.0) * sunC * dFade * floorAng * distFade * sunLum * causticsGain * 100;
+
+	col.rgb = lerp(col.rgb, fogC, saturate(pow(invlerp(0, 5000, fogD), 10))); // lod hiding
+
+	// blend fog layers colors
+	col.rgb *= lerp(1, deepCol, saturate(fogAmt * pows(darkK, 0.5)) * ((1 - shad.g * distFade))); // surface light absorption
+
+	float fogThick = saturate( 2 - pows(murk, 0.5) * 2);
+	float murkPow = (murk * 3) / (1 +  3 * murk);
+	col.rgb = lerp(col.rgb, fogC, saturate(scat * pows(linFog, fogThick) * murkPow)); // scattering absorption
+
+	// blend in godrays
+	col.rgb += tex2D(TESR_RenderedBuffer, IN.UVCoord / 2).r * sunC * rayGain * col.rgb;
+
+	// reduce banding
+	float2 uvQ = IN.UVCoord.xy / TESR_ReciprocalResolution.xy;
+	col = delinearize(col);
+	col.rgb += ditherTable[ (uvQ.x)%4 ][ (uvQ.y)%4 ] / 255;
+
+	return float4(col.rgb, 1);
 }
 
-float4 BlurHorizontal(VSOUT px) : COLOR0
-{
-	return Blur(px.UVCoord, float2(1.0f, 0.0f));
-}
+float4 WaterDistortion( VSOUT IN ) : COLOR0 {
 
-// ---- pass 3: the water ----
-float4 Water(VSOUT px, float2 vpos : VPOS) : COLOR0
-{
-	float2 uv = px.UVCoord;
-	float4 source_v = tex2Dlod(TESR_SourceBuffer, float4(uv, 0.0f, 0.0f));
-	float3 eye_v = TESR_CameraPosition.xyz;
-	float3 dir_v = toWorld(uv);
-	float view_z = readDepth(uv);
-	float3 P = eye_v + dir_v * view_z;
-	if (abovePixel(eye_v, P)) return source_v;
+	float d0 = readDepth(IN.UVCoord);
+	float3 rayV = toWorld(IN.UVCoord);
+	float3 wpos = TESR_CameraPosition.xyz + rayV * d0;
+	float4 col = tex2D(TESR_SourceBuffer, IN.UVCoord);
+	if (aboveWater(TESR_CameraPosition.z, wpos.z, TESR_WaterSettings.x, d0)) return col;
 
-	float len_v = length(dir_v) * view_z;
-	float3 dir = dir_v / max(length(dir_v), 1.0e-6f);
-	float W = TESR_WaterSettings.x;
-
-	float3 scene_v = linearize(source_v.rgb);
-	float3 shallow_v = linearize(TESR_WaterShallowColor.rgb);
-	float3 deep_v = linearize(TESR_WaterDeepColor.rgb);
-	float3 horizon_v = linearize(TESR_HorizonColor.rgb);
-	float3 zenith_v = linearize(TESR_SkyColor.rgb);
-	float3 sun_col = linearize(TESR_SunColor.rgb);
-	float3 sun_rgb = sunDirection();
-
-	// fog colour: deep for the lower view, shallow (plus a little sky, with a sun glow) toward the horizon
-	float sun_align = saturate(dot(dir, sun_rgb));
-	float3 sky_col = lerp(horizon_v, zenith_v, saturate(dir.z)) + sun_col * pow(sun_align, 12.0f) * 0.5f;
-	float toward_v = saturate(dir.z * 1.5f + 0.5f);
-	float3 fog_col = lerp(deep_v, shallow_v + 0.1f * sky_col, toward_v);
-	float3 fog_lit = fog_col * sun_col * (0.4f + 0.6f * sun_align);
-
-	// distance factor and murk (turbidity sets how sharp the falloff is)
-	float fog_f = saturate((len_v - TESR_WaterFog.x) / max(TESR_WaterFog.y - TESR_WaterFog.x, 1.0f));
-	float turb_v = max(TESR_WaterVolume.z, 0.0f);
-	float murk_v = 1.0f - pow(max(1.0f - fog_f, 0.0f), max(turb_v, 0.01f));
-	float turb_w = turb_v / (turb_v + 1.0f);
-	float3 scatter_v = (1.0f - fog_col) * max(TESR_WaterCoefficients.w, 0.0f) * turb_w * 0.25f;
-	float3 fog_out = fog_lit + scatter_v * fog_f;
-
-	// caustics: floor that faces up and the sun, close below the surface, near the camera, and lit by the point shadow
-	float3 n_v = expand(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0.0f, 0.0f)).xyz);
-	float3 up_v = mul(float4(0.0f, 0.0f, 1.0f, 0.0f), TESR_ViewTransform).xyz;
-	float3 sun_v = mul(float4(sun_rgb, 0.0f), TESR_ViewTransform).xyz;
-	float face_up = smoothstep(0.5f, 0.9f, dot(n_v, up_v));
-	float face_sun = smoothstep(0.0f, 0.5f, dot(n_v, sun_v));
-	float depth_below = max(W - P.z, 0.0f);
-	float fade_depth = 1.0f - smoothstep(0.0f, 800.0f, depth_below);
-	float fade_range = 1.0f - smoothstep(4000.0f, 6000.0f, len_v);
-	float4 shadow_v = tex2Dlod(TESR_PointShadowBuffer, float4(uv, 0.0f, 0.0f));
-	float sun_up = saturate(sun_rgb.z * 6.0f);
-	float drift_v = TESR_GameTime.x * 0.001f * TESR_WaveParams.z * 0.02f;
-	float sun_z = max(sun_rgb.z, 0.05f);
-	float3 qq = P + sun_rgb * (depth_below / sun_z);
-	float tmp_c1 = tex2Dlod(TESR_CausticsSampler, float4(qq.xy / 600.0f + float2(drift_v, drift_v * 0.7f), 0.0f, 0.0f)).r;
-	float tmp_c2 = tex2Dlod(TESR_CausticsSampler, float4(qq.xy / 720.0f - float2(drift_v * 0.8f, drift_v), 0.0f, 0.0f)).r;
-	float caustic_v = pow(max(min(tmp_c1, tmp_c2), 0.0f), 1.3f) * 4.0f;
-	scene_v += caustic_v * TESR_WaterVolume.x * sun_col * face_up * face_sun * fade_depth * fade_range * shadow_v.r * sun_up;
-
-	// surface absorption: shadowed water darkens toward the deep tint, fading out by 3000..6000 units
-	float absorb_strength = 1.0f - smoothstep(3000.0f, 6000.0f, len_v);
-	scene_v *= lerp(float3(1.0f, 1.0f, 1.0f), lerp(deep_v, float3(1.0f, 1.0f, 1.0f), shadow_v.g), absorb_strength);
-
-	// extinction over the path (scaled so the game's distances give a usable murk), then the murk mix
-	float3 tint_rgb = exp(-max(TESR_WaterCoefficients.xyz, 0.0f) * len_v * 0.0002f);
-	float3 col_v = lerp(scene_v * tint_rgb, fog_out, murk_v);
-	col_v = lerp(col_v, fog_out, smoothstep(4000.0f, 5000.0f, len_v));	// far geometry and sky go to the fog colour
-
-	// god-ray shafts (the ray image's red channel, read at half the pixel's coordinates)
-	float rays_v = tex2Dlod(TESR_RenderedBuffer, float4(uv * 0.5f, 0.0f, 0.0f)).r;
-	col_v += rays_v * sun_col * max(TESR_WaterVolume.w, 0.0f);
-
-	// encode, then a 4x4 ordered dither of one 8-bit step against banding
-	float3 enc_v = saturate(delinearize(col_v));
-	float dither_v = ((Bayer4(vpos) + 1.0f) / 17.0f - 0.5f) / 255.0f;
-	return float4(enc_v + dither_v, 1.0f);
-}
-
-// ---- pass 4: the wobble (last pass; writes the game target when it is the last effect) ----
-float4 Wobble(VSOUT px) : COLOR0
-{
-	float2 uv = px.UVCoord;
-	float3 eye_v = TESR_CameraPosition.xyz;
-	float3 P = eye_v + toWorld(uv) * readDepth(uv);
-	if (abovePixel(eye_v, P)) return tex2Dlod(TESR_SourceBuffer, float4(uv, 0.0f, 0.0f));
-
-	float wobble_v = TESR_GameTime.z * TESR_WaveParams.z * 1.5f;
-	float2 amplitude_v = 0.001f * TESR_RenderScale.xy;	// the on-screen size stays the same in rect frames
-	float2 offset = float2(sin(wobble_v * 3.0f + uv.y * 60.0f), cos(wobble_v * 3.0f + uv.x * 60.0f)) * amplitude_v;
-	return tex2Dlod(TESR_RenderedBuffer, float4(uv + offset, 0.0f, 0.0f));
+	// UNOFFICIAL 2026-10-27 RenderScale v2: the same wobble across the picture in rect frames (phase from the screen position)
+	float2 s01 = rectToScreen(IN.UVCoord);
+	IN.UVCoord.x += sin(frame * 3 + s01.x * 60) * 0.001f * TESR_RenderScale.x;
+	IN.UVCoord.y += cos(frame * 3 + s01.y * 60) * 0.001f * TESR_RenderScale.y;
+	col = tex2D(TESR_RenderedBuffer, IN.UVCoord);
+	col.a = 1;
+	return col;
 }
 
 technique
 {
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 Godrays( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 Godrays();
 	}
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 BlurVertical( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 Blur(TESR_RenderedBuffer, OffsetMaskV, 2, 0.5);
 	}
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 BlurHorizontal( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 Blur(TESR_RenderedBuffer, OffsetMaskH, 2, 0.5);
 	}
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 Water( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 Water();
 	}
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 Wobble( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 WaterDistortion();
 	}
 }

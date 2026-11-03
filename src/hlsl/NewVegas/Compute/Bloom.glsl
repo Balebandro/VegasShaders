@@ -1,100 +1,181 @@
-// Bloom's Vulkan passes (needs NVR DXVK): the same maths as Effects/Bloom.fx.hlsl, shared by the four pass files.
-// The push block is the one effects/Bloom.cpp (BloomExtPush) fills: TESR_BloomData, TESR_BloomResolution, TESR_BloomGlow,
-// TESR_BloomGlowExtra, then the LINEAR/CLAMP sampler's heap index. The chain has no RenderScale rect steps here.
-#include "Common.glsl"
+// Bloom passes as Vulkan passes (needs NVR DXVK; core/DxvkCompute.h): Effects/Bloom.fx.hlsl line for line. Included by
+// BloomDownFirst.frag, BloomDown.frag, BloomUp.frag and BloomUpLast.frag (one technique each); effects/Bloom.cpp RenderBloomExt
+// fills the push block. The textures are set 1 bindings 0 and 1 (LINEAR, CLAMP through the sampler heap index in the push block).
+// The UNOFFICIAL [Shaders.Bloom.*] additions (Spread, GlowBoost, LinearLight, AntiFlicker) are the same code as the .fx.hlsl's.
 
 layout(push_constant) uniform Push {
-    vec4 data;          // 0: TESR_BloomData (xy tent radius, z PassBlending)
-    vec4 resolution;    // 16: TESR_BloomResolution (level written: xy size, zw 1 / size)
-    vec4 glow;          // 32: TESR_BloomGlow (x spread, y last scale, z GlowBoost, w glow light level)
-    vec4 glowExtra;     // 48: TESR_BloomGlowExtra (x AntiFlicker, y LinearLight)
+    vec4 data;          // 0: TESR_BloomData (.xy filterRadius, .z blendingCoefficient, .w 1 / passes)
+    vec4 resolution;    // 16: TESR_BloomResolution (this level's size, and 1 / size)
+    vec4 glow;          // 32: TESR_BloomGlow
+    vec4 glowExtra;     // 48: TESR_BloomGlowExtra
     uint samplerIndex;  // 64: LINEAR, CLAMP
-    uint pad[3];        // 68..79
+    uint pad[3];        // 68
 } pc;
 
-// a sampler from the heap at point of use (GLSL rejects a sampler built outside the call)
-#define BLOOM_SAMPLE(t, p) texture(sampler2D(t, NVR_SAMPLER(pc.samplerIndex)), p)
+// One read. The sampler2D is built here, at the point of use (glslang does not take a sampler constructor as an argument).
+vec4 tap(texture2D tex, sampler smp, vec2 p) {
+    return texture(sampler2D(tex, smp), p);
+}
 
-vec3 toLinear(vec3 c) { c = max(c, vec3(0.0)); return c * c; }
-vec3 toDisplay(vec3 c) { return sqrt(max(c, vec3(0.0))); }
-float luma709(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+// Downsample with the 13 tap box (Effects/Includes/Sampling.hlsl DownsampleBox13).
+vec4 DownsampleBox13(texture2D buf, sampler smp, vec2 uv, vec2 texelSize) {
+    const float x = texelSize.x;
+    const float y = texelSize.y;
 
-// First pass only: GlowBoost on the bright taps, then display again unless LinearLight (the D3D9 GlowTap).
-vec3 glowTap(vec3 c) {
-    c = toLinear(c);
-    float boost = pc.glow.z;
-    if (boost > 0.0) {
-        float threshold = max(pc.glow.w, 0.002);
-        float peak = max(c.r, max(c.g, c.b));
-        float low = min(c.r, min(c.g, c.b));
-        float saturation = 1.0 - low / max(peak, 1e-6);
-        float brightness = luma709(c) + (peak - luma709(c)) * saturation;
-        float amount = clamp((brightness - threshold) / threshold, 0.0, 1.0);
-        c *= 1.0 + boost * amount;
+    vec4 a = tap(buf, smp, vec2(uv.x - 2.0 * x, uv.y + 2.0 * y));
+    vec4 b = tap(buf, smp, vec2(uv.x, uv.y + 2.0 * y));
+    vec4 c = tap(buf, smp, vec2(uv.x + 2.0 * x, uv.y + 2.0 * y));
+
+    vec4 d = tap(buf, smp, vec2(uv.x - 2.0 * x, uv.y));
+    vec4 e = tap(buf, smp, vec2(uv.x, uv.y));
+    vec4 f = tap(buf, smp, vec2(uv.x + 2.0 * x, uv.y));
+
+    vec4 g = tap(buf, smp, vec2(uv.x - 2.0 * x, uv.y - 2.0 * y));
+    vec4 h = tap(buf, smp, vec2(uv.x, uv.y - 2.0 * y));
+    vec4 i = tap(buf, smp, vec2(uv.x + 2.0 * x, uv.y - 2.0 * y));
+
+    vec4 j = tap(buf, smp, vec2(uv.x - x, uv.y + y));
+    vec4 k = tap(buf, smp, vec2(uv.x + x, uv.y + y));
+    vec4 l = tap(buf, smp, vec2(uv.x - x, uv.y - y));
+    vec4 m = tap(buf, smp, vec2(uv.x + x, uv.y - y));
+
+    const vec2 weights = vec2(0.125, 0.5);
+
+    vec4 boxes[5];
+    boxes[0] = (a + b + d + e) * 0.25;
+    boxes[1] = (b + c + e + f) * 0.25;
+    boxes[2] = (d + e + g + h) * 0.25;
+    boxes[3] = (e + f + h + i) * 0.25;
+    boxes[4] = (j + k + l + m) * 0.25;
+
+    return boxes[0] * weights[0] + boxes[1] * weights[0] + boxes[2] * weights[0] + boxes[3] * weights[0] + boxes[4] * weights[1];
+}
+
+// UNOFFICIAL: the part of a colour (linear) that counts as a light, 0 to 1 (Bloom.fx.hlsl GlowAmount).
+float GlowAmount(vec3 c, float threshold) {
+    float peak = max(c.r, max(c.g, c.b));
+    float saturation = 1.0 - min(c.r, min(c.g, c.b)) / max(peak, 1.0e-4);
+    float brightness = mix(dot(c, vec3(0.2126, 0.7152, 0.0722)), peak, saturation);
+    return clamp((brightness - threshold) / threshold, 0.0, 1.0);
+}
+
+// UNOFFICIAL: the cubic and square-root fits of the display encoding (Bloom.fx.hlsl GlowLinear / GlowEncode).
+vec3 GlowLinear(vec3 c) { return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878); }
+vec3 GlowEncode(vec3 c) {
+    vec3 s1 = sqrt(c), s2 = sqrt(s1), s3 = sqrt(s2);
+    return max(0.662002687 * s1 + 0.684122060 * s2 - 0.323583601 * s3 - 0.0225411470 * c, vec3(0.0));
+}
+vec4 GlowTap(vec4 c, float threshold) {
+    vec3 lin = GlowLinear(max(c.rgb, vec3(0.0)));
+    lin *= 1.0 + pc.glow.z * GlowAmount(lin, threshold);
+    return vec4(pc.glowExtra.y > 0.0 ? lin : GlowEncode(lin), c.a);
+}
+
+// UNOFFICIAL: the first downsample, from the image (Bloom.fx.hlsl DownsampleFirst).
+vec4 DownsampleFirst(texture2D buf, sampler smp, vec2 uv) {
+    const float x = pc.resolution.z;
+    const float y = pc.resolution.w;
+
+    vec4 a = tap(buf, smp, vec2(uv.x - 2.0 * x, uv.y + 2.0 * y));
+    vec4 b = tap(buf, smp, vec2(uv.x, uv.y + 2.0 * y));
+    vec4 c = tap(buf, smp, vec2(uv.x + 2.0 * x, uv.y + 2.0 * y));
+
+    vec4 d = tap(buf, smp, vec2(uv.x - 2.0 * x, uv.y));
+    vec4 e = tap(buf, smp, vec2(uv.x, uv.y));
+    vec4 f = tap(buf, smp, vec2(uv.x + 2.0 * x, uv.y));
+
+    vec4 g = tap(buf, smp, vec2(uv.x - 2.0 * x, uv.y - 2.0 * y));
+    vec4 h = tap(buf, smp, vec2(uv.x, uv.y - 2.0 * y));
+    vec4 i = tap(buf, smp, vec2(uv.x + 2.0 * x, uv.y - 2.0 * y));
+
+    vec4 j = tap(buf, smp, vec2(uv.x - x, uv.y + y));
+    vec4 k = tap(buf, smp, vec2(uv.x + x, uv.y + y));
+    vec4 l = tap(buf, smp, vec2(uv.x - x, uv.y - y));
+    vec4 m = tap(buf, smp, vec2(uv.x + x, uv.y - y));
+
+    if (pc.glow.z > 0.0 || pc.glowExtra.y > 0.0) {
+        float t = max(pc.glow.w, 0.002); // GlowBoost's threshold (a floor: a pitch-black cell)
+        a = GlowTap(a, t); b = GlowTap(b, t); c = GlowTap(c, t); d = GlowTap(d, t); e = GlowTap(e, t); f = GlowTap(f, t); g = GlowTap(g, t);
+        h = GlowTap(h, t); i = GlowTap(i, t); j = GlowTap(j, t); k = GlowTap(k, t); l = GlowTap(l, t); m = GlowTap(m, t);
     }
-    return (pc.glowExtra.y > 0.5) ? c : toDisplay(c);
-}
 
-// texel = 1 / the source level's size (the source is twice the size of the level written)
-vec3 fetchTap(texture2D src, vec2 uv, vec2 texel, vec2 o, bool convert) {
-    vec3 c = BLOOM_SAMPLE(src, uv + o * texel).rgb;
-    return convert ? glowTap(c) : c;
-}
+    vec4 boxes[5];
+    boxes[0] = (a + b + d + e) * 0.25;
+    boxes[1] = (b + c + e + f) * 0.25;
+    boxes[2] = (d + e + g + h) * 0.25;
+    boxes[3] = (e + f + h + i) * 0.25;
+    boxes[4] = (j + k + l + m) * 0.25;
 
-vec3 downsample13(texture2D src, vec2 uv, bool first) {
-    vec2 texel = 0.5 * pc.resolution.zw;
-    bool convert = first && (pc.glow.z > 0.0 || pc.glowExtra.y > 0.5);
-    vec3 a = fetchTap(src, uv, texel, vec2(-2.0,  2.0), convert);
-    vec3 b = fetchTap(src, uv, texel, vec2( 0.0,  2.0), convert);
-    vec3 c = fetchTap(src, uv, texel, vec2( 2.0,  2.0), convert);
-    vec3 d = fetchTap(src, uv, texel, vec2(-2.0,  0.0), convert);
-    vec3 e = fetchTap(src, uv, texel, vec2( 0.0,  0.0), convert);
-    vec3 f = fetchTap(src, uv, texel, vec2( 2.0,  0.0), convert);
-    vec3 g = fetchTap(src, uv, texel, vec2(-2.0, -2.0), convert);
-    vec3 h = fetchTap(src, uv, texel, vec2( 0.0, -2.0), convert);
-    vec3 i = fetchTap(src, uv, texel, vec2( 2.0, -2.0), convert);
-    vec3 j = fetchTap(src, uv, texel, vec2(-1.0,  1.0), convert);
-    vec3 k = fetchTap(src, uv, texel, vec2( 1.0,  1.0), convert);
-    vec3 l = fetchTap(src, uv, texel, vec2(-1.0, -1.0), convert);
-    vec3 m = fetchTap(src, uv, texel, vec2( 1.0, -1.0), convert);
-
-    vec3 boxCentre = (j + k + l + m) * 0.25;
-    vec3 boxTL = (a + b + d + e) * 0.25;
-    vec3 boxTR = (b + c + e + f) * 0.25;
-    vec3 boxBL = (d + e + g + h) * 0.25;
-    vec3 boxBR = (e + f + h + i) * 0.25;
-
-    if (first && pc.glowExtra.x > 0.5) {
-        float wC  = 0.5   / (1.0 + max(luma709(boxCentre), 0.0));
-        float wTL = 0.125 / (1.0 + max(luma709(boxTL), 0.0));
-        float wTR = 0.125 / (1.0 + max(luma709(boxTR), 0.0));
-        float wBL = 0.125 / (1.0 + max(luma709(boxBL), 0.0));
-        float wBR = 0.125 / (1.0 + max(luma709(boxBR), 0.0));
-        float wSum = wC + wTL + wTR + wBL + wBR;
-        return (boxCentre * wC + boxTL * wTL + boxTR * wTR + boxBL * wBL + boxBR * wBR) / wSum;
+    if (pc.glowExtra.x > 0.0) {
+        // Karis average: each box by 1 / (1 + its brightness), then the weights normalised.
+        const float weights[5] = float[5](0.125, 0.125, 0.125, 0.125, 0.5);
+        vec4 sum = vec4(0.0);
+        float total = 0.0;
+        for (int n = 0; n < 5; n++) {
+            float w = weights[n] / (1.0 + max(dot(boxes[n].rgb, vec3(0.2126, 0.7152, 0.0722)), 0.0));
+            sum += boxes[n] * w;
+            total += w;
+        }
+        return sum / total;
     }
-    return 0.5 * boxCentre + 0.125 * (boxTL + boxTR + boxBL + boxBR);
+    const vec2 weights = vec2(0.125, 0.5);
+    return boxes[0] * weights[0] + boxes[1] * weights[0] + boxes[2] * weights[0] + boxes[3] * weights[0] + boxes[4] * weights[1];
 }
 
-vec3 tent(texture2D src, vec2 uv, vec2 r) {
-    vec3 sum = 4.0 * BLOOM_SAMPLE(src, uv).rgb;
-    sum += 2.0 * BLOOM_SAMPLE(src, uv + vec2( r.x, 0.0)).rgb;
-    sum += 2.0 * BLOOM_SAMPLE(src, uv + vec2(-r.x, 0.0)).rgb;
-    sum += 2.0 * BLOOM_SAMPLE(src, uv + vec2(0.0,  r.y)).rgb;
-    sum += 2.0 * BLOOM_SAMPLE(src, uv + vec2(0.0, -r.y)).rgb;
-    sum += BLOOM_SAMPLE(src, uv + vec2( r.x,  r.y)).rgb;
-    sum += BLOOM_SAMPLE(src, uv + vec2(-r.x,  r.y)).rgb;
-    sum += BLOOM_SAMPLE(src, uv + vec2( r.x, -r.y)).rgb;
-    sum += BLOOM_SAMPLE(src, uv + vec2(-r.x, -r.y)).rgb;
-    return sum / 16.0;
+// Downsample (Bloom.fx.hlsl Downsample): the texel size is this level's (TESR_BloomResolution.zw).
+vec4 Downsample(texture2D buf, sampler smp, vec2 uv) {
+    return DownsampleBox13(buf, smp, uv, vec2(pc.resolution.z, pc.resolution.w));
 }
 
-vec3 upsample(texture2D above, texture2D own, vec2 uv, bool last) {
-    vec3 up = tent(above, uv, pc.data.xy);
-    vec3 self = BLOOM_SAMPLE(own, uv).rgb;
-    bool blend = pc.data.z > 0.0;
-    vec3 result = blend ? mix(self, up, pc.data.z) : self + pc.glow.x * up;
-    if (last && !blend) result *= pc.glow.y;
-    if (last && pc.glowExtra.y > 0.5) result = toDisplay(result);
-    return result;
+// Upsample with tent filter (Effects/Includes/Sampling.hlsl UpsampleTent9).
+vec4 UpsampleTent9(texture2D buf, sampler smp, vec2 uv, vec2 filterRadius) {
+    float x = filterRadius.x;
+    float y = filterRadius.y;
+
+    vec4 a = tap(buf, smp, vec2(uv.x - x, uv.y + y));
+    vec4 b = tap(buf, smp, vec2(uv.x, uv.y + y));
+    vec4 c = tap(buf, smp, vec2(uv.x + x, uv.y + y));
+
+    vec4 d = tap(buf, smp, vec2(uv.x - x, uv.y));
+    vec4 e = tap(buf, smp, vec2(uv.x, uv.y));
+    vec4 f = tap(buf, smp, vec2(uv.x + x, uv.y));
+
+    vec4 g = tap(buf, smp, vec2(uv.x - x, uv.y - y));
+    vec4 h = tap(buf, smp, vec2(uv.x, uv.y - y));
+    vec4 i = tap(buf, smp, vec2(uv.x + x, uv.y - y));
+
+    vec4 upsample = e * 4.0;
+    upsample += (b + d + f + h) * 2.0;
+    upsample += (a + c + g + i);
+    upsample *= 1.0 / 16.0;
+
+    return upsample;
+}
+
+// Intermediary upsamples (Bloom.fx.hlsl Upsample).
+vec4 Upsample(texture2D buf, texture2D addBuf, sampler smp, vec2 uv) {
+    vec4 upsample = UpsampleTent9(buf, smp, uv, vec2(pc.data.x, pc.data.y));
+    vec4 nextMip = tap(addBuf, smp, uv);
+
+    if (pc.data.z > 0.0) {
+        return vec4(mix(nextMip.rgb, upsample.rgb, pc.data.z), 1.0);
+    } else {
+        return vec4(upsample.rgb * pc.glow.x + nextMip.rgb, 1.0); // UNOFFICIAL Spread: .x = 1 (as before) unless set
+    }
+}
+
+// Last upsample that normalizes the result if needed (Bloom.fx.hlsl UpsampleLast).
+vec4 UpsampleLast(texture2D buf, texture2D addBuf, sampler smp, vec2 uv) {
+    vec4 upsample = UpsampleTent9(buf, smp, uv, vec2(pc.data.x, pc.data.y));
+    vec4 nextMip = tap(addBuf, smp, uv);
+
+    vec3 result;
+    if (pc.data.z > 0.0) {
+        result = mix(nextMip.rgb, upsample.rgb, pc.data.z);
+    } else {
+        result = (upsample.rgb * pc.glow.x + nextMip.rgb) * pc.glow.y; // UNOFFICIAL Spread (as before at .x = 1)
+    }
+    // UNOFFICIAL LinearLight: the chain held linear light; encoded again for its readers.
+    if (pc.glowExtra.y > 0.0) result = delinearize(max(result, vec3(0.0)));
+    return vec4(result, 1.0);
 }

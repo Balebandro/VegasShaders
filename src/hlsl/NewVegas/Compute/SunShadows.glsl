@@ -1,281 +1,209 @@
-// SunShadows as Vulkan passes (needs NVR DXVK; effects/SunShadows.cpp ExtPingPong): what the five pass shaders share. The same
-// arithmetic as Effects/SunShadows.fx.hlsl (wave 3 rewrite, 2026-11-02); see that file for the reasons behind each rule.
-// Differences from the D3D9 passes, both forced by what the C++ binds:
-//   - no TESR_BackDepthBuffer / TESR_BackDepthData: an occluder is taken to be 20 units thick (as the D3D9 passes do wherever
-//     the BackDepth pass did not draw, its default);
-//   - no TESR_RenderScale: DxvkCompute::PassesOn() keeps these passes out of RenderScale rect frames, so the drawn part is the whole
-//     texture and the rect clamp is the plain half-texel clamp to it.
-// Matrices are as stored by the D3D9 side: cb.M[i][j] is HLSL's M[i][j]; HLSL mul(v, M) is cb.M * v and mul(M, v) is v * cb.M.
-#extension GL_GOOGLE_include_directive : enable
+// SunShadows as Vulkan passes (needs NVR DXVK): what every pass of Effects/SunShadows.fx.hlsl shares, with its includes
+// (Depth.hlsl, Normals.hlsl, Shadows.hlsl, Blur.hlsl), line for line (effects/SunShadows.cpp ExtRender). Each pass function is
+// its own .frag (SunShadowsMarch, ...Blur, ...Apply, ...Sharp, ...SharpFinish) including this file; all declare the same bindings.
+// The matrices arrive as the D3D9 effect uploads them (ID3DXEffect::SetMatrix: the logical matrix), so HLSL M[i][j] is the
+// same element here, mul(v, M) is M * v and mul(M, v) is v * M.
+// Samplers as the .fx declares them: LINEAR/CLAMP for the depth, the atlas, the normals and the shadow buffer (all one mip level,
+// so MIPFILTER LINEAR changes nothing and tex2D is textureLod 0), LINEAR/WRAP with linear mips for the blue noise.
+// (Each .frag starts with #version 450 and GL_GOOGLE_include_directive before including this file.)
 #include "Common.glsl"
 
-// set 1: the .fx's samplers in declaration order (binding = its register)
-layout(set = 1, binding = 0) uniform texture2D t_depth;     // TESR_DepthBuffer: view depth / far
-layout(set = 1, binding = 1) uniform texture2D t_atlas;     // TESR_ShadowAtlas: 2 x 2 sun cascades, plain light-space depth (PCF)
-layout(set = 1, binding = 2) uniform texture2D t_normals;   // TESR_NormalsBuffer: view-space normal, 0..1 encoded
-layout(set = 1, binding = 3) uniform texture2D t_source;    // TESR_PointShadowBuffer slot: this pass's source (buffer or scratch)
-layout(set = 1, binding = 4) uniform texture2D t_noise;     // TESR_NoiseSampler: bluenoise256
-layout(set = 1, binding = 5) uniform texture2D t_charMap;   // TESR_CharShadowMap (the depth texture as a stand-in when off)
+layout(set = 1, binding = 0) uniform texture2D t_depth;     // TESR_DepthBuffer (s0)
+layout(set = 1, binding = 1) uniform texture2D t_atlas;     // TESR_ShadowAtlas (s1)
+layout(set = 1, binding = 2) uniform texture2D t_normals;   // TESR_NormalsBuffer (s2)
+layout(set = 1, binding = 3) uniform texture2D t_shadow;    // TESR_PointShadowBuffer (s3): the pass's source (buffer or scratch)
+layout(set = 1, binding = 4) uniform texture2D t_noise;     // TESR_NoiseSampler (s4): Effects\bluenoise256.dds
+layout(set = 1, binding = 5) uniform texture2D t_charShadow; // TESR_CharShadowMap (s5, 2026-10-26): read only by the CHARACTER_SHADOW_MAP variant
 
-// set 2: SunShadows.cpp SunUniforms (std140, 832 bytes)
 layout(set = 2, binding = 0, std140) uniform Constants {
-    mat4 cascade[4];            //   0: TESR_ShadowCameraToLightTransformNear, Middle, Far, Lod
-    mat4 projection;            // 256: TESR_ProjectionTransform
-    mat4 invProjection;         // 320: TESR_InvProjectionTransform (not needed: positions come from the linear depth)
-    mat4 view;                  // 384: TESR_ViewTransform
-    mat4 invView;               // 448: TESR_InvViewTransform
-    vec4 reciprocalResolution;  // 512: TESR_ReciprocalResolution
-    vec4 smoothedSunDir;        // 528: TESR_SmoothedSunDir
-    vec4 viewSpaceLightDir;     // 544: TESR_ViewSpaceLightDir
-    vec4 formatData;            // 560: TESR_ShadowFormatData (x mode, z outdoors)
-    vec4 screenSpaceData;       // 576: TESR_ShadowScreenSpaceData (x on, y BlurRadius, z RenderDistance, w Intensity)
-    vec4 shadowFade;            // 592: TESR_ShadowFade (y maps drawn)
-    vec4 shadowBlur;            // 608: TESR_ShadowBlur (x 1 / atlas size, z SmoothFilter)
-    vec4 forwardData;           // 624: TESR_ShadowForwardData (x 1 = object shaders' lookups off, w HandoverBlend)
-    vec4 center[4];             // 640: TESR_ShadowNearCenter .. LodCenter (xyz centre, w radius)
-    vec4 cameraData;            // 704: TESR_CameraData (x near, y far)
-    vec4 flags;                 // 720: x FORWARD_SHADOWS compiled in, y NearFade start, z NearFade end, w RT sun range (Mode 1)
-    mat4 charToLight;           // 736: TESR_CharShadowCameraToLight
-    vec4 charCenter;            // 800: TESR_CharShadowCenter
-    vec4 charData;              // 816: TESR_CharShadowData
+    mat4 cascadeNear;           // TESR_ShadowCameraToLightTransformNear
+    mat4 cascadeMiddle;         // TESR_ShadowCameraToLightTransformMiddle
+    mat4 cascadeFar;            // TESR_ShadowCameraToLightTransformFar
+    mat4 cascadeLod;            // TESR_ShadowCameraToLightTransformLod
+    mat4 projectionTransform;   // TESR_ProjectionTransform
+    mat4 invProjectionTransform;// TESR_InvProjectionTransform
+    mat4 viewTransform;         // TESR_ViewTransform
+    mat4 invViewTransform;      // TESR_InvViewTransform
+    vec4 reciprocalResolution;  // TESR_ReciprocalResolution
+    vec4 smoothedSunDir;        // TESR_SmoothedSunDir
+    vec4 viewSpaceLightDir;     // TESR_ViewSpaceLightDir
+    vec4 shadowFormatData;      // TESR_ShadowFormatData (x mode, y format bits)
+    vec4 screenSpaceData;       // TESR_ShadowScreenSpaceData (x enabled, y blur radius, z render distance, w intensity)
+    vec4 shadowFade;            // TESR_ShadowFade
+    vec4 shadowBlur;            // TESR_ShadowBlur (x 1 / atlas resolution)
+    vec4 forwardData;           // TESR_ShadowForwardData (x forward suppressed, w HandoverBlend)
+    vec4 nearCenter;            // TESR_ShadowNearCenter
+    vec4 middleCenter;          // TESR_ShadowMiddleCenter
+    vec4 farCenter;             // TESR_ShadowFarCenter
+    vec4 lodCenter;             // TESR_ShadowLodCenter
+    vec4 cameraData;            // TESR_CameraData (x nearZ, y farZ)
+    vec4 flags;                 // x: FORWARD_SHADOWS as the effect was compiled (1 or 0); y, z: NearFade's start and end (TESR_ShadowScreenSpaceFade, 2026-10-27); w: the RT range in RT sun shadows Mode 1 (2026-10-28), 0 = off
+    mat4 charShadowCameraToLight; // TESR_CharShadowCameraToLight (2026-10-26, CharacterShadowMap)
+    vec4 charShadowCenter;      // TESR_CharShadowCenter
+    vec4 charShadowData;        // TESR_CharShadowData
 } cb;
 
 layout(push_constant) uniform Push {
-    uint linearSampler;   // 0: LINEAR, CLAMP (depth, atlas, normals, source, character map)
-    uint noiseSampler;    // 4: LINEAR, WRAP, linear mips (blue noise)
-    uint pass;            // 8: SunShadowsBlur: 0 across, 1 down, 2 down + Intensity
+    uint linearIndex;           // 0: LINEAR, CLAMP
+    uint noiseIndex;            // 4: LINEAR, WRAP, linear between mips
+    uint pass;                  // 8: the blur: 0 DepthBlurKeep H, 1 DepthBlurKeep V, 2 FinalContactBlur
     uint pad;
 } pc;
 
-#define LINEAR_CLAMP NVR_SAMPLER(pc.linearSampler)
-#define NOISE_WRAP NVR_SAMPLER(pc.noiseSampler)
+layout(location = 0) in vec2 uv;
+layout(location = 0) out vec4 o_color;
 
-const float SkyShare = 0.9999;
-const float RayThickness = 20.0;
+#define LINEAR_S NVR_SAMPLER(pc.linearIndex)
 
-// HLSL smoothstep for any edges (GLSL's is undefined when edge0 >= edge1)
-float hsmooth(float a, float b, float x) {
-    float t = clamp((x - a) / (b - a), 0.0, 1.0);
+// SunShadows.fx.hlsl statics
+#define SSS_STEPNUM 5
+const float SSS_DIST = 2000.0;
+const float SSS_THICKNESS = 20.0;
+#define SSS_MAXDEPTH (cb.screenSpaceData.z * cb.screenSpaceData.x)
+#define Mode cb.shadowFormatData.x
+#define FormatBits cb.shadowFormatData.y
+const float NormalBiasTexels = 2.5;
+const float SlopeBias = 1.0;
+
+// Depth.hlsl statics
+#define nearZ cb.cameraData.x
+#define farZ cb.cameraData.y
+
+// HLSL smoothstep (GLSL's is undefined for edge0 >= edge1)
+float hlslSmoothstep(float a, float b, float x);
+// (UNOFFICIAL 2026-10-27, as SunShadows.fx's ContactNearFade) the contact shadows fade in with distance: none nearer than flags.y, full from flags.z
+float ContactNearFade(float z) { return cb.flags.z > 0.0 ? hlslSmoothstep(cb.flags.y, cb.flags.z, z) : 1.0; }
+float hlslSmoothstep(float a, float b, float x) {
+    float t = saturate((x - a) / (b - a));
     return t * t * (3.0 - 2.0 * t);
 }
 
-float farDistance() { return max(cb.cameraData.y, 1.0); }
-float renderDistance() { return max(cb.screenSpaceData.z, 1.0); }
-float contactIntensity() { return max(cb.screenSpaceData.w, 0.0); }
+// The single-level buffers: tex2D and tex2Dlod level 0 read the same texel
+vec4 sampleShadow(vec2 coord) { return textureLod(sampler2D(t_shadow, LINEAR_S), coord, 0.0); }
 
-vec4 sourceAt(vec2 p) { return textureLod(sampler2D(t_source, LINEAR_CLAMP), p, 0.0); }
-float viewDepthAt(vec2 p) { return textureLod(sampler2D(t_depth, LINEAR_CLAMP), p, 0.0).x * cb.cameraData.y; }
-
-vec2 snapToTexel(vec2 p) {
-    vec2 texel = cb.reciprocalResolution.xy;
-    return (floor(p / texel) + 0.5) * texel;
-}
-vec2 clampToTexture(vec2 p) { return clamp(p, 0.5 * cb.reciprocalResolution.xy, 1.0 - 0.5 * cb.reciprocalResolution.xy); }
-bool outsideTexture(vec2 p) { return any(lessThan(p, vec2(0.0))) || any(greaterThan(p, vec2(1.0))); }
-
-vec3 viewPositionAt(vec2 p, float viewZ) {
-    vec2 ndc = vec2(p.x * 2.0 - 1.0, 1.0 - p.y * 2.0);
-    return vec3((ndc.x - cb.projection[2][0]) * viewZ / cb.projection[0][0],
-                (ndc.y - cb.projection[2][1]) * viewZ / cb.projection[1][1], viewZ);
+// --- Depth.hlsl ---
+float projectedDepthFromLinear(float linear01) {
+    float viewZ = max(linear01 * farZ, 1.0e-6);
+    return nearZ * (farZ - viewZ) / (viewZ * (farZ - nearZ));
 }
 
-vec2 texCoordOf(vec3 viewPos) {
-    float invZ = 1.0 / max(viewPos.z, 1.0e-3);
-    vec2 ndc = vec2(viewPos.x * cb.projection[0][0] * invZ + cb.projection[2][0],
-                    viewPos.y * cb.projection[1][1] * invZ + cb.projection[2][1]);
-    return vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+float readDepth(vec2 coord) {
+    return textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x * farZ;
 }
 
-vec3 viewNormalAt(vec2 p) {
-    vec3 n = textureLod(sampler2D(t_normals, LINEAR_CLAMP), p, 0.0).xyz * 2.0 - 1.0;
-    float len2 = dot(n, n);
-    return len2 > 1.0e-4 ? n * inversesqrt(len2) : vec3(0.0, 0.0, -1.0);
+float readDepthLod(vec2 coord) {
+    return textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x * farZ;
 }
 
-vec3 worldPositionOf(vec3 viewPos) { return (cb.invView * vec4(viewPos, 1.0)).xyz; }
-vec3 worldDirectionOf(vec3 viewDir) { return (vec4(viewDir, 0.0) * cb.view).xyz; }
+vec3 reconstructPosition(vec2 coord) {
+    float x = coord.x * 2.0 - 1.0;
+    float y = (1.0 - coord.y) * 2.0 - 1.0;
+    float z = projectedDepthFromLinear(textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x);
+    vec4 clipSpace = vec4(x, y, z, 1.0);
 
-// ---- contact shadows ----
-float nearFadeWeight(float viewZ) {
-    float start = cb.flags.y;
-    float end = max(cb.flags.z, start + 1.0e-3);
-    return cb.flags.z > 0.0 ? hsmooth(start, end, viewZ) : 1.0;
+    vec4 viewSpace = cb.invProjectionTransform * clipSpace;
+
+    viewSpace /= viewSpace.w;
+
+    return viewSpace.xyz;
 }
 
-float sunFacing(vec3 viewNormal, vec3 viewSun) { return clamp(dot(viewNormal, viewSun) * 8.0, 0.0, 1.0); }
+vec3 projectPosition(vec3 position) {
+    vec4 projection = cb.projectionTransform * vec4(position, 1.0);
+    projection.xyz /= projection.w;
 
-float rayBlocked(vec2 sampleUV, float rayZ) {
-    if (outsideTexture(sampleUV) || rayZ <= cb.cameraData.x) return 0.0;
-    float sceneZ = viewDepthAt(snapToTexel(sampleUV));
-    float thickness = RayThickness;
-    float bias = max(0.01, rayZ * 0.002);
-    float gap = rayZ - sceneZ;
-    return clamp((gap - bias) / bias, 0.0, 1.0) * clamp((thickness - gap) / (0.25 * thickness + 0.01), 0.0, 1.0);
+    projection.x = projection.x * 0.5 + 0.5;
+    projection.y = 0.5 - 0.5 * projection.y;
+
+    return projection.xyz;
 }
 
-float contactFromOcclusion(float occlusion, float facing, float viewZ) {
-    float shade = pow(clamp(occlusion, 0.0, 1.0), 0.3) * facing * nearFadeWeight(viewZ);
-    return mix(1.0 - shade, 1.0, hsmooth(0.8 * renderDistance(), renderDistance(), viewZ));
+vec3 toWorld(vec2 tex) {
+    vec3 v = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
+    v += vec3(1.0 / cb.projectionTransform[0][0] * (2.0 * tex.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
+    v += vec3(-1.0 / cb.projectionTransform[1][1] * (2.0 * tex.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
+    return v;
 }
 
-bool noContact(float viewZ, float facing) {
-    return cb.screenSpaceData.x < 0.5 || viewZ >= renderDistance() || viewZ >= SkyShare * cb.cameraData.y || facing <= 0.0;
+float getHomogenousDepth(vec2 coord) {
+    float depth = readDepth(coord);
+    vec3 camera_vector = toWorld(coord) * depth;
+    return length(camera_vector);
 }
 
-// ---- depth-aware blur ----
-vec4 depthAwareBlur(vec2 p, vec2 direction) {
-    vec4 centre = sourceAt(p);
-    float centreZ = viewDepthAt(p);
-    if (!(centreZ < renderDistance() && centreZ < SkyShare * cb.cameraData.y)) return centre;
-    vec3 centrePos = viewPositionAt(p, centreZ);
-    vec3 centreNormal = viewNormalAt(p);
-    float tolerance = max(1.0, 0.012 * centreZ);
-    vec2 stride = direction * max(cb.screenSpaceData.y, 0.0) * cb.reciprocalResolution.xy;
-    vec4 sum = centre;
-    float weights = 1.0;
-    for (int i = 0; i < 12; i++) {
-        float k = i < 6 ? float(i - 6) : float(i - 5);
-        vec2 tapUV = clampToTexture(p + k * stride);
-        float tapZ = viewDepthAt(tapUV);
-        float planeGap = abs(dot(viewPositionAt(tapUV, tapZ) - centrePos, centreNormal));
-        float weight = exp(-k * k / 18.0) * clamp(1.0 - planeGap / tolerance, 0.0, 1.0);
-        sum += weight * sourceAt(tapUV);
-        weights += weight;
+vec4 reconstructWorldPositionLod(vec2 coord, out float viewDepth) {
+    float x = coord.x * 2.0 - 1.0;
+    float y = (1.0 - coord.y) * 2.0 - 1.0;
+    float z = projectedDepthFromLinear(textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x);
+    vec4 viewSpace = cb.invProjectionTransform * vec4(x, y, z, 1.0);
+
+    viewSpace /= viewSpace.w;
+    viewDepth = viewSpace.z;
+
+    vec4 worldSpace = cb.invViewTransform * viewSpace;
+    return vec4(worldSpace.xyz, 1.0);
+}
+
+// --- Normals.hlsl ---
+vec3 GetNormal(vec2 coord) {
+    return textureLod(sampler2D(t_normals, LINEAR_S), coord, 0.0).xyz * 2.0 - 1.0;
+}
+
+vec3 GetWorldNormalLod(vec2 coord) {
+    vec4 normal = vec4(textureLod(sampler2D(t_normals, LINEAR_S), coord, 0.0).xyz * 2.0 - 1.0, 1.0);
+    return (normal * cb.viewTransform).xyz;
+}
+
+// --- Blur.hlsl ---
+const int cKernelSize = 12;
+
+const float BlurWeights[cKernelSize] = float[cKernelSize](
+    0.057424882,
+    0.058107773,
+    0.061460144,
+    0.071020611,
+    0.088092873,
+    0.106530916,
+    0.106530916,
+    0.088092873,
+    0.071020611,
+    0.061460144,
+    0.058107773,
+    0.057424882
+);
+
+// BlurOffsets: -6..-1 then +1..+6 times TESR_ReciprocalResolution (no zero tap)
+vec2 BlurOffsets(int i) {
+    float k = i < 6 ? float(i - 6) : float(i - 5);
+    return vec2(k * cb.reciprocalResolution.x, k * cb.reciprocalResolution.y);
+}
+
+// --- BlurDepth.hlsl DepthBlurKeep (buffer = TESR_PointShadowBuffer, depthDrop 3500, endFade SSS_MAXDEPTH) ---
+vec4 DepthBlurKeep(vec2 coord, vec2 OffsetMask, float blurRadius, float depthDrop, float endFade) {
+    vec4 center = sampleShadow(coord);
+    float depth1 = readDepthLod(coord);
+    if (depth1 > endFade) return center;
+
+    vec4 taps[cKernelSize];
+    vec4 spread = vec4(0.0);
+    for (int t = 0; t < cKernelSize; t++) {
+        taps[t] = sampleShadow(coord + (BlurOffsets(t) * OffsetMask) * blurRadius);
+        spread = max(spread, abs(taps[t] - center));
     }
-    return sum / weights;
-}
+    if (max(spread.r, spread.g) < 0.0001) return vec4(center.rgb, 1.0);
 
-vec2 applyIntensity(vec2 v) { return pow(max(v, vec2(1.0e-6)), vec2(contactIntensity())); }
+    float WeightSum = 0.114725602;
+    vec4 color1 = center * WeightSum;
+    depthDrop *= (depth1 / farZ);
 
-// ---- sun cascade maps (Shaders/Includes/Shadow.hlsl GetSunShadow, Mode 3) ----
-float atlasFilter(vec2 p, float depth, vec2 quadrant, float slopeBias) {
-    float texel = max(cb.shadowBlur.x, 1.0 / 16384.0);
-    vec2 lo = quadrant + 0.5 * texel;
-    vec2 hi = quadrant + 0.5 - 0.5 * texel;
-    float lit = 0.0;
-    vec2 grid = p / texel - 0.5;
-    if (cb.shadowBlur.z > 0.0) {
-        vec2 base = floor(grid);
-        vec2 t = grid - base;
-        vec2 t2 = t * t, t3 = t2 * t;
-        vec4 cx = vec4((1.0 - t.x) * (1.0 - t.x) * (1.0 - t.x), 3.0 * t3.x - 6.0 * t2.x + 4.0, -3.0 * t3.x + 3.0 * t2.x + 3.0 * t.x + 1.0, t3.x) / 6.0;
-        vec4 cy = vec4((1.0 - t.y) * (1.0 - t.y) * (1.0 - t.y), 3.0 * t3.y - 6.0 * t2.y + 4.0, -3.0 * t3.y + 3.0 * t2.y + 3.0 * t.y + 1.0, t3.y) / 6.0;
-        float cubicDepth = depth - 0.5 * slopeBias;
-        for (int row = 0; row < 4; row++) {
-            for (int col = 0; col < 4; col++) {
-                vec2 tap = clamp((base + vec2(col - 1, row - 1) + 0.5) * texel, lo, hi);
-                lit += (cubicDepth <= textureLod(sampler2D(t_atlas, LINEAR_CLAMP), tap, 0.0).x ? 1.0 : 0.0) * cx[col] * cy[row];
-            }
-        }
-    }
-    else {
-        vec2 nearest = floor(grid + 0.5);
-        vec2 f = grid - nearest;
-        vec3 wx = vec3(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
-        vec3 wy = vec3(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
-        for (int row = 0; row < 3; row++) {
-            for (int col = 0; col < 3; col++) {
-                vec2 tap = clamp((nearest + vec2(col - 1, row - 1) + 0.5) * texel, lo, hi);
-                lit += (depth <= textureLod(sampler2D(t_atlas, LINEAR_CLAMP), tap, 0.0).x ? 1.0 : 0.0) * wx[col] * wy[row];
-            }
-        }
-    }
-    return lit;
-}
+    for (int i = 0; i < cKernelSize; i++) {
+        float depth2 = readDepthLod(coord + (BlurOffsets(i) * OffsetMask) * blurRadius);
+        float diff = abs(depth1 - depth2);
 
-float cascadeLookup(int c, vec3 worldPos, float bias, float slopeBias) {
-    vec2 quadrant = vec2((c == 1 || c == 3) ? 0.5 : 0.0, c >= 2 ? 0.5 : 0.0);
-    vec4 light = cb.cascade[c] * vec4(worldPos, 1.0);
-    light.xyz /= light.w;
-    vec2 atlasUV = vec2(light.x * 0.5 + 0.5, light.y * -0.5 + 0.5) * 0.5 + quadrant;
-    return atlasFilter(atlasUV, light.z - bias - 1.5 * slopeBias, quadrant, slopeBias);
-}
-
-float cascadeVisibility(vec3 worldPos, vec3 worldNormal) {
-    float nDotL = dot(worldNormal, cb.smoothedSunDir.xyz);
-    float offsetScale = clamp(1.0 - nDotL, 0.0, 1.0);
-    vec4 radii = vec4(cb.center[0].w, cb.center[1].w, cb.center[2].w, cb.center[3].w);
-    vec4 texelWorld = 4.0 * radii * max(cb.shadowBlur.x, 1.0 / 16384.0);
-    vec4 normalOffset = offsetScale * 1.5 * texelWorld;
-    float slopeBias = 2.0 * cb.shadowBlur.x * min(sqrt(clamp(1.0 - nDotL * nDotL, 0.0, 1.0)) / max(nDotL, 0.05), 5.0);
-    float bias = 0.0002 * (1.0 + offsetScale);
-    int cascade = -1;
-    float fade = 0.0;
-    for (int i = 3; i >= 0; i--) {   // the innermost cascade holding the point wins
-        float radius = radii[i];
-        float d = length(worldPos - cb.center[i].xyz);
-        if (d < radius) {
-            float start = radius - max(0.1 * radius, min(cb.forwardData.w, radius));
-            cascade = i;
-            fade = hsmooth(start, max(radius, start + 1.0e-3), d);
-        }
+        float useForBlur = (diff <= depthDrop) ? 1.0 : 0.0;
+        color1 += BlurWeights[i] * taps[i] * useForBlur;
+        WeightSum += BlurWeights[i] * useForBlur;
     }
-    if (cascade < 0) return 1.0;
-    float offsetHere = cascade < 3 ? mix(normalOffset[cascade], normalOffset[cascade + 1], fade) : normalOffset[3];
-    float slackScale = cascade == 0 ? mix(radii.x / max(radii.y, 0.001), 1.0, fade) : 1.0;
-    vec3 lookupPos = worldPos + offsetHere * worldNormal;
-    float visibility = cascadeLookup(cascade, lookupPos, bias, slopeBias);
-    if (fade > 0.0) {
-        float next = cascade < 3 ? cascadeLookup(cascade + 1, lookupPos, bias, slopeBias * slackScale) : 1.0;
-        visibility = mix(visibility, next, fade);
-    }
-    return clamp(visibility, 0.0, 1.0);
-}
-
-#if defined(CHARACTER_SHADOW_MAP) && CHARACTER_SHADOW_MAP
-// Shaders/Includes/Shadow.hlsl CharacterMapShadow; the LINEAR sampler at texel centres returns the texel itself (the .fx samples POINT)
-float characterVisibility(vec3 worldPos, vec3 worldNormal, float nDotL, float cascadeVis, out bool debugView) {
-    debugView = false;
-    float texel = max(cb.charData.x, 1.0 / 16384.0);
-    float halfExtent = max(cb.charCenter.w, 1.0);
-    float offsetScale = clamp(1.0 - nDotL, 0.0, 1.0);
-    vec3 position = worldPos + worldNormal * (offsetScale * 1.5 * 2.0 * halfExtent * texel);
-    vec4 light = cb.charToLight * vec4(position, 1.0);
-    float edge = max(abs(light.x), abs(light.y));
-    float weight = 1.0 - hsmooth(1.0 - max(cb.charData.y, 0.01), 1.0, edge);
-    if (weight <= 0.0) return cascadeVis;
-    vec2 p = vec2(light.x * 0.5 + 0.5, light.y * -0.5 + 0.5);
-    float slope = min(sqrt(clamp(1.0 - nDotL * nDotL, 0.0, 1.0)) / max(nDotL, 0.05), 5.0);
-    float depth = min(light.z, 0.9999) - cb.charData.z - 1.5 * texel * slope;
-    vec2 lo = vec2(0.5 * texel);
-    vec2 hi = vec2(1.0 - 0.5 * texel);
-    vec2 grid = p / texel - 0.5;
-    vec2 nearest = floor(grid + 0.5);
-    vec2 f = grid - nearest;
-    vec3 wx = vec3(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
-    vec3 wy = vec3(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
-    float lit = 0.0;
-    for (int row = 0; row < 3; row++) {
-        for (int col = 0; col < 3; col++) {
-            vec2 tap = clamp((nearest + vec2(col - 1, row - 1) + 0.5) * texel, lo, hi);
-            lit += (depth <= textureLod(sampler2D(t_charMap, LINEAR_CLAMP), tap, 0.0).x ? 1.0 : 0.0) * wx[col] * wy[row];
-        }
-    }
-    if (cb.charData.w > 1.5) {
-        debugView = true;
-        if (cb.charData.w > 3.5) return clamp(light.z, 0.0, 1.0);
-        if (cb.charData.w > 2.5) return textureLod(sampler2D(t_charMap, LINEAR_CLAMP), clamp(p, lo, hi), 0.0).x;
-        return lit;
-    }
-    return mix(cascadeVis, min(cascadeVis, lit), weight);
-}
-#endif
-
-float sunMapsVisibility(vec2 p, out bool debugView) {
-    debugView = false;
-    float viewZ = viewDepthAt(p);
-    bool objectShadersDoIt = cb.flags.x > 0.5 && cb.forwardData.x < 0.5;
-    if (objectShadersDoIt || cb.shadowFade.y <= 0.5 || cb.formatData.z <= 0.5 || abs(cb.formatData.x - 3.0) >= 0.5 ||
-        viewZ >= SkyShare * cb.cameraData.y)
-        return 1.0;
-    vec3 viewPos = viewPositionAt(p, viewZ);
-    vec3 worldPos = worldPositionOf(viewPos);
-    vec3 worldNormal = normalize(worldDirectionOf(viewNormalAt(p)));
-    float visibility = cascadeVisibility(worldPos, worldNormal);
-    float rtRange = cb.flags.w;
-    if (rtRange > 0.0) visibility = mix(1.0, visibility, clamp((viewZ - 0.85 * rtRange) / (0.15 * rtRange), 0.0, 1.0));
-#if defined(CHARACTER_SHADOW_MAP) && CHARACTER_SHADOW_MAP
-    if (cb.charData.w > 0.0) visibility = characterVisibility(worldPos, worldNormal, dot(worldNormal, cb.smoothedSunDir.xyz), visibility, debugView);
-#endif
-    return visibility;
+    color1 /= WeightSum;
+    return vec4(color1.rgb, 1.0);
 }

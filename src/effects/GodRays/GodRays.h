@@ -1,4 +1,5 @@
 #pragma once
+#include "../../core/FailOnce.h"
 
 class GodRaysEffect : public EffectRecord
 {
@@ -16,8 +17,9 @@ public:
 	float dayMult, nightMult;
 	bool sunGlareEnabled;
 	float rayVisibility;
-	bool packedRenderFailed = false;
-	bool dedicatedRenderFailed = false;
+	// UNOFFICIAL 2026-11-02 RetryFailedEffects (core/FailOnce.h): were bools that held until restart
+	FailOnce::Latch packedRenderFailed{ "GodRays packed pass" };
+	FailOnce::Latch dedicatedRenderFailed{ "GodRays dedicated pass" };
 	CachedHandle techDedicated, paramLayout;	// UNOFFICIAL: looked up once per loaded effect
 	// UNOFFICIAL 2026-10-16 SkipEmpty: the light mask's maximum taken down to 1 x 1 in 8 x 8 steps, per ray size ([0] half, [1] quarter).
 	bool skipEmpty = true;

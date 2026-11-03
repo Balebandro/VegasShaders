@@ -1,59 +1,60 @@
-// Underwater pass 0, god rays (NVR DXVK). Effects/Underwater.fx.hlsl Godrays, line for line. effects/Underwater.cpp ExtRender.
-// Samplers: LINEAR CLAMP at push offset 0, POINT WRAP (blue noise) at 4, ANISOTROPIC WRAP (caustics) at 8.
+// Underwater pass 1, the god rays (needs NVR DXVK): Effects/Underwater.fx.hlsl Godrays line for line. effects/Underwater.cpp ExtRender.
+// The rays are drawn into the upper left quarter (uv * 2); outside it the pass keeps the current image (what the D3D9 pass's
+// pre-fill copied there). t_noise is Effects\bluenoise256.dds (POINT, WRAP; no mips: level 0). Depth: CombineDepth's.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : enable
 #include "Common.glsl"
+#include "Underwater.glsl"
 
-layout(set = 1, binding = 0) uniform texture2D t_rendered;   // TESR_RenderedBuffer
-layout(set = 1, binding = 1) uniform texture2D t_depth;      // TESR_DepthBuffer
-layout(set = 1, binding = 2) uniform texture2D t_noise;      // TESR_BlueNoiseSampler
-layout(set = 1, binding = 3) uniform texture2D t_caustics;   // TESR_CausticsSampler
+layout(set = 1, binding = 0) uniform texture2D t_rendered;   // TESR_RenderedBuffer: the current image (texelFetch, outside the quarter)
+layout(set = 1, binding = 1) uniform texture2D t_depth;      // TESR_DepthBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 2) uniform texture2D t_noise;      // TESR_BlueNoiseSampler (POINT, WRAP)
+layout(set = 1, binding = 3) uniform texture2D t_caustics;   // TESR_CausticsSampler (ANISOTROPIC, WRAP)
 
 layout(push_constant) uniform Push {
-    uint linearIndex;     // 0
-    uint noiseIndex;      // 4
-    uint causticsIndex;   // 8
+    uint linearIndex;     // 0: LINEAR, CLAMP
+    uint noiseIndex;      // 4: POINT, WRAP
+    uint causticsIndex;   // 8: ANISOTROPIC, WRAP
     uint pad;             // 12
 } pc;
-
-#include "Underwater.glsl"
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
+// Underwater.fx.hlsl random: the blue noise at (seed / 256 + 0.5) / TESR_ReciprocalResolution.xy, level 0
+vec3 random(vec2 seed) {
+    return textureLod(sampler2D(t_noise, NVR_SAMPLER(pc.noiseIndex)), (seed / 256.0 + 0.5) / cb.reciprocalResolution.xy, 0.0).xyz;
+}
+
 void main() {
-    vec4 current = sampleLod(t_rendered, pc.linearIndex, uv);
-    if (!inQuarter(uv)) {
-        o_color = current;
+    // clip((uv <= 1) - 1) with uv = IN.UVCoord * 2: outside the quarter the D3D9 pass left the pre-filled current image
+    vec2 uv2 = uv * 2.0;
+    if (any(greaterThan(uv2, vec2(1.0)))) {
+        o_color = texelFetch(t_rendered, ivec2(gl_FragCoord.xy), 0);
         return;
     }
-    vec2 local = uv * 2.0;
-    vec3 eye = cb.cameraPosition.xyz;
-    float W = cb.waterSettings.x;
-    vec3 dirV = toWorld(local);
-    float viewZ = readDepthAt(t_depth, pc.linearIndex, local);
-    float dist = length(dirV) * viewZ;
-    vec3 dir = dirV / max(length(dirV), 1.0e-6);
-    float maxT = min(dist, 4000.0);
-    float stepLen = maxT / 49.0;
 
-    vec3 sun = sunDirection();
-    float sunZ = max(sun.z, 0.05);
-    float sunUp = clamp(sun.z * 6.0, 0.0, 1.0);
-    float drift = cb.gameTime.x * 0.001 * cb.waveParams.z * 0.02;
+    vec3 eyeVector = toWorld(uv2);
+    float depth = length(readDepth(uv2, t_depth, pc.linearIndex) * eyeVector);
 
-    vec2 pixel = gl_FragCoord.xy;
-    float acc = 0.0;
-    for (int i = 0; i < 49; i++) {
-        float noise = sampleLod(t_noise, pc.noiseIndex, (pixel + vec2(17.0, 31.0) * float(i)) / 256.0).r;
-        float t = (float(i) + noise) * stepLen;
-        vec3 p = eye + dir * t;
-        float under = step(p.z, W);
-        vec3 q = p + sun * (max(W - p.z, 0.0) / sunZ);
-        float c1 = sampleLod(t_caustics, pc.causticsIndex, q.xy / 600.0 + vec2(drift, drift * 0.7)).r;
-        float c2 = sampleLod(t_caustics, pc.causticsIndex, q.xy / 720.0 - vec2(drift * 0.8, drift)).r;
-        acc += min(c1, c2) * under * exp(-t * 0.0008);
+    float godraysMaxDistance = 1000.0;
+    float stepSize = godraysMaxDistance / 50.0;
+    vec3 stepVector = eyeVector * stepSize;
+
+    vec4 color = vec4(0.0, 0.0, 0.0, 1.0);
+
+    vec3 samplingUV = cb.cameraPosition.xyz;
+    float sunL = sunLuma();
+    for (int i = 1; i < 50; i++) {
+        float fi = float(i);
+        samplingUV += stepVector * mix(vec3(0.5), vec3(1.0), random(uv2 + cb.reciprocalResolution.xx * fi));
+        float rayDistance = stepSize * fi;
+        float samplingDepthFade = hsmooth(800.0, 0.0, cb.waterSettings.x - samplingUV.z);
+        float samplingDistanceFade = 1.0 - rayDistance / godraysMaxDistance;
+        vec4 rayColor = mix(vec4(0.0, 0.0, 0.0, 1.0), vec4(1.0, 1.0, 1.0, 1.0), samplingDistanceFade) * sunL * 0.06;
+        color += getCaustics(samplingUV, t_caustics, pc.causticsIndex) * rayColor * samplingDepthFade * samplingDistanceFade * float(rayDistance < depth);
     }
-    float ray = 2.0 * acc / 49.0 * sunUp;
-    o_color = vec4(ray, 0.0, 0.0, 1.0);
+
+    o_color = vec4(smoothstep(0.1, 0.4, color).rgb, 1.0); // clamp the values to increase the strength and improve blending
 }

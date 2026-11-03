@@ -1,54 +1,90 @@
-// Interior shadows, blur pass as a Vulkan pass (needs NVR DXVK). The D3D9 DedicatedInteriorShadows blur of
-// Effects/ShadowsInteriors.fx.hlsl (BlurTerm), line for line; run twice: horizontal (offsetMask 1,0) then vertical (0,1).
-// Not clamped to a render-scale rect: the C++ keeps this path off while a rect is active.
+// ShadowsInteriors' dedicated blur passes (InteriorShadowBlur, both directions) as Vulkan passes (needs NVR DXVK):
+// Effects/ShadowsInteriors.fx.hlsl with Includes/Blur.hlsl and Depth.hlsl, line for line. effects/ShadowsInteriors.cpp ExtRender.
+// The mask is the shadow term (NVR_InteriorShadowIn, G16R16); the offset mask is (1,0) for the first pass, (0,1) for the second.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "Common.glsl"
 
-layout(set = 1, binding = 0) uniform texture2D t_mask;    // the mask (horizontal) or scratch A (vertical)
-layout(set = 1, binding = 1) uniform texture2D t_depth;   // TESR_DepthBuffer (stored: depth over the far distance)
+layout(set = 1, binding = 0) uniform texture2D t_mask;    // NVR_InteriorShadowIn: the shadow term (LINEAR, CLAMP)
+layout(set = 1, binding = 1) uniform texture2D t_depth;   // TESR_DepthBuffer: linear depth / farZ (LINEAR, CLAMP)
 
 layout(push_constant) uniform Push {
-    vec4 cameraData;            // 0: y = far distance
-    vec4 reciprocalResolution;  // 16: texel size
-    vec2 offsetMask;            // 32: (1, 0) horizontal, (0, 1) vertical
-    float maxDistance;          // 40: draw distance (TESR_ShadowFade.w)
+    vec4 cameraData;            // 0: TESR_CameraData (y: farZ)
+    vec4 reciprocalResolution;  // 16: TESR_ReciprocalResolution
+    vec2 offsetMask;            // 32: OffsetMaskH (1, 0) or OffsetMaskV (0, 1)
+    float maxDistance;          // 40: MAXDISTANCE, TESR_ShadowFade.w: beyond it the pass writes black
     uint samplerIndex;          // 44: LINEAR, CLAMP
 } pc;
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
-// The same twelve taps (offsets -6..-1, +1..+6) and centre weight as the .fx.hlsl.
-const float kWeight[12] = float[12](0.057424882, 0.058107773, 0.061460144, 0.071020611, 0.088092873, 0.106530916,
-    0.106530916, 0.088092873, 0.071020611, 0.061460144, 0.058107773, 0.057424882);
-const float kCentreWeight = 0.114725602;
+const int cKernelSize = 12;   // Blur.hlsl cKernelSize
 
-float depthAt(vec2 p) {
-    return textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), p, 0.0).r * pc.cameraData.y;
+// Blur.hlsl BlurWeights
+const float blurWeights[cKernelSize] = float[cKernelSize](
+    0.057424882,
+    0.058107773,
+    0.061460144,
+    0.071020611,
+    0.088092873,
+    0.106530916,
+    0.106530916,
+    0.088092873,
+    0.071020611,
+    0.061460144,
+    0.058107773,
+    0.057424882
+);
+
+// Blur.hlsl BlurOffsets: -6..-1 then +1..+6 times TESR_ReciprocalResolution (no zero tap)
+vec2 blurOffset(int i) {
+    float k = i < 6 ? float(i - 6) : float(i - 5);
+    return vec2(k * pc.reciprocalResolution.x, k * pc.reciprocalResolution.y);
 }
 
-float maskAt(vec2 p) {
-    return texture(sampler2D(t_mask, NVR_SAMPLER(pc.samplerIndex)), p).r;
+// Includes/Depth.hlsl readDepthLod: the linear depth in game units
+float readDepthLod(vec2 coord) {
+    return textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), coord, 0.0).x * pc.cameraData.y;
 }
 
+// NVR_InteriorShadowIn read with tex2Dlod
+vec4 sampleMask(vec2 coord) {
+    return textureLod(sampler2D(t_mask, NVR_SAMPLER(pc.samplerIndex)), coord, 0.0);
+}
+
+// ShadowsInteriors.fx.hlsl InteriorShadowBlur
 void main() {
-    float farZ = pc.cameraData.y;
-    float centreDepth = depthAt(uv);
-    if (centreDepth >= pc.maxDistance) {
+    vec4 center = sampleMask(uv);
+    float depth1 = readDepthLod(uv);
+    if (depth1 > pc.maxDistance) {
         o_color = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    float threshold = 3500.0 * (centreDepth / farZ);
-    float sum = maskAt(uv) * kCentreWeight;
-    float wsum = kCentreWeight;
-    for (int i = 0; i < 12; i++) {
-        float off = i < 6 ? float(i) - 6.0 : float(i) - 5.0;
-        vec2 tuv = uv + pc.offsetMask * off * pc.reciprocalResolution.xy;
-        if (abs(depthAt(tuv) - centreDepth) < threshold) {
-            sum += kWeight[i] * maskAt(tuv);
-            wsum += kWeight[i];
-        }
+
+    vec4 taps[cKernelSize];
+    vec4 spread = vec4(0.0);
+    for (int t = 0; t < cKernelSize; t++) {
+        taps[t] = sampleMask(uv + (blurOffset(t) * pc.offsetMask) * 1.0);
+        spread = max(spread, abs(taps[t] - center));
     }
-    o_color = vec4(sum / wsum, 0.0, 0.0, 1.0);
+    if (max(spread.r, spread.g) < 0.0001) {
+        o_color = vec4(center.rgb, 1.0);
+        return;
+    }
+
+    float weightSum = 0.114725602;
+    vec4 color1 = center * weightSum;
+    float depthDrop = 3500.0 * (depth1 / pc.cameraData.y);
+
+    for (int i = 0; i < cKernelSize; i++) {
+        float depth2 = readDepthLod(uv + (blurOffset(i) * pc.offsetMask) * 1.0);
+        float diff = abs(depth1 - depth2);
+
+        float useForBlur = diff <= depthDrop ? 1.0 : 0.0;
+        color1 += blurWeights[i] * taps[i] * useForBlur;
+        weightSum += blurWeights[i] * useForBlur;
+    }
+    color1 /= weightSum;
+    o_color = vec4(color1.rgb, 1.0);
 }

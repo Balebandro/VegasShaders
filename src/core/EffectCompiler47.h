@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include "TestTools.h"
 
 namespace EffectCompiler47 {
 
@@ -30,12 +31,22 @@ namespace EffectCompiler47 {
 
 	// The setting, read on the main thread (EffectPrecompile::Start and LoadEffect) and kept for the workers.
 	inline bool Use = false;
+	// 2026-11-02 test only ([Main.Main.Performance] EffectNoPreshaders, absent from the defaults = off; ignored in release builds):
+	// effects compiled with D3DCOMPILE_NO_PRESHADER, so the CPU-side expressions fx_2_0 folds out of a shader (preshaders) stay in it
+	// and the shader reads the effect's own parameters. A frame recorded this way ('record', FrameRecorder) holds those raw parameters,
+	// so frame_replay --no-preshader can swap in a rewritten effect and feed it by name; with preshaders the frame holds only the old
+	// expressions' results. Costs some shader time: not for timing captures.
+	inline bool NoPreshaders = false;
+	inline UINT Flags() { return NoPreshaders ? D3DXSHADER_NO_PRESHADER : 0; }	// same bit as D3DCOMPILE_NO_PRESHADER (1 << 8); d3dcompiler_47 only
 	// A missing key (an older defaults toml next to the new DLL: macintroll, P84 v4, "stuck loading shaders") means on, the shipped
 	// default, not 0 (the old compiler, minutes on the big effects).
 	inline void ReadSetting() {
 		SettingManager::Configuration::ConfigNode node;
 		const bool wanted = TheSettingManager->Config.FillNode(&node, "Main.Main.Performance", "NewEffectCompiler") ? node.BoolValue : true;
 		Use = wanted && Function();
+#if NVR_TEST_TOOLS
+		NoPreshaders = TheSettingManager->Config.FillNode(&node, "Main.Main.Performance", "EffectNoPreshaders") && node.BoolValue;
+#endif
 	}
 
 	// What an effect's preprocessed cache file holds and is checked against: PortableSource, plus a line naming the compiler when the
@@ -43,6 +54,7 @@ namespace EffectCompiler47 {
 	inline std::string CacheText(ID3DXBuffer* source) {
 		std::string text = ShaderProgram::PortableSource(source);
 		if (Use) text += "\n// NVR: effect compiled with d3dcompiler_47 ([Main.Main.Performance] NewEffectCompiler)\n";
+		if (NoPreshaders) text += "// NVR: effect compiled without preshaders ([Main.Main.Performance] EffectNoPreshaders)\n";
 		return text;
 	}
 	inline bool CacheFresh(const char* path, ID3DXBuffer* source) {
@@ -57,9 +69,20 @@ namespace EffectCompiler47 {
 		*binary = nullptr;
 		D3DCompileFn fn = Use ? Function() : nullptr;
 		if (!fn || !source) return false;
-		if (SUCCEEDED(fn(source->GetBufferPointer(), source->GetBufferSize(), name, nullptr, nullptr, nullptr, "fx_2_0", 0, 0, binary, errors)) && *binary)
+		if (SUCCEEDED(fn(source->GetBufferPointer(), source->GetBufferSize(), name, nullptr, nullptr, nullptr, "fx_2_0", Flags(), 0, binary, errors)) && *binary)
 			return true;
 		if (*binary) { (*binary)->Release(); *binary = nullptr; }
+		// Without preshaders some big effects no longer fit shader model 3 (VolumetricClouds, VolumetricFog, BounceLight, Sandstorm on
+		// 2026-11-02); D3DX then took minutes on them (no frame within 180 s). Those keep their preshaders: compiled as usual, and a
+		// recording cannot swap them.
+		if (NoPreshaders) {
+			if (*errors) { (*errors)->Release(); *errors = nullptr; }
+			if (SUCCEEDED(fn(source->GetBufferPointer(), source->GetBufferSize(), name, nullptr, nullptr, nullptr, "fx_2_0", 0, 0, binary, errors)) && *binary) {
+				Logger::Log("UNOFFICIAL EffectNoPreshaders: %s does not compile without preshaders, compiled with them", name);
+				return true;
+			}
+			if (*binary) { (*binary)->Release(); *binary = nullptr; }
+		}
 		return false;
 	}
 }

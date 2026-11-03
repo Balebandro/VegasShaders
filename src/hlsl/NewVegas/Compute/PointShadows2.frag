@@ -1,97 +1,118 @@
-// PointShadows2 as a Vulkan pass (needs NVR DXVK): the lamp light of lamps 6 to 11 added to the point-shadow buffer, as
-// Effects/PointShadows2.fx.hlsl. Reads the buffer's value before the pass from a copy (binding 2), so the pass never reads the target it writes.
-// Bindings (set 1): 0 depth, 1 normals, 2 the buffer copy, 3 to 7 the cube maps of slots 6 to 10. Set 2 binding 0: the 752-byte block below.
-// Push: linearSampler (offset 0, LINEAR CLAMP: depth, copy, cube maps), pointSampler (offset 4, POINT CLAMP: normals).
-// Matrices: a GLSL mat4 element [c][r] is the D3D element [c][r]; the D3D mul(v, M) is M * v, and mul(M, v) is v * M.
+// PointShadows2 (the lamp shadows past the first six, screen space) as a Vulkan pass (needs NVR DXVK): Effects/PointShadows2.fx.hlsl
+// technique 0, line for line, with the Includes it uses (Shadows, Depth, Normals, Helpers). effects/PointShadows2.cpp ExtRender.
+// TESR_PointShadowBuffer is read from a copy of the buffer as it was before this pass (the pass writes the buffer itself).
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "Common.glsl"
 
-layout(set = 1, binding = 0) uniform texture2D t_depth;
-layout(set = 1, binding = 1) uniform texture2D t_normals;
-layout(set = 1, binding = 2) uniform texture2D t_copy;
-layout(set = 1, binding = 3) uniform textureCube t_cube6;
-layout(set = 1, binding = 4) uniform textureCube t_cube7;
-layout(set = 1, binding = 5) uniform textureCube t_cube8;
-layout(set = 1, binding = 6) uniform textureCube t_cube9;
-layout(set = 1, binding = 7) uniform textureCube t_cube10;
+#define BIAS 0.018   // Includes/Shadows.hlsl
 
-layout(set = 2, binding = 0, std140) uniform PointShadows2Block {
-    vec4 cameraPosition;              // 0
-    vec4 cameraData;                  // 16: y far distance
-    mat4 viewTransform;               // 32
-    mat4 projectionTransform;         // 96
-    vec4 shadowFade;                  // 160: z point shadows on
-    vec4 shadowLightPosition[12];     // 176: xyz position, w radius
-    vec4 lightColor[24];              // 368: rgb colour, w dimmer
+layout(set = 1, binding = 0) uniform texture2D t_depth;             // TESR_DepthBuffer (LINEAR, CLAMP; linear depth / farZ)
+layout(set = 1, binding = 1) uniform texture2D t_normals;           // TESR_NormalsBuffer (POINT, CLAMP)
+layout(set = 1, binding = 2) uniform texture2D t_pointShadow;       // TESR_PointShadowBuffer, the copy (LINEAR, CLAMP; G16R16)
+layout(set = 1, binding = 3) uniform textureCube t_cube6;           // TESR_ShadowCubeMapBuffer6 (LINEAR, CLAMP)
+layout(set = 1, binding = 4) uniform textureCube t_cube7;           // TESR_ShadowCubeMapBuffer7
+layout(set = 1, binding = 5) uniform textureCube t_cube8;           // TESR_ShadowCubeMapBuffer8
+layout(set = 1, binding = 6) uniform textureCube t_cube9;           // TESR_ShadowCubeMapBuffer9
+layout(set = 1, binding = 7) uniform textureCube t_cube10;          // TESR_ShadowCubeMapBuffer10
+
+// The constants the HLSL reads, filled by the host each frame (the light arrays are too big for push data). Matrices as the
+// effect's SetMatrix uploads them: cb.viewTransform[i][j] is the HLSL's [i][j]; mul(v, M) is M * v, mul(M, v) is v * M.
+layout(set = 2, binding = 0, std140) uniform Constants {
+    vec4 cameraPosition;               // TESR_CameraPosition
+    vec4 cameraData;                   // TESR_CameraData: y far
+    mat4 viewTransform;                // TESR_ViewTransform
+    mat4 projectionTransform;          // TESR_ProjectionTransform
+    vec4 shadowFade;                   // TESR_ShadowFade: z 0 turns the cube maps off
+    vec4 shadowLightPosition[12];      // TESR_ShadowLightPosition: xyz position, w radius
+    vec4 lightColor[24];               // TESR_LightColor: rgb colour, w dimmer
 } cb;
 
 layout(push_constant) uniform Push {
-    uint linearSampler;   // 0
-    uint pointSampler;    // 4
+    uint samplerIndex;                 // 0: LINEAR, CLAMP (filled in by the host)
+    uint pointSamplerIndex;            // 4: POINT, CLAMP (filled in by the host)
 } pc;
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
-// Depth.hlsl toWorld(): camera-relative world direction through this pixel (view depth 1 along forward).
-vec3 toWorldDir(vec2 tex) {
+// Includes/Depth.hlsl readDepth
+float readDepth(vec2 coord) {
+    return texture(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), coord).x * cb.cameraData.y;
+}
+
+// Includes/Depth.hlsl toWorld
+vec3 toWorld(vec2 tex) {
     vec3 v = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
     v += (1.0 / cb.projectionTransform[0][0] * (2.0 * tex.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
     v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * tex.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
     return v;
 }
 
-float lumaOfLampColour(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
-
-// The falloff and the facing term of a lamp (not normalised normal, as the .fx keeps it); unshadowed.
-float lampFalloffFacing(vec3 toLamp, float len, float d, vec3 n) {
-    float s = clamp(d * d, 0.0, 1.0);
-    float falloff = (1.0 - s) * (1.0 - s) / (1.0 + 5.0 * s);
-    float facing = dot(toLamp / max(len, 1e-6), n);
-    facing = mix(1.0, facing, smoothstep(0.0, 0.2, d));
-    return clamp(clamp(facing, 0.0, 1.0) * falloff, 0.0, 1.0);
+// Includes/Normals.hlsl GetWorldNormal: mul(TESR_ViewTransform, normal).xyz
+vec3 getWorldNormal(vec2 coord) {
+    vec4 normal = vec4(texture(sampler2D(t_normals, NVR_SAMPLER(pc.pointSamplerIndex)), coord).xyz * 2.0 - 1.0, 1.0);
+    return (normal * cb.viewTransform).xyz;
 }
 
-// One cube-mapped lamp's share: amount (shadow test x falloff x facing) times luma x dimmer. An empty slot (w 0) or a NaN gives 0.
-float shadowedLampShare(textureCube cube, vec4 lp, vec4 col, vec3 pos, vec3 n) {
-    if (!(lp.w > 0.0)) return 0.0;
-    vec3 toLamp = lp.xyz - pos;
-    float len = length(toLamp);
-    float d = len / lp.w;
-    float lit = 1.0;
-    if (cb.shadowFade.z > 0.5) {
-        vec3 dir = vec3(-toLamp.x, -toLamp.y, toLamp.z);
-        float stored = textureLod(samplerCube(cube, NVR_SAMPLER(pc.linearSampler)), dir, 0.0).r;
-        if (stored > 0.0 && stored < 1.0) lit = (stored + 0.018 * d > d) ? 1.0 : 0.0;
-    }
-    float amount = clamp(lampFalloffFacing(toLamp, len, d, n) * lit, 0.0, 1.0);
-    return amount * lumaOfLampColour(col.rgb) * col.w;
+// Includes/Shadows.hlsl GetPointLightAmountValue
+float GetPointLightAmountValue(textureCube cube, uint samplerIndex, vec3 lightDir, float dist) {
+    if (cb.shadowFade.z == 0.0) return 1.0;
+
+    float lightDepth = texture(samplerCube(cube, NVR_SAMPLER(samplerIndex)), lightDir).r;
+    float shadow = lightDepth + BIAS * dist > dist ? 1.0 : 0.0; // increase BIAS with distance
+
+    // ignore shadow sample if lightDepth is not within range of cube map
+    return mix(1.0, shadow, (lightDepth > 0.0 && lightDepth < 1.0) ? 1.0 : 0.0);
 }
 
-// Lamp 11: no shadow test and no colour weight.
-float unshadowedLampShare(vec4 lp, vec3 pos, vec3 n) {
-    if (!(lp.w > 0.0)) return 0.0;
-    vec3 toLamp = lp.xyz - pos;
-    float len = length(toLamp);
-    return lampFalloffFacing(toLamp, len, len / lp.w, n);
+// Includes/Shadows.hlsl GetPointLightAtten
+float GetPointLightAtten(vec3 lightDir, float dist, vec4 normal) {
+    // radius based attenuation based on https://lisyarus.github.io/blog/graphics/2022/07/30/point-light-attenuation.html
+    float s = saturate(dist * dist);
+    float atten = saturate(((1.0 - s) * (1.0 - s)) / (1.0 + 5.0 * s));
+
+    lightDir = normalize(lightDir);
+    float diffuse = mix(1.0, dot(lightDir, normal.xyz), smoothstep(0.0, 0.2, dist)); // add some light bleeding at very short distance
+
+    return saturate(diffuse * atten);
+}
+
+// Includes/Shadows.hlsl GetPointLightAmount
+float GetPointLightAmount(textureCube cube, vec4 worldPos, vec4 lightPos, vec4 normal) {
+    if (lightPos.w == 0.0) return 0.0; // w is light radius.
+
+    vec3 lightDir = lightPos.xyz - worldPos.xyz;
+    vec3 lightUV = lightDir * vec3(-1.0, -1.0, 1.0);
+
+    float dist = length(lightDir) / lightPos.w; // normalize distance over light range
+
+    float lightAmount = GetPointLightAmountValue(cube, pc.samplerIndex, lightUV, dist) * GetPointLightAtten(lightDir, dist, normal);
+    return saturate(lightAmount);
+}
+
+// Includes/Shadows.hlsl GetPointLightContribution (no shadow map)
+float GetPointLightContribution(vec4 worldPos, vec4 lightPos, vec4 normal) {
+    vec3 lightDir = lightPos.xyz - worldPos.xyz;
+    float dist = length(lightDir) / lightPos.w;
+    return GetPointLightAtten(lightDir, dist, normal);
 }
 
 void main() {
-    float depth = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.linearSampler)), uv, 0.0).r * cb.cameraData.y;
-    vec3 pos = cb.cameraPosition.xyz + toWorldDir(uv) * depth;
-    vec3 nView = textureLod(sampler2D(t_normals, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).xyz * 2.0 - 1.0;
-    vec3 n = (vec4(nView, 1.0) * cb.viewTransform).xyz;	// D3D mul(M, n) with w = 1, as the .fx's normal helper
+    float depth = readDepth(uv);
+    vec3 cameraVector = toWorld(uv) * depth;
+    vec4 worldPos = vec4(cb.cameraPosition.xyz + cameraVector, 1.0);
+    vec4 normal = vec4(getWorldNormal(uv), 1.0);
 
-    float total = 0.0;
-    total += shadowedLampShare(t_cube6, cb.shadowLightPosition[6], cb.lightColor[6], pos, n);
-    total += shadowedLampShare(t_cube7, cb.shadowLightPosition[7], cb.lightColor[7], pos, n);
-    total += shadowedLampShare(t_cube8, cb.shadowLightPosition[8], cb.lightColor[8], pos, n);
-    total += shadowedLampShare(t_cube9, cb.shadowLightPosition[9], cb.lightColor[9], pos, n);
-    total += shadowedLampShare(t_cube10, cb.shadowLightPosition[10], cb.lightColor[10], pos, n);
-    total += unshadowedLampShare(cb.shadowLightPosition[11], pos, n);
+    float shadow = texture(sampler2D(t_pointShadow, NVR_SAMPLER(pc.samplerIndex)), uv).r;
+    shadow += GetPointLightAmount(t_cube6, worldPos, cb.shadowLightPosition[6], normal) * luma(cb.lightColor[6].rgb) * cb.lightColor[6].w;
+    shadow += GetPointLightAmount(t_cube7, worldPos, cb.shadowLightPosition[7], normal) * luma(cb.lightColor[7].rgb) * cb.lightColor[7].w;
+    shadow += GetPointLightAmount(t_cube8, worldPos, cb.shadowLightPosition[8], normal) * luma(cb.lightColor[8].rgb) * cb.lightColor[8].w;
+    shadow += GetPointLightAmount(t_cube9, worldPos, cb.shadowLightPosition[9], normal) * luma(cb.lightColor[9].rgb) * cb.lightColor[9].w;
+    shadow += GetPointLightAmount(t_cube10, worldPos, cb.shadowLightPosition[10], normal) * luma(cb.lightColor[10].rgb) * cb.lightColor[10].w;
+    // (HLSL: TESR_ShadowCubeMapBuffer11 is commented out in the .fx)
+    shadow += GetPointLightContribution(worldPos, cb.shadowLightPosition[11], normal);
 
-    float prev = textureLod(sampler2D(t_copy, NVR_SAMPLER(pc.linearSampler)), uv, 0.0).r;
-    float v = clamp(prev + total, 0.0, 1.0);
-    o_color = vec4(v, v, v, 1.0);
+    shadow = saturate(shadow);
+    o_color = vec4(shadow, shadow, shadow, 1.0);
 }

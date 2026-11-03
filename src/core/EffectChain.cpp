@@ -1474,7 +1474,7 @@ void ShaderManager::PostStep_CoverMapDebug(ChainContext& ctx) {
 void ShaderManager::PostStep_FlickerWatch(ChainContext& ctx) {
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
-	if (Effects.SunFar->Settings.FlickerWatch && GameState.isExterior)	// UNOFFICIAL 2026-10-23 test only (core\FlickerWatch.h)
+	if ((Effects.SunFar->Settings.FlickerWatch && GameState.isExterior) || FlickerWatch::Forced)	// UNOFFICIAL 2026-10-23 test only (core\FlickerWatch.h); Forced: shot list 'flickerwatch' (2026-10-25)
 		FlickerWatch::OnFrame(Device, RenderTarget, Effects.SunFar->Settings.FlickerThreshold);
 	else FlickerWatch::Flags = 0;
 }

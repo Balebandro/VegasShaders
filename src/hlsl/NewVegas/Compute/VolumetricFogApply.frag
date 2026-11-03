@@ -1,38 +1,51 @@
-// VolumetricFog's full-resolution passes as one Vulkan pass (needs NVR DXVK; effects/VolumetricFog.cpp ExtApplyPass), push.mode:
-// 0 the Reconstruct of DedicatedFog, 1 of CompositeFog, 2 of CompositeFogInterior (Effects/VolumetricFog.fx.hlsl ReconstructPS),
-// 3 ApplyShadowAO (ShadowAOPS), 4 the full-resolution techniques VolumetricFog / VolumetricFogLegacy / VolumetricFogClassic (FullPS).
-// Variants: Compute/variants.txt (m l c p).
+// VolumetricFog's full-resolution passes as one Vulkan pass shader (needs NVR DXVK), line for line from Effects/VolumetricFog.fx.hlsl;
+// push mode picks the pixel shader: 0 DedicatedFogCombine, 1 DedicatedFogComposite, 2 DedicatedFogCompositeInterior (the second pass
+// of DedicatedFog, CompositeFog and CompositeFogInterior, and of their Legacy and Classic forms), 3 ShadowAOApply (technique
+// ApplyShadowAO), 4 VolumetricFog (the full-resolution techniques: the unnamed one, VolumetricFogLegacy, VolumetricFogClassic).
+// effects/VolumetricFog.cpp ExtDedicated, ExtShadowAO, ExtRender.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
+#include "Common.glsl"
 #define FOG_APPLY
 #include "VolumetricFog.glsl"
 
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec4 src = LINEAR_LOD(t_scene, uv);
-    int mode = V_MODE;
-    if (mode == 3) {
-        float alpha = src.a;
-        vec3 c = CompositeScene(uv, src.rgb, COMP_EXTERIOR, alpha);
-        o_color = vec4(c, alpha);
+    bool legacy = FOG_LEGACY_ON, classic = FOG_CLASSIC_ON;
+    if (FOG_MODE_IS(4u)) {
+        // VolumetricFog
+        vec4 color = linearize(LINEAR_LOD(t_scene, uv));
+        vec3 fogMul, fogAdd;
+        float nightAmount;
+        FogTerms(uv, fogMul, fogAdd, nightAmount, legacy, false, classic);
+        vec4 finalColor = max(vec4(color.rgb * fogMul + fogAdd, mix(color.a, 1.0, nightAmount)), vec4(0.0));
+        o_color = delinearize(finalColor);
         return;
     }
-    if (mode == 4) {
-        float dN = POINT_LOD(t_depth, uv).x;
-        vec3 mulV, addV;
-        FogTerms(uv, dN, V_LOOK, false, mulV, addV);
-        vec3 linC = linearize(src.rgb) * mulV + addV;
-        o_color = vec4(delinearize(max(linC, vec3(0.0))), mix(src.a, 1.0, NightShare(false)));
-        return;
+    vec3 color;
+    if (FOG_MODE_IS(2u)) {
+        // DedicatedFogCompositeInterior
+        color = InteriorStoreRound(ApplyInteriorShadowDepth(uv, LINEAR_LOD(t_scene, uv), LINEAR_LOD(t_pointShadow, uv).r, readDepthLod(uv)).rgb);
+        color = pows(color, 2.2);
+        if (pc.compositeFlags.y > 0.5) color = CompositeAO(color, uv);
+        color = pows(color, 1.0 / 2.2);
+        color = FogApply(color, uv, legacy, true, classic);
     }
-    float alpha = src.a;
-    vec3 stored = src.rgb;
-    if (mode != COMP_NONE) stored = CompositeScene(uv, stored, mode, alpha);
-    float dP = POINT_LOD(t_depth, uv).x;
-    vec3 mulV, addV;
-    UpsampleFog(uv, floor(gl_FragCoord.xy), dP, V_LOOK, mode == COMP_INTERIOR, mulV, addV);
-    vec3 linC = linearize(stored) * mulV + addV;
-    if (pc.gridFlags.y > 0.5) linC = LightAirComposite(uv, dP, linC);
-    o_color = vec4(delinearize(max(linC, vec3(0.0))), mix(alpha, 1.0, NightShare(mode == COMP_INTERIOR)));
+    else if (FOG_MODE_IS(0u)) {
+        // DedicatedFogCombine
+        color = FogApply(LINEAR_LOD(t_scene, uv).rgb, uv, legacy, false, classic);
+    }
+    else {
+        // DedicatedFogComposite (1), ShadowAOApply (3)
+        color = LINEAR_LOD(t_scene, uv).rgb;
+        color = pows(color, 2.2);
+        if (pc.compositeFlags.x > 0.5) color = CompositeSunShadow(color, uv);
+        if (pc.compositeFlags.y > 0.5) color = CompositeAO(color, uv);
+        color = pows(color, 1.0 / 2.2);
+        if (FOG_MODE_IS(3u)) { o_color = vec4(color, 1.0); return; }
+        color = FogApply(color, uv, legacy, false, classic);
+    }
+    if (pc.gridFlags.y > 0.5) color = FogGridLight(color, uv);	// UNOFFICIAL froxel grid
+    o_color = vec4(color, 1.0);
 }

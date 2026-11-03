@@ -19,8 +19,17 @@
 //   Image = "dunes.png"            # optional background picture, next to the file (png, jpg, dds, bmp)
 //   ImageOpacity = 0.25            # how strongly it shows (0-1)
 //   ImageFit = "cover"             # cover (fill, crop the overflow), contain (whole picture, bars) or stretch
+//   Heading = "240,200,120"        # optional: titles and group headings (missing = the accent, a little towards the text)
+//   Border = "60,60,60"            # optional: window and table borders, separators (missing = mixed from background and text)
+//   Slider = "217,164,65"          # optional: slider handles (missing = the accent)
+//   Selection = "60,50,30"         # optional: the selected or hovered entry's bar (missing = the panel tinted by the accent)
 //
-// Every ImGui colour is mixed from those five, so the menu stays readable whatever the colours.
+// Every other ImGui colour is mixed from those, so the menu stays readable whatever the colours.
+//
+// On top of the picked skin, [Main.Menu.Style] Custom<Part> replaces one part by hand: CustomBackground ... CustomSelection as
+// "R,G,B" (empty = the skin's), CustomRounding (-1 = the skin's), CustomOpacity (0 = the skin's), CustomImage (a picture in the
+// Skins folder or a full path, "none" = no picture, empty = the skin's), CustomImageOpacity (-1 = the skin's) and CustomImageFit
+// (empty = the skin's). Export writes the result (skin plus own parts) as a new skin file.
 
 namespace MenuSkin {
 namespace {
@@ -28,6 +37,7 @@ namespace {
 		std::string name, file, image, fit = "cover";
 		ImVec4 background, panel, field, accent, text;
 		float rounding = 6.0f, opacity = 0.97f, imageOpacity = 0.25f;
+		ImVec4 heading, border, slider, selection;	// optional: alpha 0 = mixed from the five above (HeadingOf etc.)
 	};
 
 	std::string SkinDir() { return std::string(Paths::DataRoot()) + "Skins\\"; }	// Data\VegasShaders\Skins\ (or the old Data\NVR\Skins\)
@@ -35,24 +45,87 @@ namespace {
 
 	std::vector<Skin> Skins;
 	int Current = 0;
+	Skin Active;						// Skins[Current] with the Custom<Part> settings on top: what is drawn
 	IDirect3DTexture9* Picture = nullptr;
+	std::string PicturePath;			// the file Picture was loaded from
 	ImVec2 PictureSize;
+	UInt32 SeenRevision = 0xFFFFFFFFu;	// SettingManager::SettingsRevision the saved choice was last read at
+	std::string SeenCustom;				// the Custom<Part> values Active was built with
 
 	ImVec4 Rgb(int r, int g, int b, float a = 1.0f) { return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a); }
 	ImVec4 Mix(const ImVec4& a, const ImVec4& b, float t) { return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t); }
 	ImVec4 Alpha(ImVec4 c, float a) { c.w = a; return c; }
 
+	bool Set(const ImVec4& c) { return c.w > 0.0f; }
+
 	void BuiltIns() {
 		Skins.clear();
+		const ImVec4 mixed;	// an optional part left to HeadingOf etc.
 		// Default: charcoal with a muted amber, the desert at dusk rather than a neon sign.
 		Skins.push_back({ "Default", "", "", "cover", Rgb(22, 23, 26), Rgb(27, 29, 33), Rgb(37, 40, 46), Rgb(214, 162, 72), Rgb(228, 225, 218), 6.0f, 0.97f });
 		Skins.push_back({ "Pip-Boy", "", "", "cover", Rgb(6, 16, 9), Rgb(9, 22, 12), Rgb(14, 34, 19), Rgb(88, 230, 128), Rgb(170, 245, 190), 2.0f, 0.96f });
 		Skins.push_back({ "Vault-Tec", "", "", "cover", Rgb(14, 26, 46), Rgb(18, 33, 58), Rgb(27, 46, 78), Rgb(242, 194, 48), Rgb(232, 238, 248), 4.0f, 0.97f });
+		// Amber Terminal: an old amber phosphor screen, square corners.
+		Skins.push_back({ "Amber Terminal", "", "", "cover", Rgb(14, 10, 4), Rgb(20, 14, 6), Rgb(33, 24, 10), Rgb(255, 176, 40), Rgb(255, 206, 128), 0.0f, 0.97f,
+			0.25f, Rgb(255, 190, 70), Rgb(92, 64, 22) });
+		// NCR: dusty tan and brown with the flag's red, gold headings.
+		Skins.push_back({ "NCR", "", "", "cover", Rgb(38, 33, 25), Rgb(46, 40, 30), Rgb(61, 53, 40), Rgb(200, 78, 56), Rgb(238, 228, 206), 3.0f, 0.97f,
+			0.25f, Rgb(222, 186, 118) });
+		// Legion: near-black red with a strong red, bronze headings.
+		Skins.push_back({ "Legion", "", "", "cover", Rgb(22, 9, 9), Rgb(30, 12, 12), Rgb(48, 20, 19), Rgb(204, 44, 38), Rgb(238, 222, 206), 1.0f, 0.97f,
+			0.25f, Rgb(214, 168, 88), mixed, mixed, Rgb(78, 24, 22) });
+		// Brotherhood: brushed steel, steel blue, gold headings.
+		Skins.push_back({ "Brotherhood", "", "", "cover", Rgb(26, 28, 31), Rgb(32, 35, 39), Rgb(46, 50, 56), Rgb(124, 164, 212), Rgb(220, 224, 230), 2.0f, 0.97f,
+			0.25f, Rgb(212, 180, 108) });
+		// Strip Neon: a casino sign at night, pink with cyan headings and handles.
+		Skins.push_back({ "Strip Neon", "", "", "cover", Rgb(16, 10, 24), Rgb(22, 13, 32), Rgb(35, 21, 50), Rgb(255, 72, 172), Rgb(238, 230, 255), 8.0f, 0.96f,
+			0.25f, Rgb(90, 222, 255), mixed, Rgb(90, 222, 255) });
+		// Midnight: plain dark blue-grey with a soft blue, no theme.
+		Skins.push_back({ "Midnight", "", "", "cover", Rgb(16, 19, 26), Rgb(20, 24, 32), Rgb(31, 36, 47), Rgb(112, 152, 255), Rgb(222, 228, 240), 6.0f, 0.97f });
+		// High Contrast: black, white text, yellow accent, solid borders, fully opaque.
+		Skins.push_back({ "High Contrast", "", "", "cover", Rgb(0, 0, 0), Rgb(0, 0, 0), Rgb(30, 30, 30), Rgb(255, 222, 0), Rgb(255, 255, 255), 0.0f, 1.0f,
+			0.25f, Rgb(255, 222, 0), Rgb(200, 200, 200), mixed, Rgb(96, 80, 0) });
+		// Light: warm paper with dark text and a dark amber accent.
+		Skins.push_back({ "Light", "", "", "cover", Rgb(234, 231, 224), Rgb(244, 242, 236), Rgb(218, 214, 204), Rgb(170, 94, 20), Rgb(32, 30, 26), 6.0f, 0.98f,
+			0.25f, Rgb(140, 72, 12), Rgb(184, 178, 166), mixed, Rgb(232, 206, 168) });
+	}
+
+	// The optional parts as drawn: the skin's own, or mixed from the five base colours.
+	ImVec4 HeadingOf(const Skin& s) { return Set(s.heading) ? s.heading : Mix(s.accent, s.text, 0.25f); }
+	ImVec4 BorderOf(const Skin& s) { return Set(s.border) ? s.border : Mix(s.background, s.text, 0.12f); }
+	ImVec4 SliderOf(const Skin& s) { return Set(s.slider) ? s.slider : Mix(s.accent, s.field, 0.15f); }
+	ImVec4 SelectionOf(const Skin& s) { return Set(s.selection) ? s.selection : Mix(s.panel, s.accent, 0.14f); }
+	ImVec4 BackgroundOf(const Skin& s) { return s.background; }
+	ImVec4 PanelOf(const Skin& s) { return s.panel; }
+	ImVec4 FieldOf(const Skin& s) { return s.field; }
+	ImVec4 AccentOf(const Skin& s) { return s.accent; }
+	ImVec4 TextOf(const Skin& s) { return s.text; }
+
+	// The colour parts a [Main.Menu.Style] Custom<Part> setting can replace, in menu order.
+	struct Part { const char* key; const char* label; ImVec4 Skin::* member; ImVec4 (*resolve)(const Skin&); const char* help; };
+	const Part Parts[] = {
+		{ "CustomBackground", "Background", &Skin::background, BackgroundOf, "The window behind everything." },
+		{ "CustomPanel", "Panel", &Skin::panel, PanelOf, "The sidebar, the settings list and the menu bar." },
+		{ "CustomField", "Field", &Skin::field, FieldOf, "Sliders, boxes and buttons." },
+		{ "CustomAccent", "Accent", &Skin::accent, AccentOf, "Ticks, hovered buttons, tabs, the selected entry's tint." },
+		{ "CustomText", "Text", &Skin::text, TextOf, "All text (greyed text is mixed from it and the background)." },
+		{ "CustomHeading", "Heading", &Skin::heading, HeadingOf, "Titles, group headings and links." },
+		{ "CustomBorder", "Border", &Skin::border, BorderOf, "Window and table borders, separators." },
+		{ "CustomSlider", "Slider", &Skin::slider, SliderOf, "Slider handles." },
+		{ "CustomSelection", "Selection", &Skin::selection, SelectionOf, "The bar behind the selected or hovered entry." },
+	};
+	const char* const OtherKeys[] = { "CustomRounding", "CustomOpacity", "CustomImage", "CustomImageOpacity", "CustomImageFit" };
+
+	std::string ColourText(const ImVec4& v) {
+		char b[32];
+		sprintf_s(b, "%d,%d,%d", (int)(v.x * 255 + 0.5f), (int)(v.y * 255 + 0.5f), (int)(v.z * 255 + 0.5f));
+		return b;
 	}
 
 	bool ParseColour(const std::string& s, ImVec4& out) {
 		int r, g, b;
-		if (sscanf_s(s.c_str(), "%d , %d , %d", &r, &g, &b) != 3) return false;
+		const size_t start = s.find_first_not_of("\"' ");
+		if (start == std::string::npos || sscanf_s(s.c_str() + start, "%d , %d , %d", &r, &g, &b) != 3) return false;
 		out = Rgb(ImClamp(r, 0, 255), ImClamp(g, 0, 255), ImClamp(b, 0, 255));
 		return true;
 	}
@@ -82,6 +155,11 @@ namespace {
 				ParseColour(Str(doc, "Field", ""), s.field);
 				ParseColour(Str(doc, "Accent", ""), s.accent);
 				ParseColour(Str(doc, "Text", ""), s.text);
+				s.heading = s.border = s.slider = s.selection = ImVec4();	// a file's optional parts are its own, never Default's
+				ParseColour(Str(doc, "Heading", ""), s.heading);
+				ParseColour(Str(doc, "Border", ""), s.border);
+				ParseColour(Str(doc, "Slider", ""), s.slider);
+				ParseColour(Str(doc, "Selection", ""), s.selection);
 				s.rounding = ImClamp(Num(doc, "Rounding", s.rounding), 0.0f, 16.0f);
 				s.opacity = ImClamp(Num(doc, "Opacity", s.opacity), 0.5f, 1.0f);
 				s.image = Str(doc, "Image", "");
@@ -98,9 +176,12 @@ namespace {
 	}
 
 	void LoadPicture(const Skin& s) {
+		const std::string path = s.image.empty() || s.file.empty() ? std::string()
+			: (std::filesystem::path(s.file).parent_path() / s.image).string();	// a full path in Image replaces the folder
+		if (path == PicturePath && (Picture || path.empty())) return;	// already loaded, or none either way
 		if (Picture) { Picture->Release(); Picture = nullptr; }
-		if (s.image.empty() || s.file.empty()) return;
-		const std::string path = (std::filesystem::path(s.file).parent_path() / s.image).string();
+		PicturePath = path;
+		if (path.empty()) return;
 		D3DXIMAGE_INFO info = {};
 		if (FAILED(D3DXCreateTextureFromFileExA(TheRenderManager->device, path.c_str(), D3DX_DEFAULT_NONPOW2, D3DX_DEFAULT_NONPOW2, 1, 0,
 				D3DFMT_UNKNOWN, D3DPOOL_MANAGED, D3DX_DEFAULT, D3DX_DEFAULT, 0, &info, nullptr, &Picture))) {
@@ -143,6 +224,7 @@ namespace {
 		style.ScrollbarRounding = r;
 
 		const ImVec4 bg = s.background, panel = s.panel, field = s.field, acc = s.accent, text = s.text;
+		const ImVec4 border = BorderOf(s), slider = SliderOf(s), sel = SelectionOf(s);
 		const ImVec4 black(0.0f, 0.0f, 0.0f, 1.0f), white(1.0f, 1.0f, 1.0f, 1.0f);
 		const float childAlpha = Picture ? 0.55f : 1.0f;	// a background picture shows through the panels
 		ImVec4* c = style.Colors;
@@ -151,7 +233,7 @@ namespace {
 		c[ImGuiCol_WindowBg] = Alpha(bg, s.opacity);
 		c[ImGuiCol_ChildBg] = Alpha(panel, childAlpha);
 		c[ImGuiCol_PopupBg] = Alpha(Mix(bg, white, 0.03f), 0.98f);
-		c[ImGuiCol_Border] = Alpha(Mix(bg, text, 0.12f), 1.0f);
+		c[ImGuiCol_Border] = Alpha(border, 1.0f);
 		c[ImGuiCol_BorderShadow] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
 		c[ImGuiCol_FrameBg] = field;
 		c[ImGuiCol_FrameBgHovered] = Mix(field, acc, 0.15f);
@@ -165,15 +247,15 @@ namespace {
 		c[ImGuiCol_ScrollbarGrabHovered] = Mix(field, text, 0.25f);
 		c[ImGuiCol_ScrollbarGrabActive] = Mix(field, acc, 0.6f);
 		c[ImGuiCol_CheckMark] = acc;
-		c[ImGuiCol_SliderGrab] = Mix(acc, field, 0.15f);
-		c[ImGuiCol_SliderGrabActive] = Mix(acc, white, 0.2f);
+		c[ImGuiCol_SliderGrab] = slider;
+		c[ImGuiCol_SliderGrabActive] = Mix(slider, white, 0.2f);
 		c[ImGuiCol_Button] = Mix(field, text, 0.04f);
 		c[ImGuiCol_ButtonHovered] = Mix(field, acc, 0.3f);
 		c[ImGuiCol_ButtonActive] = Mix(field, acc, 0.5f);
-		c[ImGuiCol_Header] = Mix(panel, acc, 0.14f);
-		c[ImGuiCol_HeaderHovered] = Mix(panel, acc, 0.24f);
-		c[ImGuiCol_HeaderActive] = Mix(panel, acc, 0.34f);
-		c[ImGuiCol_Separator] = Mix(bg, text, 0.12f);
+		c[ImGuiCol_Header] = sel;
+		c[ImGuiCol_HeaderHovered] = Mix(sel, acc, 0.12f);
+		c[ImGuiCol_HeaderActive] = Mix(sel, acc, 0.24f);
+		c[ImGuiCol_Separator] = border;
 		c[ImGuiCol_SeparatorHovered] = Mix(bg, acc, 0.6f);
 		c[ImGuiCol_SeparatorActive] = acc;
 		c[ImGuiCol_ResizeGrip] = Alpha(acc, 0.15f);
@@ -191,8 +273,8 @@ namespace {
 		c[ImGuiCol_PlotHistogram] = acc;
 		c[ImGuiCol_PlotHistogramHovered] = Mix(acc, white, 0.2f);
 		c[ImGuiCol_TableHeaderBg] = Mix(panel, field, 0.5f);
-		c[ImGuiCol_TableBorderStrong] = Mix(bg, text, 0.15f);
-		c[ImGuiCol_TableBorderLight] = Mix(bg, text, 0.08f);
+		c[ImGuiCol_TableBorderStrong] = Mix(border, text, 0.04f);
+		c[ImGuiCol_TableBorderLight] = Mix(border, bg, 0.35f);
 		c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
 		c[ImGuiCol_TableRowBgAlt] = Alpha(text, 0.03f);
 		c[ImGuiCol_TextSelectedBg] = Alpha(acc, 0.35f);
@@ -203,15 +285,139 @@ namespace {
 		c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.45f);
 	}
 
+	// Every Custom<Part> value as one string: a change in any of them rebuilds Active.
+	std::string CustomValues() {
+		std::string all;
+		char v[80];
+		for (const Part& p : Parts) { all += TheSettingManager->GetSettingS(Section, p.key, v); all += '|'; }
+		for (const char* k : OtherKeys) { all += TheSettingManager->GetSettingS(Section, k, v); all += '|'; }
+		return all;
+	}
+
+	// Active = the picked skin with the Custom<Part> settings on top, then the picture and the ImGui style from it.
+	void Rebuild() {
+		Active = Skins[Current];
+		char v[80];
+		for (const Part& p : Parts) {
+			ImVec4 colour;
+			if (ParseColour(TheSettingManager->GetSettingS(Section, p.key, v), colour)) Active.*p.member = colour;
+		}
+		const float rounding = TheSettingManager->GetSettingF(Section, "CustomRounding");
+		if (rounding >= 0.0f) Active.rounding = ImClamp(rounding, 0.0f, 16.0f);
+		const float opacity = TheSettingManager->GetSettingF(Section, "CustomOpacity");
+		if (opacity > 0.0f) Active.opacity = ImClamp(opacity, 0.5f, 1.0f);
+		const std::string image = TheSettingManager->GetSettingS(Section, "CustomImage", v);
+		if (_stricmp(image.c_str(), "none") == 0) Active.image.clear();
+		else if (!image.empty()) { Active.image = image; Active.file = SkinDir() + "(own picture)"; }	// relative to the Skins folder
+		const float imageOpacity = TheSettingManager->GetSettingF(Section, "CustomImageOpacity");
+		if (imageOpacity >= 0.0f) Active.imageOpacity = ImClamp(imageOpacity, 0.0f, 1.0f);
+		const std::string fit = TheSettingManager->GetSettingS(Section, "CustomImageFit", v);
+		if (!fit.empty()) Active.fit = fit;
+		SeenCustom = CustomValues();
+		LoadPicture(Active);
+		ApplySkin(Active);
+	}
+
 	void Select(int index) {
 		Current = ImClamp(index, 0, (int)Skins.size() - 1);
-		LoadPicture(Skins[Current]);
-		ApplySkin(Skins[Current]);
+		Rebuild();
+	}
+
+	void Store(const char* key, const std::string& value) {
+		TheSettingManager->SetSettingS(Section, key, value.c_str());
+		TheSettingManager->LoadSettings();
+		Rebuild();
+	}
+	void StoreNumber(const char* key, float value) {
+		TheSettingManager->SetSetting(Section, key, value);
+		TheSettingManager->LoadSettings();
+		Rebuild();
+	}
+
+	// One colour part: a tick (own colour on/off) and a colour box. While off, the box shows the skin's colour greyed and
+	// changing it turns the own colour on. label follows the box ("" on the settings page, whose row has its own name).
+	bool PartControl(const Part& p, float width, const char* label) {
+		char v[80];
+		ImVec4 own;
+		const bool isOwn = ParseColour(TheSettingManager->GetSettingS(Section, p.key, v), own);
+		const ImVec4 shown = isOwn ? own : p.resolve(Active);
+		ImGui::PushID(p.key);
+		bool tick = isOwn, hovered = false;
+		if (ImGui::Checkbox("##own", &tick)) Store(p.key, tick ? ColourText(shown) : std::string());
+		if (ImGui::IsItemHovered()) {
+			hovered = true;
+			ImGui::SetTooltip(isOwn ? "Your own colour: untick to use the skin's again." : "Tick for your own colour instead of the skin's.");
+		}
+		ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+		float rgb[3] = { shown.x, shown.y, shown.z };
+		ImGui::SetNextItemWidth(ImMax(width - ImGui::GetFrameHeight() - ImGui::GetStyle().ItemInnerSpacing.x, 1.0f));
+		const std::string id = std::string(label) + "##colour";
+		if (!isOwn) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.6f);
+		if (ImGui::ColorEdit3(id.c_str(), rgb, ImGuiColorEditFlags_Uint8 | ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_InputRGB))
+			Store(p.key, ColourText(ImVec4(rgb[0], rgb[1], rgb[2], 1.0f)));
+		if (!isOwn) ImGui::PopStyleVar();
+		if (ImGui::IsItemHovered()) {
+			hovered = true;
+			if (*label) ImGui::SetTooltip("%s", p.help);
+		}
+		ImGui::PopID();
+		return hovered;
+	}
+
+	// A number part: a tick (own value on/off) and a slider. Off = the skin's value (shown greyed); off is the value saved for
+	// "the skin's" (-1, or 0 for the opacity).
+	void NumberControl(const char* key, const char* label, float skinValue, float off, float lo, float hi, const char* format, const char* help) {
+		const float saved = TheSettingManager->GetSettingF(Section, key);
+		const bool isOwn = off < 0.0f ? saved >= 0.0f : saved > off;
+		ImGui::PushID(key);
+		bool tick = isOwn;
+		if (ImGui::Checkbox("##own", &tick)) StoreNumber(key, tick ? skinValue : off);
+		ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+		float value = isOwn ? ImClamp(saved, lo, hi) : skinValue;
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f);
+		if (!isOwn) ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.6f);
+		if (ImGui::SliderFloat(label, &value, lo, hi, format)) StoreNumber(key, value);
+		if (!isOwn) ImGui::PopStyleVar();
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help);
+		ImGui::PopID();
+	}
+
+	// View > Skin > Own colours: every part of the look, each on top of whichever skin is picked.
+	void DrawOwnColours() {
+		ImGui::TextDisabled("Ticked parts replace the skin's own, whichever skin is picked.");
+		const float width = ImGui::GetFontSize() * 12.0f;
+		for (const Part& p : Parts) PartControl(p, width, p.label);
+		ImGui::Separator();
+		const Skin& base = Skins[Current];
+		NumberControl("CustomRounding", "Corner rounding", base.rounding, -1.0f, 0.0f, 16.0f, "%.1f px", "Corner radius in pixels, 0 = square.");
+		NumberControl("CustomOpacity", "Window opacity", base.opacity, 0.0f, 0.5f, 1.0f, "%.2f", "How solid the window is (0.5-1).");
+		NumberControl("CustomImageOpacity", "Picture strength", base.imageOpacity, -1.0f, 0.0f, 1.0f, "%.2f",
+			"How strongly the background picture shows (a skin file's Image, or CustomImage on the Main.Menu.Style page).");
+		static const char* const fits[] = { "cover", "contain", "stretch" };
+		char v[80];
+		const std::string fit = TheSettingManager->GetSettingS(Section, "CustomImageFit", v);
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f + ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+		if (ImGui::BeginCombo("Picture fit", fit.empty() ? "the skin's" : fit.c_str())) {
+			if (ImGui::Selectable("the skin's", fit.empty())) Store("CustomImageFit", "");
+			for (const char* f : fits) if (ImGui::Selectable(f, fit == f)) Store("CustomImageFit", f);
+			ImGui::EndCombo();
+		}
+		ImGui::Separator();
+		if (ImGui::MenuItem("Use the skin's own for everything")) {
+			for (const Part& p : Parts) TheSettingManager->SetSettingS(Section, p.key, "");
+			TheSettingManager->SetSetting(Section, "CustomRounding", -1.0f);
+			TheSettingManager->SetSetting(Section, "CustomOpacity", 0.0f);
+			TheSettingManager->SetSettingS(Section, "CustomImage", "");
+			TheSettingManager->SetSetting(Section, "CustomImageOpacity", -1.0f);
+			TheSettingManager->SetSettingS(Section, "CustomImageFit", "");
+			TheSettingManager->LoadSettings();
+			Rebuild();
+		}
 	}
 
 	// The current skin as a file in the skin folder, to edit by hand. Returns the path ("" on failure).
 	std::string Export() {
-		const Skin& s = Skins[Current];
+		const Skin& s = Active;	// the picked skin with the own parts on top
 		std::error_code ec;
 		std::filesystem::create_directories(SkinDir(), ec);
 		std::string base = s.name;
@@ -220,7 +426,15 @@ namespace {
 		for (int n = 2; std::filesystem::exists(path); n++) path = SkinDir() + base + " (copy " + std::to_string(n) + ").toml";
 		FILE* f = nullptr;
 		if (fopen_s(&f, path.c_str(), "w") || !f) return "";
-		auto col = [](const ImVec4& v) { char b[32]; sprintf_s(b, "\"%d,%d,%d\"", (int)(v.x * 255 + 0.5f), (int)(v.y * 255 + 0.5f), (int)(v.z * 255 + 0.5f)); return std::string(b); };
+		auto col = [](const ImVec4& v) { return "\"" + ColourText(v) + "\""; };
+		// The picture: its name when it is in the Skins folder, else its full path (forward slashes: TOML strings take no backslashes)
+		std::string image = s.image;
+		if (!image.empty() && !s.file.empty()) {
+			const std::filesystem::path full = std::filesystem::path(s.file).parent_path() / image;
+			const bool here = _stricmp(full.parent_path().string().c_str(), std::filesystem::path(SkinDir()).parent_path().string().c_str()) == 0;
+			image = here ? full.filename().string() : full.string();
+			std::replace(image.begin(), image.end(), '\\', '/');
+		}
 		fprintf(f, "# Menu skin: edit the values, then pick it from the Skin dropdown (it re-reads this folder when opened).\n");
 		fprintf(f, "Name = \"%s (copy)\"\n", s.name.c_str());
 		fprintf(f, "Background = %s     # the window, R,G,B 0-255\n", col(s.background).c_str());
@@ -228,9 +442,14 @@ namespace {
 		fprintf(f, "Field = %s          # sliders, boxes, buttons\n", col(s.field).c_str());
 		fprintf(f, "Accent = %s         # ticks, slider handles, the selected entry\n", col(s.accent).c_str());
 		fprintf(f, "Text = %s\n", col(s.text).c_str());
+		// The optional parts: commented out (with the mixed colour shown) when the look leaves them to the mix
+		fprintf(f, "%sHeading = %s        # titles and group headings (optional)\n", Set(s.heading) ? "" : "# ", col(HeadingOf(s)).c_str());
+		fprintf(f, "%sBorder = %s         # borders and separators (optional)\n", Set(s.border) ? "" : "# ", col(BorderOf(s)).c_str());
+		fprintf(f, "%sSlider = %s         # slider handles (optional)\n", Set(s.slider) ? "" : "# ", col(SliderOf(s)).c_str());
+		fprintf(f, "%sSelection = %s      # the selected entry's bar (optional)\n", Set(s.selection) ? "" : "# ", col(SelectionOf(s)).c_str());
 		fprintf(f, "Rounding = %.1f              # corner radius in pixels, 0 = square\n", s.rounding);
 		fprintf(f, "Opacity = %.2f              # the window's opacity, 0.5-1\n", s.opacity);
-		fprintf(f, "Image = \"%s\"                 # optional background picture in this folder (png, jpg, dds, bmp)\n", s.image.c_str());
+		fprintf(f, "Image = \"%s\"                 # optional background picture in this folder (png, jpg, dds, bmp)\n", image.c_str());
 		fprintf(f, "ImageOpacity = %.2f         # 0-1\n", s.imageOpacity);
 		fprintf(f, "ImageFit = \"%s\"           # cover, contain or stretch\n", s.fit.c_str());
 		fclose(f);
@@ -249,14 +468,20 @@ void Apply() {
 
 void DrawBackground() {
 	// The saved choice can change without the dropdown (a preset, the console's SetSettingS, a test shot list): follow it.
-	char saved[80] = {};
-	TheSettingManager->GetSettingS(Section, "Skin", saved);
-	if (saved[0] != '"' && !Skins.empty() && _stricmp(saved, Skins[Current].name.c_str()) != 0) {
-		if (std::none_of(Skins.begin(), Skins.end(), [&](const Skin& k) { return _stricmp(k.name.c_str(), saved) == 0; })) Scan();
-		for (int i = 0; i < (int)Skins.size(); i++) if (_stricmp(Skins[i].name.c_str(), saved) == 0) { Select(i); break; }
+	// Read again only when a setting changed (SettingsRevision); the own parts (Custom<Part>) are followed the same way.
+	if (SeenRevision != TheSettingManager->SettingsRevision && !Skins.empty()) {
+		SeenRevision = TheSettingManager->SettingsRevision;
+		char saved[80] = {};
+		TheSettingManager->GetSettingS(Section, "Skin", saved);
+		bool selected = false;
+		if (saved[0] != '"' && _stricmp(saved, Skins[Current].name.c_str()) != 0) {
+			if (std::none_of(Skins.begin(), Skins.end(), [&](const Skin& k) { return _stricmp(k.name.c_str(), saved) == 0; })) Scan();
+			for (int i = 0; i < (int)Skins.size(); i++) if (_stricmp(Skins[i].name.c_str(), saved) == 0) { Select(i); selected = true; break; }
+		}
+		if (!selected && CustomValues() != SeenCustom) Rebuild();
 	}
 	if (!Picture) return;
-	const Skin& s = Skins[Current];
+	const Skin& s = Active;
 	const ImVec2 wpos = ImGui::GetWindowPos(), wsize = ImGui::GetWindowSize();
 	ImVec2 uv0(0.0f, 0.0f), uv1(1.0f, 1.0f), pmin = wpos, pmax(wpos.x + wsize.x, wpos.y + wsize.y);
 	const float winAspect = wsize.x / ImMax(wsize.y, 1.0f), picAspect = PictureSize.x / ImMax(PictureSize.y, 1.0f);
@@ -276,7 +501,9 @@ void DrawPicker() {
 	static std::string exported;
 	ImGui::Text("Skin:");
 	ImGui::SameLine();
-	ImGui::SetNextItemWidth(ImGui::CalcTextSize("Vault-Tec").x + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 4.0f);
+	float longest = 0.0f;
+	for (const Skin& k : Skins) longest = ImMax(longest, ImGui::CalcTextSize(k.name.c_str()).x);
+	ImGui::SetNextItemWidth(longest + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 4.0f);
 	if (ImGui::BeginCombo("##skin", Skins.empty() ? "" : Skins[Current].name.c_str())) {
 		if (ImGui::IsWindowAppearing()) {	// pick up files added while the game runs
 			const std::string name = Skins[Current].name;
@@ -318,15 +545,31 @@ void DrawMenu() {
 		if (ImGui::IsItemHovered() && !Skins[i].file.empty()) ImGui::SetTooltip("%s", Skins[i].file.c_str());
 	}
 	ImGui::Separator();
+	if (ImGui::BeginMenu("Own colours")) {
+		DrawOwnColours();
+		ImGui::EndMenu();
+	}
 	if (ImGui::MenuItem("Export this skin...")) exported = Export();
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip(exported.empty() ? "Writes this skin to %s as a file to edit: your own colours and a background picture."
+		ImGui::SetTooltip(exported.empty() ? "Writes this look (the skin and your own colours) to %s as a file to edit: colours and a background picture."
 			: "Written to %s", exported.empty() ? SkinDir().c_str() : exported.c_str());
 }
 
 ImVec4 Heading(float towardText) {
 	if (Skins.empty()) return ImVec4(1.0f, 0.85f, 0.45f, 1.0f);
-	return Mix(Skins[Current].accent, Skins[Current].text, towardText);
+	if (!Set(Active.heading)) return Mix(Active.accent, Active.text, towardText);	// no heading colour: the accent, as before
+	return Mix(Active.heading, Active.text, towardText * 0.5f);
+}
+
+bool DrawColourSetting(const char* section, const char* key, const char* value, float width, bool& hovered) {
+	(void)value;	// PartControl reads the saved value itself
+	if (_stricmp(section, Section) != 0 || Skins.empty()) return false;
+	for (const Part& p : Parts) {
+		if (_stricmp(key, p.key) != 0) continue;
+		hovered = PartControl(p, width, "");
+		return true;
+	}
+	return false;
 }
 
 void Release() {

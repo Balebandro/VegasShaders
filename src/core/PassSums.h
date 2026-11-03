@@ -16,6 +16,7 @@
 // their anti-aliasing (exact inside surfaces; at an object's edge the difference of the pixel's average is used).
 #include <d3dx9.h>
 #include "GpuProfiler.h"
+#include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects
 #include "LinearScene.h"	// UNOFFICIAL 2026-10-28: with LinearScene live the sums are exact already (every mode off)
 
 namespace PassSums {
@@ -45,7 +46,7 @@ namespace PassSums {
 	inline IDirect3DTexture9* CopyTex = nullptr;  inline IDirect3DSurface9* Copy = nullptr;
 	inline IDirect3DPixelShader9* ComposePS = nullptr;
 	inline D3DSURFACE_DESC Made = {};
-	inline bool Failed = false;
+	inline FailOnce::Latch Failed{ "Exact pass sums" };	// UNOFFICIAL 2026-11-02 RetryFailedEffects (was a bool until restart)
 	inline UInt32 Composes = 0, Frames = 0;
 	inline int LogFrames = 0;						// frames left whose runs are logged (set when the mode changes)
 	inline UInt32 RunPasses = 0;	inline UInt16 RunFirst = 0, RunLast = 0;
@@ -167,7 +168,7 @@ namespace PassSums {
 		if (FAILED(device->GetRenderTarget(0, &target)) || !target) return;
 		D3DSURFACE_DESC d = {};
 		target->GetDesc(&d);
-		if (!Make(device, d)) { target->Release(); Failed = true; return; }
+		if (!Make(device, d)) { target->Release(); Failed.Set("its target could not be made"); return; }
 		static GpuTimer timer("  Pass sums (clear)");
 		GpuProfileScope gpu(timer, device);
 		Scene = target;	// keeps the reference until End
@@ -243,7 +244,7 @@ namespace PassSums {
 			copied = SUCCEEDED(device->StretchRect(target, NULL, IncSurf, NULL, D3DTEXF_NONE));
 		}
 		target->Release();
-		if (!copied) { IncFailed++; if (!made) Failed = true; return; }
+		if (!copied) { IncFailed++; if (!made) Failed.Set("its copy target could not be made"); return; }
 		BindRunStart();
 		Redirect = D3DXVECTOR4(0.0f, 1.0f, 1.0f / (float)d.Width, 1.0f / (float)d.Height);
 		device->SetPixelShaderConstantF(210, (const float*)&Redirect, 1);	// the bound shader too; the next binds upload it themselves
@@ -299,7 +300,7 @@ namespace PassSums {
 	// Render.cpp, once a frame (image space), and before every world pass.
 	inline void BeginFrame(int mode) {
 		if (mode != LastMode) { LastMode = mode; LogFrames = 3; } else if (LogFrames > 0) LogFrames--;
-		Mode = Failed ? 0 : mode;
+		Mode = Failed.Blocked() ? 0 : mode;
 		Runs[0] = Runs[1] = Runs[2] = 0;
 		const bool foldIn = ((Mode & Highlights) && !(Mode & kHighlightIncrements)) || ((Mode & Lamps) && !(Mode & kIncrements));
 		if (foldIn && ++Frames >= 600) { Logger::Log("ExactPassSums (mode %d): %.2f fold-ins per frame", Mode, Composes / (float)Frames); Frames = Composes = 0; }

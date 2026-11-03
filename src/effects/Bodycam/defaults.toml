@@ -1,4 +1,5 @@
 [_Shaders.Bodycam.Main]
+FreeViewRestore = true               # UNOFFICIAL BUG FIX (2026-11-02), live: WideView remembers your field of view only while you are not aiming or in a menu, so switching Bodycam off gives back your own FOV. false = as before (switched on while aiming, the zoomed FOV stayed after switching it off).
 Fisheye = 0.45                         # UNOFFICIAL [0-1]: how much the wide lens bends straight lines outward towards the edges. Main = by day; Night and Interiors have their own value of every setting here (all but TextSize).
 FitEdges = 0.9                         # [0-1] Zooms in so the bent picture still fills the screen (1: no black corners from the bend; 0: none).
 Border = 0.95                          # [0-1] A soft black oval round the picture, like looking through the camera's frame. 0: none.

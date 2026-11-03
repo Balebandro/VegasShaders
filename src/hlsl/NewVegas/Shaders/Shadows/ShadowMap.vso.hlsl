@@ -134,8 +134,8 @@ VtxVaryings main(VtxAttrs va) {
 			const float3 tmp_o5 = mul(float3x4(Bones[0 + ofs.x], Bones[1 + ofs.x], Bones[2 + ofs.x]), ow_v);
 			const float3 tmp_o4 = mul(float3x4(Bones[0 + ofs.y], Bones[1 + ofs.y], Bones[2 + ofs.y]), ow_v);
 			cloth_out = ((1 - weight(va.f_blendweight.xyz)) * tmp_o8) + (va.f_blendweight.z * tmp_o6) + (va.f_blendweight.x * tmp_o5) + (tmp_o4 * va.f_blendweight.y);
-			const float4 leg_l = ClothLegBind(va.f_position.xyz, cloth_limb[0], cloth_limb[1], cloth_limb[2]);
-			const float4 leg_r = ClothLegBind(va.f_position.xyz, cloth_limb[4], cloth_limb[5], cloth_limb[6]);
+			const float4 leg_l = ClothLegBind(va.f_position.xyz, ClothLimb[0], ClothLimb[1], ClothLimb[2]);
+			const float4 leg_r = ClothLegBind(va.f_position.xyz, ClothLimb[4], ClothLimb[5], ClothLimb[6]);
 			cloth_leg_l = float4(ClothBonesVector(ofs, va.f_blendweight.xyz, leg_l.xyz), leg_l.w);
 			cloth_leg_r = float4(ClothBonesVector(ofs, va.f_blendweight.xyz, leg_r.xyz), leg_r.w);
 			cloth_up = ClothBonesVector(ofs, va.f_blendweight.xyz, float3(0.0f, 0.0f, 1.0f));

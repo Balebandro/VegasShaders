@@ -1,4 +1,5 @@
-#include <mutex>	// UNOFFICIAL 2026-10-30 SettingsCache
+#include <mutex>
+#include <unordered_set>	// UNOFFICIAL 2026-10-30 SettingsCache
 #include "GpuDebug.h"	// UNOFFICIAL 2026-10-26: GpuDebugLabels / RenderDoc capture key ([Main.Develop.Main])
 
 // A settings file in <game>\Data\NVSE\Plugins (the game folder is read once, Paths::GameRoot: common-dialog calls can change the
@@ -103,6 +104,10 @@ void SettingManager::Configuration::Init() {
 
 	try {
 		Logger::Log("Loading settings from file %s", userFile);
+		if (Paths::OldIsNewer(Paths::PluginsDir(), Paths::File::UserSettings)) {	// 2026-11-02: a New Vegas Reloaded preset copied in later
+			Logger::Log("UNOFFICIAL settings: %s is newer than %s (a preset made for New Vegas Reloaded?): it is read; the next Save writes it as %s", Paths::OldName(Paths::File::UserSettings), Paths::NewName(Paths::File::UserSettings), Paths::NewName(Paths::File::UserSettings));
+			Paths::AddOldFilesNotice("Settings read from %s (newer than %s: a New Vegas Reloaded preset?). Save keeps them as %s.", Paths::OldName(Paths::File::UserSettings), Paths::NewName(Paths::File::UserSettings), Paths::NewName(Paths::File::UserSettings));
+		}
 		TomlConfig = toml::parse<toml::discard_comments, std::map>(std::string_view(userFile)).as_table();
 	}
 	catch (const std::exception& failure) {
@@ -1365,11 +1370,20 @@ void SettingManager::SetSetting(const char* section, const char* key, float valu
 /*
 * Sets a setting from text, whatever its type.
 */
+// 2026-11-02: a setting this build does not have, set by a script (NVRSetSetting / NVRSetSettingS from another mod such as
+// Cartographer, or a preset made for New Vegas Reloaded) or the console. The node was used unfilled before (its Section and Key
+// never written: garbage text into fixed buffers, a possible crash), as in the original mod. Now ignored, logged once per key.
+static void IgnoreUnknownSetting(const char* section, const char* key, const char* how) {
+	static std::unordered_set<std::string> logged;
+	if (logged.size() < 500 && logged.insert(std::string(section) + "." + key).second)
+		Logger::Log("UNOFFICIAL settings: %s %s.%s: not a setting of this build, ignored (a script or preset made for another version?)", how, section, key);
+}
+
 void SettingManager::SetSettingS(const char* section, const char* key, const char* value) {
 
 	using Kind = Configuration::NodeType;
 	SettingNode node;
-	Config.FillNode(&node, section, key);
+	if (!Config.FillNode(&node, section, key)) { IgnoreUnknownSetting(section, key, "SetSettingS"); return; }
 	// bounded copy (Value is 80 bytes; a preset or console string of 80+ characters overflowed it). The whole text of a String
 	// setting goes to LongValue, which is what the config file and the String readers use.
 	PutNodeText(node.Value, value);
@@ -1394,7 +1408,7 @@ void SettingManager::SetSettingF(const char* section, const char* key, float val
 
 	using Kind = Configuration::NodeType;
 	SettingNode node;
-	Config.FillNode(&node, section, key); // the type comes from the defaults
+	if (!Config.FillNode(&node, section, key)) { IgnoreUnknownSetting(section, key, "SetSetting"); return; }	// the type comes from the defaults
 
 	// the number goes into the node's own type: its typed field and its text together
 	if (node.Type == Kind::Boolean) {

@@ -458,7 +458,10 @@ void BodycamEffect::ApplyWideView() {
 		if (fabsf(WorldSceneGraph->cameraFOV - fov) > 0.01f) WorldSceneGraph->UpdateParticleShaderFoV(fov);
 	};
 	if (wide > 0.0f) {
-		if (!widened) { before = current = Player->worldFoV; widened = true; }
+		// UNOFFICIAL 2026-11-02 (hidden-state review): the FOV to go back to is taken only while the view is free. Taken while aiming
+		// (the game's zoomed FOV) it stuck after Bodycam was switched off. [Shaders.Bodycam.Main] FreeViewRestore false = as before.
+		if (!widened && (free || !TheSettingManager->GetSettingI("Shaders.Bodycam.Main", "FreeViewRestore"))) { before = current = Player->worldFoV; widened = true; }
+		if (!widened) return;	// switched on while aiming / in a menu: start once the view is free
 		if (!free) { current = Player->worldFoV; return; }
 		current = fabsf(wide - current) < 0.05f ? wide : current + (wide - current) * (std::min)(1.0f, dt * 6.0f);
 		set(current);

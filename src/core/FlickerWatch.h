@@ -27,6 +27,18 @@ namespace FlickerWatch {
 	};
 	inline float Hour = 0.0f, SunZ = 0.0f;	// (2026-10-25) set with Flags: the game hour and the shadows' sun height this frame
 	inline unsigned Flags = 0;
+	// (2026-10-25, bench sweep mode: multirun\sweep.py) a general flicker score next to the ground test above: the picture in a 4x3 grid,
+	// a frame whose cell jumps away from BOTH neighbouring frames in the same direction (a one-frame spike; a camera pan or a time-lapse
+	// changes cells steadily, not up-and-back) by more than SpikeThreshold of its brightness counts as a spike. Forced (shot list
+	// 'flickerwatch') runs it indoors and out, whatever [Shaders.CloudShadows.Main] FlickerWatch says. Per-shot counters for SettingShots.
+	static const int GX = 4, GY = 3;
+	inline bool Forced = false;
+	inline float SpikeThreshold = 0.05f;
+	inline float Grid[3][GX * GY] = {};		// the last three measured frames (consecutive)
+	inline unsigned GridFrame[3] = {}, GridCount = 0;
+	inline unsigned SkipFrames = 0;	// a new shot reloads the settings: its first measured frames are not scored
+	inline unsigned ShotFrames = 0, ShotSpikes = 0; inline float ShotMax = 0.0f; inline int ShotMaxCell = -1;
+	inline char Label[64] = "";
 
 	struct Slot { IDirect3DSurface9* rt = nullptr; IDirect3DSurface9* mem = nullptr; bool pending = false; unsigned frame = 0, flags = 0; float dt = 0.0f, hour = 0.0f, sunZ = 0.0f; };
 	inline Slot Ring[3];
@@ -48,29 +60,34 @@ namespace FlickerWatch {
 
 	inline float Luma8(const UInt8* p) { return (0.2126f * p[2] + 0.7152f * p[1] + 0.0722f * p[0]) / 255.0f; }
 
-	inline bool Measure(Slot& s, float& top, float& bottom, D3DFORMAT format = D3DFMT_UNKNOWN) {
+	inline bool Measure(Slot& s, float& top, float& bottom, D3DFORMAT format = D3DFMT_UNKNOWN, float* grid = nullptr) {
 		if (format == D3DFMT_UNKNOWN) format = Desc.Format;
 		if (FAILED(TheRenderManager->device->GetRenderTargetData(s.rt, s.mem))) return false;
 		D3DLOCKED_RECT lock = {};
 		if (FAILED(s.mem->LockRect(&lock, NULL, D3DLOCK_READONLY))) return false;
 		double sumTop = 0.0, sumBottom = 0.0;
+		double cells[GX * GY] = {};
 		for (UINT y = 0; y < H; y++) {
 			const UInt8* row = (const UInt8*)lock.pBits + (size_t)y * lock.Pitch;
 			double sum = 0.0;
 			for (UINT x = 0; x < W; x++) {
+				float l;
 				if (format == D3DFMT_A16B16G16R16F) {
 					const D3DXFLOAT16* h = (const D3DXFLOAT16*)(row + x * 8);
 					float rgb[3];
 					D3DXFloat16To32Array(rgb, h, 3);
-					sum += 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
+					l = 0.2126f * rgb[0] + 0.7152f * rgb[1] + 0.0722f * rgb[2];
 				}
-				else sum += Luma8(row + x * 4);
+				else l = Luma8(row + x * 4);
+				sum += l;
+				if (grid) cells[(y * GY / H) * GX + x * GX / W] += l;
 			}
 			if (y < H / 3) sumTop += sum; else if (y >= H / 2) sumBottom += sum;
 		}
 		s.mem->UnlockRect();
 		top = (float)(sumTop / (W * (H / 3)));
 		bottom = (float)(sumBottom / (W * (H - H / 2)));
+		if (grid) for (int i = 0; i < GX * GY; i++) grid[i] = (float)(cells[i] / ((W / GX) * (H / GY)));
 		return true;
 	}
 
@@ -190,9 +207,34 @@ namespace FlickerWatch {
 		Frame++;
 		if (!read.pending) return;
 		read.pending = false;
-		float top, bottom;
-		if (!Measure(read, top, bottom)) { HavePrev = false; return; }
+		float top, bottom, grid[GX * GY];
+		if (!Measure(read, top, bottom, D3DFMT_UNKNOWN, grid)) { HavePrev = false; GridCount = 0; return; }
 		Measured++;
+		{	// (2026-10-25) the spike score: frame m = the middle of the last three consecutive measured frames
+			if (GridCount && read.frame != GridFrame[(GridCount - 1) % 3] + 1) GridCount = 0;
+			memcpy(Grid[GridCount % 3], grid, sizeof(grid)); GridFrame[GridCount % 3] = read.frame; GridCount++;
+			ShotFrames++;
+			if (SkipFrames) SkipFrames--;
+			else if (GridCount >= 3) {
+				const float* a = Grid[(GridCount - 3) % 3]; const float* m = Grid[(GridCount - 2) % 3]; const float* b = Grid[(GridCount - 1) % 3];
+				float spike = 0.0f; int cell = -1; float signedSpike = 0.0f;
+				for (int i = 0; i < GX * GY; i++) {
+					const float da = m[i] - a[i], db = m[i] - b[i], ref = (a[i] > b[i] ? a[i] : b[i]);
+					if (ref < 0.01f || da * db <= 0.0f) continue;
+					const float s = (fabsf(da) < fabsf(db) ? fabsf(da) : fabsf(db)) / ref;
+					if (s > spike) { spike = s; cell = i; signedSpike = da > 0.0f ? s : -s; }
+				}
+				if (spike > ShotMax) { ShotMax = spike; ShotMaxCell = cell; }
+				if (spike > SpikeThreshold) {
+					ShotSpikes++;
+					if (Lines < 300) {
+						Lines++;
+						Logger::Log("FLICKER SPIKE frame %u: cell %d (col %d row %d) %+.1f%% for one frame; %.1f ms; hour %.2f; shot '%s'",
+							GridFrame[(GridCount - 2) % 3], cell, cell % GX, cell / GX, signedSpike * 100.0f, read.dt, read.hour, Label);
+					}
+				}
+			}
+		}
 		if (HavePrev && read.frame == PrevFrame + 1 && PrevBottom > 0.01f && PrevTop > 0.01f) {
 			const float change = bottom / PrevBottom - 1.0f, topChange = top / PrevTop - 1.0f;
 			if (fabsf(change) > threshold && fabsf(topChange) < threshold * 0.5f) {

@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 // 2026-11-02 Vegas Shaders: every file and folder the plugin reads or writes at run time, in one place. The project was New Vegas
 // Reloaded; its old names are still read as a fallback, so an install that only copies the new DLL in keeps working:
@@ -26,12 +27,21 @@ namespace Paths {
 	const char* TextureRoot();	// Data\Textures\VegasShaders\       (old: Data\Textures\NewVegasReloaded\)
 	const char* LutDir();		// <TextureRoot>LUTs\ .
 	const char* DataRoot();		// Data\VegasShaders\                (old: Data\NVR\): Presets, Variants, Keywords, Skins
+	constexpr const char* NewDataRoot = "Data\\VegasShaders\\";
+	constexpr const char* OldDataRoot = "Data\\NVR\\";	// PresetManager also takes over files from here (ImportOldData)
 
 	// The shader folder as messages name it, without the leading "Data\" ("Shaders\VegasShaders\").
 	const char* ShaderRootShort();
 
-	// One log line with the folders in use and which of them have the old name. Call once the log is open.
+	// One log line with the folders in use and which of them have the old name. Call once the log is open. Also looks for
+	// shader files a New Vegas Reloaded preset put into the old shader folder (CheckOldShaderFiles).
 	void LogChoice();
+
+	// 2026-11-02: files users put into the old New Vegas Reloaded places, as their presets' instructions say. Each one taken over
+	// (or skipped) adds a short line here; the game's main menu hint and the menu's status bar show them, so it does not look
+	// broken. Also logged.
+	void AddOldFilesNotice(const char* format, ...);
+	const std::vector<std::string>& OldFilesNotices();
 
 	// ---- files in the plugins folder ------------------------------------------------------------------------------------------
 	enum class File {
@@ -46,10 +56,14 @@ namespace Paths {
 	const char* OldName(File file);
 
 	// folder ends with a backslash. ReadPath: the new name if that file exists, else the old name if that one exists, else the
-	// new name. WritePath: always the new name. OldPathIfOnlyOld: the old file's path when only the old one exists, else "".
+	// new name; for the user's own files (UserSettings, MaxQualityUser) the old name also when both exist and the old one was
+	// written later (2026-11-02: a New Vegas Reloaded preset copied in after our file was made, which was ignored before).
+	// WritePath: always the new name. OldPathIfRead: the old file's path when ReadPath takes it, else "".
 	std::string ReadPath(const std::string& folder, File file);
 	std::string WritePath(const std::string& folder, File file);
-	std::string OldPathIfOnlyOld(const std::string& folder, File file);
+	std::string OldPathIfRead(const std::string& folder, File file);
+	// Both names exist and the old one is read (it is newer): the case worth a log line.
+	bool OldIsNewer(const std::string& folder, File file);
 
 	// The game folder (the current folder at first use, without a trailing backslash: common dialogs can change the current
 	// folder later), its Data\NVSE\Plugins\ folder, and the folder this DLL was loaded from (usually the same plugins folder).

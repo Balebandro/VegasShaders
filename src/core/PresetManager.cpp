@@ -448,9 +448,54 @@ bool PresetManager::IsReservedName(const std::string& name) {
 	return name == kDefaultExteriorName || name == kDefaultInteriorName;
 }
 
+// 2026-11-02: with Data\VegasShaders\ in use, presets made for New Vegas Reloaded (Data\NVR\, the same file format: settings
+// sections and keys kept their names) were never seen. At boot every file there that ours lacks, or that is newer than our copy
+// (a preset pack copied in later), is copied over; EnabledVariants.ini only when ours is missing (it is the user's own list). The
+// old folder is never changed. The count goes to the menu's notice (OldFilesNotice).
+static void ImportOldData()
+{
+	if (std::string(Paths::DataRoot()) != Paths::NewDataRoot) return;	// the old folder is the one in use, or neither exists
+	const fs::path oldRoot(UnderGameRoot(Paths::OldDataRoot)), newRoot(UnderGameRoot(Paths::NewDataRoot));
+	std::error_code ec;
+	if (!fs::is_directory(oldRoot, ec)) return;
+	int copied = 0, failed = 0;
+	for (const char* sub : { "Presets", "Variants", "Keywords" }) {
+		const fs::path from = oldRoot / sub;
+		if (!fs::is_directory(from, ec)) { ec.clear(); continue; }
+		for (fs::recursive_directory_iterator it(from, ec), end; !ec && it != end; it.increment(ec)) {
+			if (!it->is_regular_file(ec)) continue;
+			const fs::path relative = fs::path(sub) / fs::relative(it->path(), from, ec);
+			const fs::path to = newRoot / relative;
+			if (fs::exists(to, ec) && fs::last_write_time(to, ec) >= fs::last_write_time(it->path(), ec)) continue;
+			fs::create_directories(to.parent_path(), ec);
+			if (fs::copy_file(it->path(), to, fs::copy_options::overwrite_existing, ec)) {
+				Logger::Log("PresetManager: [Preset] %s taken over from %s", relative.string().c_str(), Paths::OldDataRoot);
+				copied++;
+			}
+			else { Logger::Log("PresetManager: [Preset] could not copy %s: %s", it->path().string().c_str(), ec.message().c_str()); failed++; ec.clear(); }
+		}
+		ec.clear();
+	}
+	const fs::path oldList = oldRoot / "EnabledVariants.ini", newList = newRoot / "EnabledVariants.ini";
+	if (fs::exists(oldList, ec) && !fs::exists(newList, ec) && fs::copy_file(oldList, newList, ec)) copied++;
+	if (copied || failed) {
+		Logger::Log("PresetManager: [Preset] %d file(s) taken over from %s, %d failed", copied, Paths::OldDataRoot, failed);
+		Paths::AddOldFilesNotice("%d preset file(s) taken over from %s", copied, Paths::OldDataRoot);
+	}
+}
+
 void PresetManager::Initialize()
 {
 	Logger::Log("PresetManager: [Preset] Initializing...");
+	ImportOldData();
+	// 2026-11-02: Cartographer (its own .esp) swaps settings per cell through NVRSetSetting; with ours on as well, the two fight
+	// over the same settings on every cell change. Its switch is General:bNVR in Data\Config\Cartographer\Settings.ini.
+	const std::string cartographer = UnderGameRoot("Data\\Config\\Cartographer\\Settings.ini");
+	const bool theirsOn = GetPrivateProfileIntA("General", "bNVR", 0, cartographer.c_str()) != 0;
+	if (theirsOn && TheSettingManager->GetSettingI("Main.Main.Misc", "PresetManagerEnabled")) {
+		Logger::Log("PresetManager: [Preset] Cartographer's NVR preset swapping (bNVR=1) and this mod's Preset Manager are both on: they change the same settings on every cell change");
+		Paths::AddOldFilesNotice("Cartographer's preset swapping and the Preset Manager are both on: turn one off (Cartographer: bNVR in its Settings.ini)");
+	}
 	ReadKeywordFiles();
 	ReadVariantList();
 }

@@ -1,24 +1,29 @@
-// DepthOfField autofocus pass 2 as a Vulkan pass (needs NVR DXVK): the Mosaic pass of Effects/DepthOfField.fx.hlsl, line for line.
-// Top quadrants: the sharp image at half resolution (2 x 2 box); bottom quadrants: the blur amounts (the focus pass's output).
+// DepthOfField, technique 0, pass 2 (halfRes) as a Vulkan pass (needs NVR DXVK): Effects/DepthOfField.fx.hlsl halfRes line for
+// line; effects/DepthOfField.cpp ExtRender. t_rendered is TESR_RenderedBuffer (the blur amounts of the DoF pass), t_source is
+// TESR_SourceBuffer (the image before the effect). Both LINEAR, CLAMP.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "Common.glsl"
+
+layout(set = 1, binding = 0) uniform texture2D t_rendered;   // TESR_RenderedBuffer
+layout(set = 1, binding = 1) uniform texture2D t_source;     // TESR_SourceBuffer
+
 #include "DepthOfField.glsl"
 
-layout(set = 1, binding = 0) uniform texture2D t_chain;      // the blur amounts (the focus pass's output, red near, green far)
-layout(set = 1, binding = 1) uniform texture2D t_source;     // TESR_SourceBuffer: the image before the effect
-
-layout(location = 0) in vec2 uv;
+layout(location = 0) in vec2 inUV;
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec2 q = dofQuadOf(uv);
-    vec2 p = dofQuadLocal(uv);
-    vec2 o = 0.5 * pc.reciprocalResolution.xy;
-    float useAmounts = q.y;
-    vec4 c = mix(DOF_SAMPLE(t_source, clamp(p - o, 0.0, 1.0)), DOF_SAMPLE(t_chain, clamp(p - o, 0.0, 1.0)), useAmounts);
-    c += mix(DOF_SAMPLE(t_source, clamp(p + vec2(o.x, -o.y), 0.0, 1.0)), DOF_SAMPLE(t_chain, clamp(p + vec2(o.x, -o.y), 0.0, 1.0)), useAmounts);
-    c += mix(DOF_SAMPLE(t_source, clamp(p + vec2(-o.x, o.y), 0.0, 1.0)), DOF_SAMPLE(t_chain, clamp(p + vec2(-o.x, o.y), 0.0, 1.0)), useAmounts);
-    c += mix(DOF_SAMPLE(t_source, clamp(p + o, 0.0, 1.0)), DOF_SAMPLE(t_chain, clamp(p + o, 0.0, 1.0)), useAmounts);
-    o_color = c * 0.25;
+    vec2 uv = inUV;
+
+    // remap uv to [0, 1] for each quadrant
+    vec4 quadrants = getQuadrants(uv);
+    uv = remapFromQuadrant(uv, quadrants);
+
+    vec4 blur = textureLod(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0);
+    vec4 color = textureLod(sampler2D(t_source, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0);
+    // only show the blur for both bottom quadrants (HLSL lerp with the bool quadrants.z || quadrants.w)
+    color = mix(color, vec4(blur.rg, 1.0, 1.0), (quadrants.z != 0.0 || quadrants.w != 0.0) ? 1.0 : 0.0);
+
+    o_color = color;
 }

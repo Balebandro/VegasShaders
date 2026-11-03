@@ -107,6 +107,10 @@ public:
 	void RegisterConstants();
 	void UpdateConstants(NiGeometry* geometry);
 	void RenderGeometry(NiGeometry* geometry);
+
+	// UNOFFICIAL 2026-11-02 SkinnedAlphaTest: skinned casters with an alpha property (hair, fringes, ragged cloth) get the alpha
+	// pass's cut-out, so only their opaque texels cast. Set by the shadow manager per map kind, with the clip pixel shader.
+	static bool AlphaTest;
 };
 
 

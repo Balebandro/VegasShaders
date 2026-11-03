@@ -1,31 +1,50 @@
-// SunShadows contact march (techniques 0, 1, 3, 4, first pass) as a Vulkan pass: Effects/SunShadows.fx.hlsl ContactMarchPS (the
-// FastPaths form: the skips are real branches; the picture is the same as the other form). Four samples toward the sun, step
-// lengths scaled per pixel by blue noise, nearer samples counting more. Red: contact factor (1 lit); green: the lamps' term kept.
+// SunShadows' contact-shadow march (first pass of techniques 0, ForwardContactShadows, ContactFast, ForwardContactShadowsFast)
+// as a Vulkan pass: Effects/SunShadows.fx.hlsl ScreenSpaceShadowFast line for line, which is ScreenSpaceShadow with the far and
+// facing-away returns as one branch around the march (the same value either way; the D3D9 compiler had flattened ScreenSpaceShadow's
+// returns into selects). Here that layout is needed too: the blue noise is read with implicit derivatives, so in uniform flow.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "SunShadows.glsl"
 
-layout(location = 0) in vec2 uv;
-layout(location = 0) out vec4 o_color;
+// returns a semi random vec3 between 0 and 1 based on the given seed (blue noise)
+vec3 random(vec2 seed) {
+    return texture(sampler2D(t_noise, NVR_SAMPLER(pc.noiseIndex)), (seed / 256.0 + 0.5) / cb.reciprocalResolution.xy).xyz;
+}
 
 void main() {
-    float lamps = sourceAt(uv).g;
-    float viewZ = viewDepthAt(uv);
-    vec3 viewPos = viewPositionAt(uv, viewZ);
-    vec3 viewSun = normalize(cb.viewSpaceLightDir.xyz);
-    float facing = sunFacing(viewNormalAt(uv), viewSun);
-    float contact = 1.0;
-    if (!noContact(viewZ, facing)) {
-        float noise = textureLod(sampler2D(t_noise, NOISE_WRAP), uv / (cb.reciprocalResolution.xy * 256.0), 0.0).r;
-        float stepLength = 400.0 * pow(clamp(viewZ / farDistance(), 0.0, 1.0), 0.6) * mix(min(0.8, viewZ / renderDistance()), 1.0, noise);
-        float occlusion = 0.0, weights = 0.0;
-        for (int i = 1; i <= 4; i++) {
-            vec3 rayPoint = viewPos + viewSun * (stepLength * float(i));
-            float weight = 1.0 / float(i);
-            occlusion += weight * rayBlocked(texCoordOf(rayPoint), rayPoint.z);
-            weights += weight;
+    vec4 color = sampleShadow(uv);
+    if (cb.screenSpaceData.x == 0.0) { o_color = vec4(1.0, color.g, 0.0, 1.0); return; }
+    vec3 pos = reconstructPosition(uv);
+    bool isFar = pos.z > SSS_MAXDEPTH;
+    float NdotL = dot(GetNormal(uv), normalize(cb.viewSpaceLightDir.xyz));
+    float facing = saturate(NdotL * 8.0);
+    float bias = max(0.01, pos.z * 0.002);
+    vec3 random3 = random(uv);
+    float rand = mix(min(0.8, pos.z / SSS_MAXDEPTH), 1.0, random3.r);
+    float depth = getHomogenousDepth(uv) / farZ;
+    vec3 marchStep = pows(depth, 0.6) * (SSS_DIST / float(SSS_STEPNUM)) * cb.viewSpaceLightDir.xyz * rand;
+    vec4 result = vec4(1.0, color.g, 0.0, 1.0);
+    if (!isFar && !(facing <= 0.0)) {
+        float occlusion = 0.0;
+        float total = 0.0;
+        for (float i = 1.0; i < float(SSS_STEPNUM); i += 2.0) {
+            float step1 = i;
+            float step2 = i + 1.0;
+            vec3 pos1 = pos + step1 * marchStep;
+            vec3 pos2 = pos1 + step2 * marchStep;
+            vec2 depth = vec2(pos1.z, pos2.z);
+            vec2 depthCompare = vec2(
+                readDepthLod(projectPosition(pos1).xy),
+                readDepthLod(projectPosition(pos2).xy));
+            vec2 depthDelta = depth - depthCompare;
+            occlusion += ((depthDelta.x > bias && depthDelta.x < SSS_THICKNESS) ? 1.0 : 0.0) / step1;
+            occlusion += ((depthDelta.y > bias && depthDelta.y < SSS_THICKNESS) ? 1.0 : 0.0) / step2;
+            pos = pos2;
+            total += 1.0 / step1 + 1.0 / step2;
         }
-        contact = contactFromOcclusion(occlusion / weights, facing, viewZ);
+        occlusion = pows(occlusion / total, 0.3) * facing * ContactNearFade(pos.z);   // (NearFade, 2026-10-27)
+        color.r = mix(1.0 - occlusion, 1.0, hlslSmoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, pos.z));
+        result = color;
     }
-    o_color = vec4(contact, lamps, 0.0, 1.0);
+    o_color = result;
 }

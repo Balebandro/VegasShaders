@@ -1370,9 +1370,9 @@ namespace {
 			nvrLog = w;
 		}
 		const std::wstring logs = game + L"\\" VS_LOGS_FOLDER;
-		// The settings file in use: the new name, or the old one while only that one exists (Paths.h).
+		// The settings file in use: the new name, or the old one while it is the one read (Paths.h).
 		const std::wstring plugins = game + L"\\Data\\NVSE\\Plugins\\";
-		const bool onlyOld = !Paths::OldPathIfOnlyOld(Paths::PluginsDir(), Paths::File::UserSettings).empty();
+		const bool onlyOld = !Paths::OldPathIfRead(Paths::PluginsDir(), Paths::File::UserSettings).empty();
 		wchar_t tomlName[64] = {};
 		MultiByteToWideChar(CP_ACP, 0, onlyOld ? Paths::OldName(Paths::File::UserSettings) : Paths::NewName(Paths::File::UserSettings), -1, tomlName, 64);
 		// FNVProbe (its own plugin) may still write into the old logs folder (Paths::OldLogsFolder): the newest there when the new one has none

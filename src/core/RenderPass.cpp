@@ -409,6 +409,8 @@ void SkinnedGeoShadowRenderPass::RegisterConstants() {
 }
 
 
+bool SkinnedGeoShadowRenderPass::AlphaTest = false;
+
 void SkinnedGeoShadowRenderPass::UpdateConstants(NiGeometry* caster) {
 	// Render skinned geometry
 	ShadowsExteriorEffect::ShadowStruct& shadow = TheShaderManager->Effects.ShadowsExteriors->Constants;
@@ -416,6 +418,26 @@ void SkinnedGeoShadowRenderPass::UpdateConstants(NiGeometry* caster) {
 	shadow.Data.y = 0.0f; // Alpha control
 	LoadCasterWorld(caster);
 	BindDiffuseOf(caster);	// UNOFFICIAL light grid colour
+
+	// UNOFFICIAL 2026-11-02 SkinnedAlphaTest (tester report: hair black under interior lamps): a skinned caster always went in whole,
+	// so the transparent part of alpha-tested hair cards shadowed the hair itself and whatever was under it. With an alpha
+	// property (blended or tested, as AlphaShadowRenderPass takes) its diffuse is bound at s0 and the clip shader cuts it out.
+	if (!AlphaTest) return;
+	NiAlphaProperty* alpha = (NiAlphaProperty*)caster->GetProperty(NiProperty::PropertyType::kType_Alpha);
+	if (!alpha || !(alpha->flags & (NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK | NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK))) return;
+	BSShaderProperty* shade = (BSShaderProperty*)caster->GetProperty(NiProperty::PropertyType::kType_Shade);
+	if (!shade || !shade->IsLightingProperty()) return;
+	NiSourceTexture** slots = ((BSShaderPPLightingProperty*)shade)->ppTextures[0];
+	NiTexture* tex = slots ? *slots : nullptr;
+	if (!tex || !tex->rendererData || !tex->rendererData->dTexture) return;
+	shadow.Data.y = 1.0f; // Alpha control
+	NiDX9RenderState* state = TheRenderManager->renderState;
+	state->SetTexture(0, tex->rendererData->dTexture);
+	state->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP, false);
+	state->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP, false);
+	state->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT, false);
+	state->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT, false);
+	state->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_POINT, false);
 }
 
 

@@ -1,51 +1,49 @@
-// Lamp shadow mask: how much of the nearby point lights and the spot light reach each visible surface.
-// Written from specs/PointShadows.md (wave 3, 2026-11-02). Techniques by index (the engine asks for them by index and name):
-//   0 MergedPointShadows  full mask (cube-mapped lamps 0..10, unshadowed lamp 11, tracked lamps, spot, extra lamps)
-//   1 AddShadowedLamps    the outdoor batch: cube-mapped lamps 0..10 only, added (additive blend)
-//   2 LampContact         screen-space contact multiplier (multiply blend), indoors
-//   3 LampMaskHalf        the mask at half resolution, G = full-resolution depth (into NVR_LampMaskHalf)
-//   4 LampMaskUpsample    depth-aware upsample of NVR_LampMaskHalf into the buffer
-// Output is grey (R = G = B); the mask is saturated to 0..1 because the buffer is G16R16 (unsigned).
+// Shader to compute the complete point-light shadow pass in one screen draw.
 
-// --- constants (names and sizes as the C++ fills them) ---
-float4 TESR_ShadowLightPosition[12];	// xyz lamp position, w radius (slot 11 has no cube map)
-float4 TESR_LightPosition[12];			// tracked lamps: xyz position, w radius (w 0 ends the list)
-float4 TESR_LightColor[24];				// 0..11: shadow slots, 12..23: tracked lamps. rgb colour, w dimmer
-float4 TESR_ExtraLights[16];			// xyz position, w = floor(w / 8) radius, w - 8 radius weight (w 0 ends the list)
-float4 TESR_ShadowFade;					// z: cube-map switch (1 = read the cube maps)
-float4 TESR_PointShadowNear;			// x NearFade, y EdgeFade, z reach value (>0 reach mode, <0 forward mode 2), w MaskSkipFar
-float4 TESR_SpotLightPosition;			// xyz, w radius
-float4 TESR_SpotLightDirection;			// xyz direction, w full cone angle (degrees)
-float4 TESR_SpotLightColor;				// rgb colour, w dimmer
-float4 TESR_LampContact;				// x strength, y ray length, z thickness, w normal offset
-float4 TESR_LampContactFade;			// x fade-in start, y 1 / fade-in range, z fade-out end, w 1 / fade-out range
-float4 TESR_LampContactBias;			// x depth bias, y bias per unit depth, z normal offset per unit depth, w minimum lamp share
-float4 TESR_LampContactNoise;			// xy noise factors, z 52.98, w 1 = noise on
-float4 TESR_ReciprocalResolution;		// 1 / full width, 1 / full height
+float4 TESR_ShadowLightPosition[12];
+float4 TESR_LightPosition[12];
+float4 TESR_LightColor[24];
+// UNOFFICIAL (2026-10-08): the next 16 lamps past the 24 above, with forward shadows indoors (ShaderManager::
+// GetNearbyLights, ExtraLightsMax). One register each (this shader has room for little more): xyz position, w = radius
+// (whole units) x 8 + the weight luma(colour) x dimmer. w 0 ends the list.
+float4 TESR_ExtraLights[16];
+float4 TESR_ShadowFade;
+float4 TESR_PointShadowNear; // UNOFFICIAL x: NearFade, world units (0 off); y: EdgeFade (0 off); z: LampReachMask, 1 / LightRadiusMult (0 off); w: 1 MaskSkipFar
+float4 TESR_SpotLightPosition;
+float4 TESR_SpotLightDirection;
+float4 TESR_SpotLightColor;
+// UNOFFICIAL 2026-10-16 lamp contact shadows ([Shaders.ShadowsInteriors.Main] Contact*; LampContactPS below):
+float4 TESR_LampContact;		// x strength (0 off), y ray length, z thickness (world units), w normal offset (units)
+float4 TESR_LampContactFade;	// x fade-in start (units from the camera, past the weapon), y 1 / its range, z fade-out end, w 1 / its range
+float4 TESR_LampContactBias;	// x depth bias, y bias per unit of depth, z normal offset per unit of depth, w least share of the lamp light the traced lamp must give (0.2)
+float4 TESR_LampContactNoise;	// xy interleaved gradient noise's factors times the screen size, z its multiplier, w 1 noise on (only
+							// with the darkening blurred: [Shaders.ShadowsInteriors.Forward] DarkeningBlur), 0 even steps
 
-// --- samplers (register numbers as the spec: depth s0, normals s1, cube maps s2..s12, the half mask s13) ---
-sampler2D TESR_DepthBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-sampler2D TESR_NormalsBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer0 : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer1 : register(s3) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer2 : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer3 : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer4 : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer5 : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer6 : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer7 : register(s9) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer8 : register(s10) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer9 : register(s11) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-samplerCUBE TESR_ShadowCubeMapBuffer10 : register(s12) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-// The half-resolution mask (technique 3 writes it, technique 4 reads it). Bound by the C++ on stage 13. The spec's open question 1:
-// the effect file says CLAMP; the Vulkan upsample says WRAP. CLAMP kept (the file is the reference). Only the screen edge differs.
+
+//sampler_state removed to avoid a artifact. TODO investigate
+sampler2D TESR_DepthBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_NormalsBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = NONE; MINFILTER = NONE; MIPFILTER = NONE; };
+samplerCUBE TESR_ShadowCubeMapBuffer0 : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer1 : register(s3) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer2 : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer3 : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer4 : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer5 : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer6 : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer7 : register(s9) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer8 : register(s10) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer9 : register(s11) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+samplerCUBE TESR_ShadowCubeMapBuffer10 : register(s12) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; ADDRESSW = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+
+// UNOFFICIAL 2026-10-16 MaskHalfRes (LampMaskHalf/LampMaskUpsample below): the half-resolution mask (R) and its depth (G), bound
+// by ShaderManager to stage 13 (an NVR_ name: not bound by declaration order).
 sampler2D NVR_LampMaskHalf : register(s13) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+float4 TESR_ReciprocalResolution;
 
-struct VSIN
-{
-	float4 vertPos : POSITION0;
-	float2 UVCoord : TEXCOORD0;
-};
+#include "Includes/Helpers.hlsl"
+#include "Includes/Depth.hlsl"
+#include "Includes/Normals.hlsl"
+#include "Includes/Shadows.hlsl"
 
 struct VSOUT
 {
@@ -53,9 +51,11 @@ struct VSOUT
 	float2 UVCoord : TEXCOORD0;
 };
 
-#include "Includes/Helpers.hlsl"
-#include "Includes/Depth.hlsl"
-#include "Includes/Normals.hlsl"
+struct VSIN
+{
+	float4 vertPos : POSITION0;
+	float2 UVCoord : TEXCOORD0;
+};
 
 VSOUT FrameVS(VSIN IN)
 {
@@ -65,306 +65,286 @@ VSOUT FrameVS(VSIN IN)
 	return OUT;
 }
 
-float LumaOfColour(float3 c)
-{
-	return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+
+float GetSpotLightAmount(float4 worldPos, float4 spotLightPosition, float4 spotLightDirection, float4 normal){
+    float3 lightToWorld = spotLightPosition.rgb - worldPos.xyz;
+    float3 lightVector = normalize(lightToWorld);
+
+	// radius based attenuation based on https://lisyarus.github.io/blog/graphics/2022/07/30/point-light-attenuation.html
+    float radius = spotLightPosition.w;
+    float Distance = length(lightToWorld)/radius;
+	float s = saturate(Distance * Distance); 
+	float atten = saturate(((1 - s) * (1 - s)) / (1 + 5.0 * s));
+
+	float angleCosMax = cos(radians(spotLightDirection.w));
+	float angleCosMin = cos(radians(spotLightDirection.w * 0.5));
+	float cone = pow(invlerps(angleCosMax, angleCosMin, shades(spotLightDirection.xyz, lightVector * -1)), 2.0);
+
+    float diffuse = shade(lightVector, normal.xyz);
+	return diffuse * cone * atten;
 }
 
-// The light one lamp gives at a surface point, before any shadow: 0 at or beyond its radius (a radius of 0 gives an infinite or NaN
-// distance, which the test below rejects). Normal mode: the radius falloff times the surface-angle term. Reach mode (value z > 0): the
-// game radius counts in full and fades over the rest of the reach, no angle term. Forward mode 2 (z < 0): falloff only.
-float LampFactor(float3 pos, float3 n, float3 lamp, float radius)
-{
-	float3 toLamp = lamp - pos;
-	float d = length(toLamp) / radius;
-	if (!(d < 1.0f)) return 0.0f;
-	float reach = TESR_PointShadowNear.z;
-	float f;
-	if (reach > 0.0f) {
-		f = 1.0f - smoothstep(reach, 1.0f, d);
-	} else {
-		float s = d * d;
-		f = (1.0f - s) * (1.0f - s) / (1.0f + 5.0f * s);
-		if (reach == 0.0f) {
-			float3 dir = toLamp / max(length(toLamp), 1e-6f);
-			f *= lerp(1.0f, dot(dir, n), smoothstep(0.0f, 0.2f, d));
+
+// One shadow-casting light: GetPointLightAmount() * weight, with the cubemap read behind an exact test.
+// GetPointLightAtten() is exactly 0 once the normalised distance reaches 1 (s = 1 -> (1 - s)^2 = 0), and
+// GetPointLightAmount() is 0 for a light without a radius (distance is then INF or NaN, which
+// !(distance < 1) also catches), so in those cases the shadow lookup cannot change the result and is
+// skipped. The test depends on the pixel, so it is a dynamic branch: a test on constants alone would
+// use one of ps_3_0's 16 boolean registers per light and run out. The branch needs an explicit-LOD
+// read (gradients are illegal in dynamic flow control); the cubemaps have a single level, so it
+// returns what texCUBE did.
+// UNOFFICIAL near: NearFade / the light's radius. A blocker within NearFade of the lamp shadows less, none at the lamp
+// itself: a real lamp is no point, and a blocker that close casts a shadow too blurred to see, where a point casts it
+// sharp, as large as the room, and on every side when the point is inside the blocker (a lamp at the player's head).
+// Shaders\Includes\PointShadowForward.hlsl PointShadowNear does the same for the forward shadows.
+float PointLightAmountValueLod(samplerCUBE cube, float3 lightDir, float distance, float near) {
+	if (TESR_ShadowFade.z == 0) return 1;
+
+	float lightDepth = texCUBElod(cube, float4(lightDir, 0)).r;
+	float Shadow = lightDepth + BIAS * distance > distance;
+	float blocker = near > 0.0f ? smoothstep(0.0f, near, lightDepth) : 1.0f;
+	return lerp(1, Shadow, (lightDepth > 0.0f && lightDepth < 1.0f) * blocker);
+}
+
+// UNOFFICIAL EdgeFade (TESR_PointShadowNear.y, a fraction of the lamp's radius): a lamp's light amount is attenuation
+// times colour luma times intensity, clamped to 1; a bright lamp keeps that at 1 across most of its radius and drops only
+// in the last few percent, so the un-darkened disc round it, and every shadow inside it, ended on a hard circle. Each
+// lamp's amount is windowed to 0 over the outer EdgeFade of its radius instead.
+float EdgeWindow(float distance) {
+	return TESR_PointShadowNear.y > 0.0f ? 1.0f - smoothstep(1.0f - TESR_PointShadowNear.y, 1.0f, distance) : 1.0f;
+}
+
+// UNOFFICIAL LampReachMask ([Shaders.ShadowsInteriors.Main]; TESR_PointShadowNear.z = 1 / LightRadiusMult, 0 = off). With
+// forward shadows on, this pass's sum is only the room darkening, applied on top of the game's own lamp lighting, which
+// already fades with distance and angle; applying a falloff here as well darkened the floor a second time, so a shadow
+// on it seemed to stop at the circle where the lamp's clamped amount began to drop. With the switch on a lamp counts in
+// full out to its game radius and fades over the rest of the cube map's radius: the game's lighting does the falloff,
+// and the lamp's shadows (forward, or this pass's own with forward off) show in full.
+float LampReach(float distance) {
+	return 1.0f - smoothstep(TESR_PointShadowNear.z, 1.0f, distance);
+}
+
+// The light amount this pass gives a lamp at a normalised distance: the old attenuation, or LampReach with the switch.
+// UNOFFICIAL 2026-10-25 ForwardReachMask 2 (TESR_PointShadowNear.z < 0): the old attenuation without its angle term. The angle came
+// from TESR_NormalsBuffer, rebuilt from depth (one flat normal per triangle): near a lamp every triangle of a character got its own
+// darkening (the facets). The distance falloff stays, so the room keeps its old brightness (LampReach lightens it).
+float LampAmount(float3 lightDir, float distance, float4 normal) {
+	// The normal along the lamp makes GetPointLightAtten's angle term 1 (no new literals: this effect sits at the constant limit).
+	if (TESR_PointShadowNear.z < 0.0f) return GetPointLightAtten(lightDir, distance, float4(normalize(lightDir), 0));
+	return TESR_PointShadowNear.z > 0.0f ? LampReach(distance) : GetPointLightAtten(lightDir, distance, normal);
+}
+
+float ShadowedLight(samplerCUBE cube, float4 worldPos, float4 lightPos, float4 normal, float weight) {
+	float3 lightDir = lightPos.xyz - worldPos.xyz;
+	float distance = length(lightDir) / lightPos.w; // normalize distance over light range
+	[branch] if (!(distance < 1.0) || weight == 0) return 0;
+
+	float amount = PointLightAmountValueLod(cube, lightDir * float3(-1, -1, 1), distance, TESR_PointShadowNear.x / lightPos.w) * LampAmount(lightDir, distance, normal);
+	return saturate(saturate(amount) * weight) * EdgeWindow(distance);
+}
+
+
+float4 Shadow( VSOUT IN, uniform bool batch ) : COLOR0 {
+
+	float2 uv = IN.UVCoord;
+	float depth = readDepth(uv);
+    float3 camera_vector = toWorld(uv) * depth;
+    float4 world_pos = float4(TESR_CameraPosition.xyz + camera_vector, 1.0f);	
+	float4 normal = float4(GetWorldNormal(uv), 1);
+
+	float Shadow = ShadowedLight(TESR_ShadowCubeMapBuffer0, world_pos, TESR_ShadowLightPosition[0], normal, luma(TESR_LightColor[0].rgb) * TESR_LightColor[0].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer1, world_pos, TESR_ShadowLightPosition[1], normal, luma(TESR_LightColor[1].rgb) * TESR_LightColor[1].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer2, world_pos, TESR_ShadowLightPosition[2], normal, luma(TESR_LightColor[2].rgb) * TESR_LightColor[2].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer3, world_pos, TESR_ShadowLightPosition[3], normal, luma(TESR_LightColor[3].rgb) * TESR_LightColor[3].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer4, world_pos, TESR_ShadowLightPosition[4], normal, luma(TESR_LightColor[4].rgb) * TESR_LightColor[4].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer5, world_pos, TESR_ShadowLightPosition[5], normal, luma(TESR_LightColor[5].rgb) * TESR_LightColor[5].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer6, world_pos, TESR_ShadowLightPosition[6], normal, luma(TESR_LightColor[6].rgb) * TESR_LightColor[6].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer7, world_pos, TESR_ShadowLightPosition[7], normal, luma(TESR_LightColor[7].rgb) * TESR_LightColor[7].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer8, world_pos, TESR_ShadowLightPosition[8], normal, luma(TESR_LightColor[8].rgb) * TESR_LightColor[8].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer9, world_pos, TESR_ShadowLightPosition[9], normal, luma(TESR_LightColor[9].rgb) * TESR_LightColor[9].w);
+	Shadow += ShadowedLight(TESR_ShadowCubeMapBuffer10, world_pos, TESR_ShadowLightPosition[10], normal, luma(TESR_LightColor[10].rgb) * TESR_LightColor[10].w);
+	[branch] if (!batch && TESR_ShadowLightPosition[11].w) {
+		float4 light11 = GetPointLightDistance(world_pos, TESR_ShadowLightPosition[11]);
+		Shadow += saturate(LampAmount(light11.xyz, light11.w, normal)) * EdgeWindow(light11.w);
+	}
+
+	[branch] if (!batch && TESR_SpotLightPosition.w)
+		Shadow += GetSpotLightAmount(world_pos, TESR_SpotLightPosition, TESR_SpotLightDirection, normal) * luma(TESR_SpotLightColor.rgb) * TESR_SpotLightColor.w;
+	
+	for (int i = 0; i< 12 && !batch; i++){
+		[branch] if (TESR_LightPosition[i].w) {
+			float4 light = GetPointLightDistance(world_pos, TESR_LightPosition[i]);
+			// UNOFFICIAL 2026-10-16 (MaskSkipFar, TESR_PointShadowNear.w): beyond its radius a lamp gives exactly 0 (as ShadowedLight).
+			[branch] if (light.w < 1.0f || TESR_PointShadowNear.w < 0.5f)
+				Shadow += saturate(LampAmount(light.xyz, light.w, normal) * luma(TESR_LightColor[i + 12].rgb) * TESR_LightColor[i + 12].w) * EdgeWindow(light.w);
 		}
 	}
-	// EdgeFade: the outer share of the lamp's radius fades to zero instead of ending on a hard circle (0 = off).
-	float edge = TESR_PointShadowNear.y;
-	if (edge > 0.0f) f *= 1.0f - smoothstep(1.0f - edge, 1.0f, d);
-	return saturate(f);
+
+	// UNOFFICIAL: the extra lamps (above), so what only they light is not darkened as unlit. A pixel lit in full needs none.
+	[loop] for (int e = 0; e < 16 && !batch; e++) {
+		[branch] if (!TESR_ExtraLights[e].w || Shadow >= 1.0f) break;
+		float radius = floor(TESR_ExtraLights[e].w * 0.125f);
+		float weight = TESR_ExtraLights[e].w - radius * 8.0f;
+		float4 light = GetPointLightDistance(world_pos, float4(TESR_ExtraLights[e].xyz, radius));
+		[branch] if (light.w < 1.0f || TESR_PointShadowNear.w < 0.5f)	// (MaskSkipFar)
+			Shadow += saturate(LampAmount(light.xyz, light.w, normal) * weight) * EdgeWindow(light.w);
+	}
+
+	Shadow = saturate(Shadow);
+	
+	return float4(Shadow, Shadow, Shadow, 1.0f);
 }
 
-// 1 where the lamp reaches the surface, 0 where a caster stands between them (cube map slot with a shadow), smoothly blended near the lamp
-// when NearFade is set (blockers within NearFade of the lamp cast less shadow). The cube map holds the nearest caster's distance over the
-// radius per direction; 0 and 1 mean nothing was drawn there.
-float LampLit(samplerCUBE cube, float3 pos, float3 lamp, float radius)
-{
-	if (TESR_ShadowFade.z < 0.5f) return 1.0f;
-	float3 toLamp = lamp - pos;
-	float d = length(toLamp) / radius;
-	// Read direction: x and y negated, z kept (as the cube maps were written).
-	float3 dir = float3(-toLamp.x, -toLamp.y, toLamp.z);
-	float stored = texCUBElod(cube, float4(dir, 0.0f)).r;
-	float lit = 1.0f;
-	if (stored > 0.0f && stored < 1.0f) lit = (stored + 0.018f * d > d) ? 1.0f : 0.0f;
-	if (TESR_PointShadowNear.x > 0.0f) lit = lerp(1.0f, lit, smoothstep(0.0f, TESR_PointShadowNear.x / radius, stored));
-	return lit;
+// UNOFFICIAL 2026-10-16 lamp contact shadows (after Bend Studio's screen-space shadows, which NVR has for the sun only,
+// SunShadows.fx): the lamps' cube maps (512 px, filtered) lose the small dark lines where a prop meets the floor or a table the
+// wall. A pass of its own (technique 2, ShaderManager), drawn over the lamp mask with a multiply: Shadow() above is at the
+// ps_3_0 limit of 224 constant registers once the effect compiler has worked out its per-lamp values (preshader), so nothing
+// could be added there.
+// ContactProject undoes toWorld (Depth.hlsl): a camera-relative point -> its screen position and view depth (the view matrix's
+// rotation: columns right, up, forward, as toWorld reads them).
+float3 ContactProject(float3 r) {
+	float3 v = mul(r, (float3x3)TESR_ViewTransform);
+	return float3((v.x / v.z * TESR_ProjectionTransform[0][0]) * 0.5f + 0.5f, (v.y / v.z * TESR_ProjectionTransform[1][1]) * -0.5f + 0.5f, v.z);
 }
 
-// One cube-mapped lamp slot's share of the mask: its factor, times its shadow, times its weight (luma x dimmer), saturated.
-float CubeLampShare(samplerCUBE cube, int slot, float3 pos, float3 n)
-{
-	float4 lp = TESR_ShadowLightPosition[slot];
-	float4 col = TESR_LightColor[slot];
-	float f = LampFactor(pos, n, lp.xyz, lp.w);
-	if (f <= 0.0f) return 0.0f;
-	return saturate(f * LampLit(cube, pos, lp.xyz, lp.w) * LumaOfColour(col.rgb) * col.w);
+// How open the way from this pixel toward a lamp is over the first TESR_LampContact.y units (at most half way to it; 1 open,
+// 0 blocked right at the pixel): 6 steps through the depth buffer; a step behind a surface by less than the thickness is
+// blocked. A blocker met further along shades less (1 - t), so the shadow fades out instead of ending on a line. With the
+// darkening blurred the steps start at a per-pixel offset (interleaved gradient noise, Jimenez 2014); unblurred (the default) at
+// the middle of each sixth, which would otherwise show as grain.
+float ContactOpen(float3 r0, float3 worldPos, float3 n, float3 lampWorld, float2 uv, float pixelDepth) {
+	float3 toLamp = lampWorld - worldPos;
+	float dist = length(toLamp);
+	float3 dir = toLamp / dist;		// (a lamp that lights this pixel is never at it)
+	// Facing away from the lamp (or along): its own lighting shades that side; a ray from there runs straight into the surface
+	// it starts on (seen in the Ultra-Luxe: the fountain's stem, lamps inside it, darkened all over).
+	[branch] if (dot(dir, n) < 0.1f) return 1.0f;
+	float len = min(TESR_LampContact.y, dist * 0.5f);
+	float jitter = lerp(0.5f, frac(TESR_LampContactNoise.z * frac(dot(uv, TESR_LampContactNoise.xy))), TESR_LampContactNoise.w);	// (w 0: even steps)
+	float3 start = r0 + n * (TESR_LampContact.w + pixelDepth * TESR_LampContactBias.z);
+	float occ = 0.0f;
+	[loop] for (int i = 0; i < 6; i++) {
+		float t = (i + jitter) / 6.0f;
+		float3 s = ContactProject(start + dir * (len * t));
+		[branch] if (s.z < 1.0f || any(s.xy < 0.0f) || any(s.xy > 1.0f)) break;
+		float delta = s.z - readDepthLod(screenToRect(s.xy));	// UNOFFICIAL 2026-10-27 RenderScale v2: ContactProject gives screen position
+		occ = max(occ, (delta > TESR_LampContactBias.x + s.z * TESR_LampContactBias.y && delta < TESR_LampContact.z) ? 1.0f - t : 0.0f);
+	}
+	return 1.0f - occ;
 }
 
-// The spot light (merged technique only): radius falloff, the cone (inverse lerp between the cone limits, squared), the surface-angle
-// term. Never shadowed.
-float SpotShare(float3 pos, float3 n)
-{
-	float radius = TESR_SpotLightPosition.w;
-	if (!(radius > 0.0f)) return 0.0f;
-	float3 toSpot = TESR_SpotLightPosition.xyz - pos;
-	float len = max(length(toSpot), 1e-6f);
-	float d = len / radius;
-	if (!(d < 1.0f)) return 0.0f;
-	float s = d * d;
-	float atten = saturate((1.0f - s) * (1.0f - s) / (1.0f + 5.0f * s));
-	float cosFull = cos(radians(TESR_SpotLightDirection.w));
-	float cosHalf = cos(radians(TESR_SpotLightDirection.w * 0.5f));
-	float cosAlong = saturate(dot(TESR_SpotLightDirection.xyz, -toSpot / len));
-	float cone = saturate((cosAlong - cosFull) / max(cosHalf - cosFull, 1e-4f));
-	cone *= cone;
-	float diffuse = max(dot(toSpot / len, n), 0.0f);
-	float4 col = TESR_SpotLightColor;
-	return saturate(atten * cone * diffuse * LumaOfColour(col.rgb) * col.w);
-}
-
-float3 SurfacePosition(float2 uv, float depth)
-{
-	return TESR_CameraPosition.xyz + toWorld(uv) * depth;
-}
-
-float3 SurfaceNormalWorld(float2 uv)
-{
-	float3 v = mul(TESR_ViewTransform, float4(GetNormal(uv), 0.0f)).xyz;	// the rotation alone: no translation on a direction
-	return v * rsqrt(max(dot(v, v), 1e-8f));
-}
-
-// The mask at one screen position: the sum of every lamp's share, saturated. batch: cube-mapped lamps 0..10 only.
-float MaskAt(float2 uv, bool batch)
-{
+// The mask's multiplier: the shadowed lamp that gives this pixel the most is traced toward (one: two cost twice as much for
+// little more); the mask drops by the share of the shadowed lamps' light here that it loses (a hole in one lamp of a saturated
+// sum would otherwise not show). Lamps weighed by distance and colour alone (cheaper than Shadow()'s amounts; the facing test is
+// in ContactOpen). Faded in past the first-person weapon and out far away.
+float4 LampContactPS(VSOUT IN) : COLOR0 {
+	float2 uv = IN.UVCoord;
 	float depth = readDepth(uv);
-	float3 pos = SurfacePosition(uv, depth);
-	float3 n = SurfaceNormalWorld(uv);
-	float total = 0.0f;
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer0, 0, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer1, 1, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer2, 2, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer3, 3, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer4, 4, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer5, 5, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer6, 6, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer7, 7, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer8, 8, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer9, 9, pos, n);
-	total += CubeLampShare(TESR_ShadowCubeMapBuffer10, 10, pos, n);
-	if (batch) return saturate(total);
-
-	// Slot 11: lit without a shadow lookup (no cube map).
-	{
-		float4 lp = TESR_ShadowLightPosition[11];
-		float4 col = TESR_LightColor[11];
-		total += saturate(LampFactor(pos, n, lp.xyz, lp.w) * LumaOfColour(col.rgb) * col.w);
+	float fade = saturate((depth - TESR_LampContactFade.x) * TESR_LampContactFade.y) * saturate((TESR_LampContactFade.z - depth) * TESR_LampContactFade.w);
+	float keep = 1.0f;
+	[branch] if (fade > 0.0f) {
+		float3 camera_vector = toWorld(uv) * depth;
+		float3 world_pos = TESR_CameraPosition.xyz + camera_vector;
+		float total = 0.0f, b1 = 0.0f;
+		float3 L1 = 0.0f;
+		[unroll] for (int i = 0; i < 11; i++) {
+			float4 lp = TESR_ShadowLightPosition[i];
+			float3 lightDir = lp.xyz - world_pos;
+			float s2 = saturate(dot(lightDir, lightDir) / max(lp.w * lp.w, 1.0f));
+			float a = lp.w > 0.0f ? (1.0f - s2) * (1.0f - s2) * luma(TESR_LightColor[i].rgb) * TESR_LightColor[i].w : 0.0f;
+			total += a;
+			if (a > b1) { b1 = a; L1 = lp.xyz; }
+		}
+		[branch] if (b1 > TESR_LampContactBias.w * total && b1 > 0.0f) {
+			float blocked = b1 * (1.0f - ContactOpen(camera_vector, world_pos, GetWorldNormal(uv), L1, uv, depth));
+			keep = 1.0f - TESR_LampContact.x * fade * saturate(blocked / total);
+		}
 	}
-	for (int i = 0; i < 12; i++) {
-		float4 lp = TESR_LightPosition[i];
-		if (lp.w <= 0.0f) break;
-		float4 col = TESR_LightColor[i + 12];
-		total += saturate(LampFactor(pos, n, lp.xyz, lp.w) * LumaOfColour(col.rgb) * col.w);
-	}
-	total += SpotShare(pos, n);
-	for (int e = 0; e < 16; e++) {
-		if (total >= 1.0f) break;
-		float4 x = TESR_ExtraLights[e];
-		if (x.w <= 0.0f) break;
-		float radius = floor(x.w / 8.0f);
-		float weight = x.w - 8.0f * radius;
-		total += saturate(LampFactor(pos, n, x.xyz, radius) * weight);
-	}
-	return saturate(total);
+	return float4(keep, keep, keep, 1.0f);
 }
 
-// Technique 0.
-float4 MergedPS(VSOUT IN) : COLOR0
-{
-	float v = MaskAt(IN.UVCoord, false);
-	return float4(v, v, v, 1.0f);
-}
-
-// Technique 1: the outdoor batch, added onto the buffer.
-float4 BatchPS(VSOUT IN) : COLOR0
-{
-	float v = MaskAt(IN.UVCoord, true);
-	return float4(v, v, v, 1.0f);
-}
-
-// Technique 3: the mask at the top-left full-resolution texel of each half-resolution pixel. G = that texel's stored depth.
-// The floor is taken from the pixel's centre (+0.25 texel of the half grid), so an edge sample still lands on its own cell.
-float4 HalfMaskPS(VSOUT IN) : COLOR0
-{
-	float2 cell = floor(IN.UVCoord / (2.0f * TESR_ReciprocalResolution.xy) + 0.25f);
-	float2 uvFull = (cell * 2.0f + 0.5f) * TESR_ReciprocalResolution.xy;
-	float v = MaskAt(uvFull, false);
-	return float4(v, tex2Dlod(TESR_DepthBuffer, float4(uvFull, 0.0f, 0.0f)).x, 0.0f, 1.0f);
-}
-
-// Technique 2: the lamp contact multiplier, indoors. Marches toward the brightest shadowed lamp in view space: a step behind a surface
-// that is nearer than the thickness blocks the lamp. 1 = no darkening; below 1 where the lamp is blocked close to the pixel.
-float4 ContactPS(VSOUT IN) : COLOR0
-{
-	float2 uv = IN.UVCoord;
-	float dist = readDepth(uv);
-	float fade = saturate((dist - TESR_LampContactFade.x) * TESR_LampContactFade.y) *
-		saturate((TESR_LampContactFade.z - dist) * TESR_LampContactFade.w);
-	if (fade <= 0.0f) return float4(1.0f, 1.0f, 1.0f, 1.0f);
-
-	// Lamp selection (world space): the brightest of the cube-mapped slots 0..10 by (1 - s)^2 x light, over the light of all slots 0..11.
-	float3 pos = SurfacePosition(uv, dist);
-	float total = 0.0f, best = 0.0f, bestRadius = 0.0f;
-	float3 bestLamp = float3(0.0f, 0.0f, 0.0f);
-	for (int k = 0; k < 12; k++) {
-		float4 lp = TESR_ShadowLightPosition[k];
-		float4 col = TESR_LightColor[k];
-		if (!(lp.w > 0.0f)) continue;
-		float3 t = lp.xyz - pos;
-		float s2 = saturate(dot(t, t) / (lp.w * lp.w));
-		float share = (1.0f - s2) * (1.0f - s2) * LumaOfColour(col.rgb) * col.w;
-		total += share;
-		if (k < 11 && share > best) { best = share; bestRadius = lp.w; bestLamp = lp.xyz; }
-	}
-	if (bestRadius <= 0.0f || best <= TESR_LampContactBias.w * total) return float4(1.0f, 1.0f, 1.0f, 1.0f);
-
-	// View space from here on (the depth buffer, the normals and the projection are view space).
-	float3 viewPos = mul(float4(toWorld(uv) * dist, 0.0f), TESR_ViewTransform).xyz;
-	float3 nView = GetNormal(uv);
-	float3 toLampWorld = bestLamp - pos;
-	float lampDist = max(length(toLampWorld), 1e-6f);
-	float3 dirView = mul(float4(toLampWorld / lampDist, 0.0f), TESR_ViewTransform).xyz;
-	dirView = dirView * rsqrt(max(dot(dirView, dirView), 1e-8f));
-	if (dot(dirView, nView) < 0.1f) return float4(1.0f, 1.0f, 1.0f, 1.0f);	// the surface faces away from the lamp
-
-	float marchLength = min(TESR_LampContact.y, 0.5f * lampDist);
-	float3 start = viewPos + nView * (TESR_LampContact.w + TESR_LampContactBias.z * dist);
-	float ign = frac(TESR_LampContactNoise.z * frac(dot(uv, TESR_LampContactNoise.xy)));
-	float jitter = TESR_LampContactNoise.w > 0.5f ? ign : 0.5f;
-
-	float blocked = 0.0f;
-	for (int i = 0; i < 6; i++) {
-		float t = (float(i) + jitter) / 6.0f;
-		float3 p = start + dirView * (marchLength * t);
-		if (p.z <= 1e-3f) break;
-		float3 sp = projectPosition(p);
-		if (outsideRect(sp.xy)) break;
-		float stored = readDepthLod(sp.xy);
-		float gap = p.z - stored;
-		float bias = TESR_LampContactBias.x + TESR_LampContactBias.y * p.z;
-		if (gap > bias && gap < TESR_LampContact.z) blocked = max(blocked, 1.0f - t);
-	}
-
-	float shade = TESR_LampContact.x * fade * blocked * (best / max(total, 1e-6f));
-	float v = saturate(1.0f - shade);
-	return float4(v, v, v, 1.0f);
-}
-
-// Technique 4: the half-resolution mask upsampled depth-aware. Four nearest half texels (point samples at their centres), bilinear
-// weight over 1 + 16 gap^2, gap = depth difference over (1 + 0.01 depth).
-void UpsampleTap(float2 base, float2 f, float2 o, float2 halfTexel, float pixelDepth, inout float sum, inout float wsum)
-{
-	float2 c = base + o;
-	float4 s = tex2Dlod(NVR_LampMaskHalf, float4((c + 0.5f) * halfTexel, 0.0f, 0.0f));
-	float gap = abs(s.g * farZ - pixelDepth) / (1.0f + 0.01f * pixelDepth);
-	float bw = lerp(1.0f - f.x, f.x, o.x) * lerp(1.0f - f.y, f.y, o.y);
-	float w = bw / (1.0f + 16.0f * gap * gap);
-	sum += w * s.r;
-	wsum += w;
-}
-
-float4 UpsamplePS(VSOUT IN) : COLOR0
-{
-	float2 uv = IN.UVCoord;
-	float2 halfTexel = 2.0f * TESR_ReciprocalResolution.xy;
-	float pixelDepth = readDepthLod(uv);
-	float2 h = uv / halfTexel - 0.5f;
-	float2 base = floor(h);
-	float2 f = h - base;
-	float sum = 0.0f, wsum = 0.0f;
-	UpsampleTap(base, f, float2(0.0f, 0.0f), halfTexel, pixelDepth, sum, wsum);
-	UpsampleTap(base, f, float2(1.0f, 0.0f), halfTexel, pixelDepth, sum, wsum);
-	UpsampleTap(base, f, float2(0.0f, 1.0f), halfTexel, pixelDepth, sum, wsum);
-	UpsampleTap(base, f, float2(1.0f, 1.0f), halfTexel, pixelDepth, sum, wsum);
-	float v = saturate(sum / max(wsum, 1e-12f));
-	return float4(v, v, v, 1.0f);
-}
-
-technique MergedPointShadows
-{
-	pass P0
-	{
+technique MergedPointShadows {
+	pass {
 		VertexShader = compile vs_3_0 FrameVS();
-		PixelShader = compile ps_3_0 MergedPS();
-		ZEnable = FALSE; ZWriteEnable = FALSE; AlphaBlendEnable = FALSE; AlphaTestEnable = FALSE;
-		CullMode = NONE; ColorWriteEnable = 15;
+		PixelShader = compile ps_3_0 Shadow(false);
 	}
 }
 
-technique AddShadowedLamps
-{
-	pass P0
-	{
+// UNOFFICIAL ExteriorLightPoints (ShaderManager::RenderPointShadowBatches): a further batch of 11 shadowed lamps, its light
+// added to what the passes before wrote (saturated where the buffer is read). Only the shadowed lamps: the rest were in the
+// first pass.
+technique AddShadowedLamps {
+	pass {
+		AlphaBlendEnable = true;
+		SrcBlend = ONE;
+		DestBlend = ONE;
+		BlendOp = ADD;
 		VertexShader = compile vs_3_0 FrameVS();
-		PixelShader = compile ps_3_0 BatchPS();
-		ZEnable = FALSE; ZWriteEnable = FALSE; AlphaTestEnable = FALSE;
-		CullMode = NONE; ColorWriteEnable = 15;
-		AlphaBlendEnable = TRUE; SrcBlend = One; DestBlend = One; BlendOp = Add;
+		PixelShader = compile ps_3_0 Shadow(true);
 	}
 }
 
-technique LampContact
-{
-	pass P0
-	{
+// UNOFFICIAL 2026-10-16 lamp contact shadows (LampContactPS): the lamp mask multiplied by the contact term.
+technique LampContact {
+	pass {
+		AlphaBlendEnable = true;
+		SrcBlend = ZERO;
+		DestBlend = SRCCOLOR;
+		BlendOp = ADD;
 		VertexShader = compile vs_3_0 FrameVS();
-		PixelShader = compile ps_3_0 ContactPS();
-		ZEnable = FALSE; ZWriteEnable = FALSE; AlphaTestEnable = FALSE;
-		CullMode = NONE; ColorWriteEnable = 15;
-		AlphaBlendEnable = TRUE; SrcBlend = DestColor; DestBlend = Zero; BlendOp = Add;
+		PixelShader = compile ps_3_0 LampContactPS();
 	}
 }
 
-technique LampMaskHalf
+// UNOFFICIAL 2026-10-16 MaskHalfRes ([Shaders.ShadowsInteriors.Forward]; only with forward lamp shadows, where the mask holds
+// the lamps' unshadowed reach, a smooth function of position and normal): the mask at half resolution, then a depth-aware
+// upsample (as the AO's DedicatedCombine). Not exact at silhouettes and creases.
+// Each half-resolution pixel reads the full-resolution pixel at its top-left (as the AO's PackedVS).
+VSOUT HalfMaskVS(VSIN IN)
 {
-	pass P0
-	{
-		VertexShader = compile vs_3_0 FrameVS();
-		PixelShader = compile ps_3_0 HalfMaskPS();
-		ZEnable = FALSE; ZWriteEnable = FALSE; AlphaBlendEnable = FALSE; AlphaTestEnable = FALSE;
-		CullMode = NONE; ColorWriteEnable = 15;
+	VSOUT OUT = FrameVS(IN);
+	OUT.UVCoord += 0.5 * TESR_ReciprocalResolution.xy;
+	return OUT;
+}
+
+float4 LampMaskHalfPS(VSOUT IN) : COLOR0
+{
+	return float4(Shadow(IN, false).r, readDepth(IN.UVCoord), 0.0f, 1.0f);
+}
+
+float4 LampMaskUpsamplePS(VSOUT IN) : COLOR0
+{
+	float2 lowRR = 2.0f * TESR_ReciprocalResolution.xy;
+	float2 position = IN.UVCoord / lowRR - 0.5f;
+	float2 base = floor(position);
+	float2 fraction = frac(position);
+	float depth = readDepth(IN.UVCoord);
+	float tolerance = 1.0f + 0.01f * depth;
+	float sum = 0.0f, weights = 0.0f;
+	[unroll] for (int y = 0; y < 2; ++y) {
+		[unroll] for (int x = 0; x < 2; ++x) {
+			float2 sample = tex2D(NVR_LampMaskHalf, (base + float2(x, y) + 0.5f) * lowRR).rg;
+			float weight = (x ? fraction.x : 1.0f - fraction.x) * (y ? fraction.y : 1.0f - fraction.y) + 1e-4f;
+			float gap = abs(sample.y - depth) / tolerance;
+			weight /= 1.0f + gap * gap * 16.0f;
+			sum += sample.x * weight;
+			weights += weight;
+		}
+	}
+	float mask = sum / max(weights, 1e-6f);
+	return float4(mask, mask, mask, 1.0f);
+}
+
+technique LampMaskHalf {
+	pass {
+		VertexShader = compile vs_3_0 HalfMaskVS();
+		PixelShader = compile ps_3_0 LampMaskHalfPS();
 	}
 }
 
-technique LampMaskUpsample
-{
-	pass P0
-	{
+technique LampMaskUpsample {
+	pass {
 		VertexShader = compile vs_3_0 FrameVS();
-		PixelShader = compile ps_3_0 UpsamplePS();
-		ZEnable = FALSE; ZWriteEnable = FALSE; AlphaBlendEnable = FALSE; AlphaTestEnable = FALSE;
-		CullMode = NONE; ColorWriteEnable = 15;
+		PixelShader = compile ps_3_0 LampMaskUpsamplePS();
 	}
 }

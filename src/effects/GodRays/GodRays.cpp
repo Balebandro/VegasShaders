@@ -498,7 +498,7 @@ bool GodRaysEffect::ShouldRender() {
 */
 bool GodRaysEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 	IDirect3DSurface9* RenderedSurface, bool ext) {
-	if (dedicatedRenderFailed) return false;
+	if (dedicatedRenderFailed.Blocked()) return false;
 	const bool lowRes = TheSettingManager->SettingsMain.Main.GodRaysLowRes &&
 		raysTextureLow[0] && raysTextureLow[1] && raysSurfaceLow[0] && raysSurfaceLow[1];
 	IDirect3DTexture9** textures = lowRes ? raysTextureLow : raysTexture;
@@ -542,7 +542,7 @@ bool GodRaysEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSurface9*
 	if (SUCCEEDED(result) && !ReShadeIntegration::KeepDepthBound()) result = Device->SetDepthStencilSurface(nullptr);
 	if (FAILED(result)) {
 		if (depthSurface) depthSurface->Release();
-		dedicatedRenderFailed = true;
+		dedicatedRenderFailed.Set("a D3D9 call of the dedicated pass failed");
 		return false;
 	}
 
@@ -638,8 +638,8 @@ bool GodRaysEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSurface9*
 	if (FAILED(result)) {
 		// RenderedSurface is only written by the final copy, so it still holds the input.
 		Device->StretchRect(RenderedSurface, NULL, RenderTarget, NULL, D3DTEXF_NONE);
-		dedicatedRenderFailed = true;
-		Logger::Log("Dedicated god rays failed (%08lx); using packed path until restart.", result);
+		dedicatedRenderFailed.Set("the dedicated pass failed: the packed path draws");
+		Logger::Log("Dedicated god rays failed (%08lx); using the packed path.", result);
 		return false;
 	}
 	static bool reported[2] = {};
@@ -668,7 +668,7 @@ void GodRaysEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTa
 	// picture, no chain commit), except every 4th frame, which re-checks the sky (sky mask + its maximum, 0.15 ms).
 	idleCheckFrame = false;
 	idleCheckSkipped = false;
-	if (skipIdle && !dedicatedRenderFailed) {
+	if (skipIdle && !dedicatedRenderFailed.Blocked()) {
 		IdlePoll();	// answers are taken whatever the guard says
 		if (IdleGuard()) {
 			idleSinceCheck++;
@@ -687,7 +687,7 @@ void GodRaysEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTa
 	{
 		auto timer = TimeLogger();
 		// UNOFFICIAL 2026-10-25 (NVR DXVK): the Vulkan passes first (ProbeLog's read-back diagnostics stay on D3D9).
-		bool ext = !ExtFailed && !dedicatedRenderFailed && DxvkCompute::PassesOn();
+		bool ext = !ExtFailed && !dedicatedRenderFailed.Blocked() && DxvkCompute::PassesOn();
 #if NVR_TEST_TOOLS
 		if (probeLevel > 0) ext = false;
 #endif
@@ -708,7 +708,7 @@ void GodRaysEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTa
 	D3DSURFACE_DESC target = {}, scratch = {};
 	DWORD oldScissorEnabled = FALSE;
 	RECT oldScissor = {};
-	if (packedRenderFailed || !technique || !RenderedSurface || !SourceBuffer ||
+	if (packedRenderFailed.Blocked() || !technique || !RenderedSurface || !SourceBuffer ||
 		FAILED(Effect->GetTechniqueDesc(technique, &description)) || description.Passes != 6 ||
 		FAILED(RenderTarget->GetDesc(&target)) || FAILED(RenderedSurface->GetDesc(&scratch)) ||
 		target.Width != scratch.Width || target.Height != scratch.Height ||
@@ -759,8 +759,8 @@ void GodRaysEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTa
 	if (FAILED(result)) {
 		Device->StretchRect(SourceBuffer, NULL, RenderTarget, NULL, D3DTEXF_NONE);
 		Device->StretchRect(SourceBuffer, NULL, RenderedSurface, NULL, D3DTEXF_NONE);
-		packedRenderFailed = true;
-		Logger::Log("Packed god rays failed (%08lx); using legacy path until restart.", result);
+		packedRenderFailed.Set("the packed pass failed: the legacy path draws");
+		Logger::Log("Packed god rays failed (%08lx); using the legacy path.", result);
 		EffectRecord::Render(Device, RenderTarget, RenderedSurface, techniqueIndex, ClearRenderTarget, SourceBuffer);
 		return;
 	}

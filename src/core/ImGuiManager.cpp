@@ -10,6 +10,7 @@
 #include "MenuTools.h"
 #include "MenuWidgets.h"
 #include "Branding.h"
+#include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the status bar lists the parts switched off
 #include <sstream>
 #include <iomanip>
 #include <ctime>
@@ -274,7 +275,7 @@ void ImGuiManager::Initialize() {
 	io.IniFilename = LayoutFilePath();
 	// 2026-11-02 Vegas Shaders: an older install's layout (NewVegasReloaded.imgui.ini) is read once while the new file is missing;
 	// ImGui then saves it under the new name. The old file is not changed.
-	const std::string oldLayout = Paths::OldPathIfOnlyOld(Paths::ModuleDir(), Paths::File::ImGuiLayout);
+	const std::string oldLayout = Paths::OldPathIfRead(Paths::ModuleDir(), Paths::File::ImGuiLayout);
 	if (!oldLayout.empty()) {
 		ImGui::LoadIniSettingsFromDisk(oldLayout.c_str());
 		Logger::Log("ImGuiManager: window layout read from %s (saved as %s from now on)", oldLayout.c_str(), io.IniFilename);
@@ -1403,7 +1404,9 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& node, bool 
 		if (row.inert && overControl) InertSettingTooltip(row);
 		break;
 	default:
-		overControl = DrawTextSetting(row);
+		// [Main.Menu.Style] Custom<colour>: a tick and a colour box instead of the text box (2026-11-02)
+		if (!MenuSkin::DrawColourSetting(node.Section, node.Key, node.Value, row.controlW, overControl))
+			overControl = DrawTextSetting(row);
 		break;
 	}
 	if (tints) ImGui::PopStyleColor(tints);
@@ -2097,7 +2100,7 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::None, true, "How many lamps cast shadows at once, how far away and how detailed their shadows are.", nullptr },
 	{ "Shaders.ShadowsInteriors.Main", "What casts shadows",
 		"UseCastShadowFlag, Activators, Actors, AlphaEnabled, Apparatus, Books, Containers, Doors, Furniture, Misc, Statics, MinRadius, "
-		"PlayerShadowThirdPerson, PlayerShadowFirstPerson, TwoSidedCasters",
+		"PlayerShadowThirdPerson, PlayerShadowFirstPerson, TwoSidedCasters, SkinnedAlphaTest",
 		FogType::None, false, "Which kinds of objects are drawn into the lamp shadows.", nullptr },
 	{ "Shaders.ShadowsInteriors.Main", "Contact shadows", "ContactShadows, ContactLength, ContactThickness, ContactDistance",
 		FogType::None, false, "Small dark lines where a prop meets the floor or a wall.", nullptr },
@@ -2898,16 +2901,24 @@ static void RenderSidebar() {
 // At the game's main menu: the version and the menu key along the bottom of the screen, for the first five seconds.
 static void RenderMainMenuToast() {
 	static const ULONGLONG shownSince = GetTickCount64();
-	if (GetTickCount64() - shownSince > 5000) return;
+	// 2026-11-02: files taken over from (or left in) the old New Vegas Reloaded places are listed above the hint, longer
+	const std::vector<std::string>& notices = Paths::OldFilesNotices();
+	if (GetTickCount64() - shownSince > (notices.empty() ? 5000u : 20000u)) return;
 	char text[256];
 	sprintf_s(text, "%s %s loaded  |  press %s to open settings", Branding::ProductName, Branding::Version,
 		DikToName(TheSettingManager->SettingsMain.Menu.KeyEnable));
 	const ImVec2 screen = ImGui::GetIO().DisplaySize;
-	const ImVec2 size = ImGui::CalcTextSize(text);
-	const ImVec2 at((screen.x - size.x) * 0.5f, screen.y - size.y - 12.0f);
 	ImDrawList* front = ImGui::GetForegroundDrawList();
-	front->AddText(ImVec2(at.x + 1, at.y + 1), IM_COL32(0, 0, 0, 200), text);
-	front->AddText(at, IM_COL32(220, 220, 220, 255), text);
+	float y = screen.y - 12.0f;
+	auto line = [&](const char* s, ImU32 colour) {
+		const ImVec2 size = ImGui::CalcTextSize(s);
+		y -= size.y + 2.0f;
+		const ImVec2 at((screen.x - size.x) * 0.5f, y);
+		front->AddText(ImVec2(at.x + 1, at.y + 1), IM_COL32(0, 0, 0, 200), s);
+		front->AddText(at, colour, s);
+	};
+	line(text, IM_COL32(220, 220, 220, 255));
+	for (auto it = notices.rbegin(); it != notices.rend(); ++it) line(it->c_str(), IM_COL32(255, 200, 90, 255));
 }
 
 // A small dim marker in the top-right corner while the F10 GPU/CPU profiler is running, so it is not
@@ -3233,6 +3244,26 @@ static void DrawStatusBar() {
 	if (maxAsked != MaxQuality::Active) {
 		sprintf_s(text, "Save + restart to turn Max Quality %s", maxAsked ? "on" : "off");
 		StatusItem(&kWarnAmber, text);
+	}
+	if (!Paths::OldFilesNotices().empty()) {	// 2026-11-02: files from the old New Vegas Reloaded places (Paths.h)
+		const size_t count = Paths::OldFilesNotices().size();
+		sprintf_s(text, "%zu note%s about New Vegas Reloaded files", count, count == 1 ? "" : "s");
+		StatusItem(&kWarnAmber, text);
+		if (ImGui::IsItemHovered()) {
+			std::string all;
+			for (const std::string& n : Paths::OldFilesNotices()) all += (all.empty() ? "" : "\n\n") + n;
+			WrappedTooltip(all.c_str());
+		}
+	}
+	if (!FailOnce::Notices.empty()) {	// UNOFFICIAL 2026-11-02 RetryFailedEffects (core/FailOnce.h)
+		const size_t count = FailOnce::Notices.size();
+		sprintf_s(text, "%zu effect part%s switched off after an error", count, count == 1 ? "" : "s");
+		StatusItem(&kWarnAmber, text);
+		if (ImGui::IsItemHovered()) {
+			std::string all;
+			for (const std::string& n : FailOnce::Notices) all += (all.empty() ? "" : "\n\n") + n;
+			WrappedTooltip(all.c_str());
+		}
 	}
 	if (MenuTools::EncabActive()) {
 		static const ImVec4 mint(0.4f, 1.0f, 0.7f, 1.0f);

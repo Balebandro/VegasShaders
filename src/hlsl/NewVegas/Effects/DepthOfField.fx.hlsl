@@ -1,262 +1,280 @@
-// Depth of field. Two techniques, in the order effects/DepthOfField.cpp selects them:
-//   0 (unnamed, autofocus): six passes through the frame chain: Focus, Mosaic, BokehBlur, BokehBlur, PlainBlur, Combine.
-//   1 DistantBlurOnly: the far-distance blur alone (one pass).
-// Autofocus packing: the Mosaic pass fills the four quadrants of the drawn frame, each holding the whole picture at half
-// resolution. Top left: the sharp image (blurred for the near field), top right: the same image (blurred for the far field),
-// bottom left: the blur amounts (red near, green far), bottom right: the same amounts. The blur passes never read across a
-// quadrant edge; the Combine pass picks sharp / near / far per pixel from the amounts.
-// Depth reads use the JitterFix offset (TESR_DepthOfFieldJitter) wherever they are paired with the picture's pixel.
+// Depth of field post pass. Works out a per-pixel blur amount from depth and focus, packs the
+// near and far blur masks into screen quadrants, gathers a poisson-disc bokeh, and recombines
+// the layers. DistantOnly is the short path used when autofocus is off.
 
-uniform float4 TESR_ReciprocalResolution;
-uniform float4 TESR_DepthOfFieldBlur;	// x distant blur on (zero or not), y start, z end (game units), w base blur radius (texels)
-uniform float4 TESR_DepthOfFieldData;	// x focus scale (BlurFallOff x enabled), y radius (texels), z diameter range (bokeh threshold), w near cut-off
-uniform float4 TESR_DepthOfFieldJitter;	// xy depth jitter in UV units (zero when nothing was jittered or JitterFix is off)
+#define showDepth 0
 
-uniform sampler2D TESR_RenderedBuffer : register(s0) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_DepthBuffer    : register(s1) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_SourceBuffer   : register(s2) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_AvgLumaBuffer  : register(s3) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+float4 TESR_ReciprocalResolution;
+float4 TESR_DepthOfFieldBlur; //x: distant blur, y:distant blur start, z: distant blur end, w: base blur radius
+float4 TESR_DepthOfFieldData;
+float4 TESR_DepthOfFieldJitter; // UNOFFICIAL 2026-11-01 JitterFix: xy the depth's jitter after TAA / FSR / DLSS (0 off); depth at uv - xy is the picture's at uv //x: blur fallout y:radius z:diameterRange w:nearblur cutoff
+float4 TESR_MotionBlurData;
+float4 TESR_DebugVar;
 
-#include "includes/Depth.hlsl"	// readDepthLod, toWorld, TESR_CameraPosition, TESR_CameraData, TESR_RenderScale (rect helpers)
+sampler2D TESR_RenderedBuffer : register(s0) = sampler_state {ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_DepthBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_SourceBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_AvgLumaBuffer : register(s3) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 
-static const float kTiny = 0.0001f;
-static const float kSkyDepth = 0.9999f;	// linear depth at the far plane (the sky)
+#include "Includes/Helpers.hlsl"
+#include "Includes/Depth.hlsl"
 
-struct VSIN { float4 vertPos : POSITION0; float2 UVCoord : TEXCOORD0; };
+static const bool distantOn = bool(TESR_DepthOfFieldBlur.x);
+static const float blurFrom = TESR_DepthOfFieldBlur.y;
+static const float blurTo = TESR_DepthOfFieldBlur.z;
+static const float baseRadius = TESR_DepthOfFieldBlur.w;
 
-struct VSOUT { float4 vertPos : POSITION; float2 UVCoord : TEXCOORD0; };
+static const float hyperD = max(0.0000001, TESR_DepthOfFieldData.x * 1000); // the distance at which DOF is greatest (infinite towards the distance and closest to the camera)
+static const float bokehRadius = TESR_DepthOfFieldData.y;
+static const float bokehCut = TESR_DepthOfFieldData.z;
+static const float nearCut = min(hyperD, TESR_DepthOfFieldData.w);
 
-VSOUT FrameVS(VSIN px)
+// Focus distance comes from the blue channel of the AvgLuma buffer, which animates it. The stored value is a [0-1] fraction of hyperD.
+static const float focusDist = tex2D(TESR_AvgLumaBuffer, float2(0.5, 0.5)).b * hyperD;
+
+struct VSOUT
+{
+	float4 clipPos : POSITION;
+	float2 UVCoord : TEXCOORD0;
+};
+
+struct VSIN
+{
+	float4 clipPos : POSITION0;
+	float2 UVCoord : TEXCOORD0;
+};
+
+VSOUT FrameVS(VSIN src)
 {
 	VSOUT res = (VSOUT)0.0f;
-	res.vertPos = px.vertPos;
-	res.UVCoord = px.UVCoord;
+	res.clipPos = src.clipPos;
+	res.UVCoord = src.UVCoord;
 	return res;
 }
 
-// Explicit-LOD sample: safe in the dynamic branches below (ps_3_0 cannot take implicit gradients there). Every texture has one mip.
-float4 DofTap(sampler2D s, float2 uv)
+static float2 poissonTaps[12] =
 {
-	return tex2Dlod(s, float4(uv, 0.0f, 0.0f));
+	{ -0.326212, -0.405810 },
+	{ -0.840144, -0.073580 },
+	{ -0.695914,  0.457137 },
+	{ -0.203345,  0.620716 },
+	{  0.962340, -0.194983 },
+	{  0.473434, -0.480026 },
+	{  0.519456,  0.767022 },
+	{  0.185461, -0.893124 },
+	{  0.507431,  0.064425 },
+	{  0.896420,  0.412458 },
+	{ -0.321940, -0.932615 },
+	{ -0.791559, -0.597710 }
+};
+
+// Quadrant mask: x = top left, y = top right, z = bottom left, w = bottom right.
+float4 quadMask(float2 p){
+	float tl = (p.x < 0.5 && p.y < 0.5); // near field blurred
+	float tr = (p.x > 0.5 && p.y < 0.5); // far field blurred
+	float bl = (p.x < 0.5 && p.y > 0.5); // bottom quadrants hold low res copies of the blur amount passes
+	float br = (p.x > 0.5 && p.y > 0.5); // bottom quadrants hold low res copies of the blur amount passes
+
+	float4 q = float4(tl, tr, bl, br);
+	return q;
 }
 
-float DofLuma(float3 c)
-{
-	return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+// Maps a screen coordinate onto [0, 1] inside the quadrant it falls in.
+float2 remapQuad(float2 p, float4 q){
+	float2 mid = 0.5;
+	float2 nx = float2(p.x, p.x - mid.x);
+	float2 ny = float2(p.y, p.y - mid.y);
+
+	p.x = dot(nx.xyxy, q);
+	p.y = dot(ny.xxyy, q);
+
+	p *= 2;
+	return p;
 }
 
-// Near cut-off attenuation of the near blur: 0.5 at the camera, 0 at half the cut-off, 1 from the cut-off on. No cut-off: 1.
-float NearCutAtten(float d)
+
+float4 DoF(VSOUT IN) : COLOR0
 {
-	float c = TESR_DepthOfFieldData.w;
-	if (c <= kTiny) return 1.0f;
-	float h_v = 0.5f * c;
-	return 0.5f * (1.0f - smoothstep(0.0f, h_v, d)) + smoothstep(h_v, c, d);
+	float depth = readDepth(IN.UVCoord - TESR_DepthOfFieldJitter.xy);	// UNOFFICIAL 2026-11-01 JitterFix
+	float3 camVec = toWorld(IN.UVCoord) * depth;
+	float4 worldP = float4(TESR_CameraPosition.xyz + camVec, 1.0f);
+
+	float focalLen = 0.01; // mostly negligible and used here to avoid dividing by 0; In real life this value influences the HFD
+
+	// Near and far limits of the sharp zone, from the hyperfocal distance (http://www.waloszek.de/gen_dof_e.php)
+	float nearP = focusDist * (hyperD - focalLen)/(hyperD  + focusDist - 2 * focalLen);
+	float farP = focusDist * (hyperD - focalLen)/(hyperD - focusDist);
+
+	float nearB = invlerps(nearP, 0, depth);
+	float farB = invlerps(farP, farP * 2, depth) * 0.8;
+
+	nearB *= 0.5 * smoothstep(nearCut/2, 0, depth) + smoothstep(nearCut/2, nearCut, depth); // attenuate near blur to reveal gun
+	farB = saturate(farB + invlerps(blurFrom, blurTo, depth) * distantOn * invlerps(100000, 5000, worldP.z)); // add in distance constant blur but exclude sky
+
+	return float4(nearB, farB, 1, 1);
 }
 
-// Distance blur amount (0..1) of a pixel: ramps from DistantBlurStartRange to DistantBlurEndRange, and is kept off high points
-// (full at or below 5000 game units of height, none at or above 100000), so the sky is left alone.
-float DistantAmount(float len_v, float2 uv)
+// Places each layer to be blurred into its own quadrant of the screen.
+float4 halfRes(VSOUT IN) : COLOR0
 {
-	if (TESR_DepthOfFieldBlur.x == 0.0f) return 0.0f;
-	float ramp_v = saturate((len_v - TESR_DepthOfFieldBlur.y) / max(TESR_DepthOfFieldBlur.z - TESR_DepthOfFieldBlur.y, 1.0f));
-	float hgt = TESR_CameraPosition.z + toWorld(uv).z * len_v;
-	return ramp_v * saturate((100000.0f - hgt) / 95000.0f);
+	float2 p = IN.UVCoord;
+
+	float4 q = quadMask(p);
+	p = remapQuad(p, q);
+
+	float4 blurTex = tex2D(TESR_RenderedBuffer, p);
+	float4 srcTex = tex2D(TESR_SourceBuffer, p);
+	srcTex = lerp(srcTex, float4(blurTex.rg, 1, 1), (q.z || q.w)); // only show the blur for both bottom quadrants
+
+	return srcTex;
 }
 
-// Quadrant helpers. local = 0..1 across the drawn frame (the uv on a native frame); quad = which quadrant (0 or 1 per axis).
-float2 LocalOf(float2 uv)
+// Gathers a max (bokeh) and an average (blur) over a poisson disc, then mixes the two by luma so
+// only bright spots turn into bokeh, as with HDR values. Passing useBokeh = 0 gives a plain blur.
+float4 BokehBlur(VSOUT IN, uniform float useBokeh) : COLOR0
 {
-	return uv * TESR_RenderScale.zw;
-}
+	float2 p = IN.UVCoord;
+	float4 q = quadMask(p);
 
-float2 QuadOf(float2 uv)
-{
-	return min(floor(LocalOf(uv) * 2.0f), 1.0f);
-}
+	if (q.w)
+		return tex2D(TESR_RenderedBuffer, p); // perform no blur in this quadrant
 
-float2 QuadLocal(float2 uv)
-{
-	float2 l = LocalOf(uv) * 2.0f;
-	return l - min(floor(l), 1.0f);
-}
+	p = remapQuad(p, q);
 
-// The packed texture coordinate (rect uv) of local position l inside quadrant q, kept half a texel inside the quadrant.
-float2 PackedUV(float2 qq, float2 l)
-{
-	float2 lo_v = qq * 0.5f * TESR_RenderScale.xy + 0.5f * TESR_ReciprocalResolution.xy;
-	float2 hi_v = (qq + 1.0f) * 0.5f * TESR_RenderScale.xy - 0.5f * TESR_ReciprocalResolution.xy;
-	return clamp((qq + l) * 0.5f * TESR_RenderScale.xy, lo_v, hi_v);
-}
+	float nearAmt = tex2D(TESR_RenderedBuffer, p * 0.5 + float2(0.0, 0.5)).r;
+	float farAmt = tex2D(TESR_RenderedBuffer, p * 0.5 + float2(0.5, 0.5)).g;
 
-// Focus: the near (red) and far (green) blur amounts, from the depth at the picture's pixel and the focus distance (AvgLuma blue x H).
-float4 FocusPass(VSOUT px) : COLOR0
-{
-	float2 uv = px.UVCoord;
-	float2 duv_v = uv - TESR_DepthOfFieldJitter.xy;
-	float d = readDepthLod(duv_v);
+	float centerW = dot(float3(1, farAmt, 1), q.xyz);
 
-	float H = max(TESR_DepthOfFieldData.x * 1000.0f, kTiny);	// hyperfocal distance
-	float f = DofTap(TESR_AvgLumaBuffer, float2(0.5f, 0.5f)).b * H;	// focus distance
-	float near_limit = max(f * (H - 0.01f) / max(H + f - 0.02f, kTiny), kTiny);
-	// focus at or beyond the hyperfocal distance: nothing beyond it is out of focus (no far limit)
-	float far_limit = (H - f > kTiny) ? f * (H - 0.01f) / (H - f) : 1.0e6f;
-	far_limit = max(far_limit, kTiny);
-
-	float near_w = saturate(1.0f - d / near_limit) * NearCutAtten(d);
-	float far_w = saturate((d - far_limit) / far_limit) * 0.8f;
-	far_w *= 1.0f - step(kSkyDepth, DofTap(TESR_DepthBuffer, duv_v).x);	// the sky is not blurred by the focus
-	far_w = saturate(far_w + DistantAmount(d, uv));
-	return float4(near_w, far_w, 1.0f, 1.0f);
-}
-
-// Mosaic: the quadrants. Top: the sharp image, half resolution (2 x 2 box of the full-resolution pixels). Bottom: the blur amounts.
-float4 MosaicPass(VSOUT px) : COLOR0
-{
-	float2 qq = QuadOf(px.UVCoord);
-	float2 p = QuadLocal(px.UVCoord) * TESR_RenderScale.xy;
-	float2 o = 0.5f * TESR_ReciprocalResolution.xy;
-	float2 lo_v = float2(0.0f, 0.0f), hi_v = TESR_RenderScale.xy;
-	float4 c = DofTap(TESR_SourceBuffer, clamp(p - o, lo_v, hi_v));
-	float4 a = DofTap(TESR_RenderedBuffer, clamp(p - o, lo_v, hi_v));
-	float4 use_amounts = float4(qq.y, qq.y, qq.y, qq.y);
-	c = lerp(c, a, use_amounts);
-	c += lerp(DofTap(TESR_SourceBuffer, clamp(p + float2(o.x, -o.y), lo_v, hi_v)), DofTap(TESR_RenderedBuffer, clamp(p + float2(o.x, -o.y), lo_v, hi_v)), use_amounts);
-	c += lerp(DofTap(TESR_SourceBuffer, clamp(p + float2(-o.x, o.y), lo_v, hi_v)), DofTap(TESR_RenderedBuffer, clamp(p + float2(-o.x, o.y), lo_v, hi_v)), use_amounts);
-	c += lerp(DofTap(TESR_SourceBuffer, clamp(p + o, lo_v, hi_v)), DofTap(TESR_RenderedBuffer, clamp(p + o, lo_v, hi_v)), use_amounts);
-	return c * 0.25f;
-}
-
-// One blur pass over the packed image. Top-left pixels are blurred by the near amount (bottom left, red), top-right pixels by the
-// far amount (bottom right, green). Bottom quadrants are kept as drawn. bokeh: the brightest valid tap is taken when it is above
-// DiameterRange (the average otherwise); plain: the average. Taps outside the pixel's quadrant are not counted.
-float4 BlurQuad(float2 uv, float radius_base, bool bokeh_v)
-{
-	float4 centre_v = DofTap(TESR_RenderedBuffer, uv);
-	float2 qq = QuadOf(uv);
-	if (qq.y > 0.5f) return centre_v;
-
-	float2 l = QuadLocal(uv);
-	float amount_v = qq.x < 0.5f ? DofTap(TESR_RenderedBuffer, PackedUV(float2(0.0f, 1.0f), l)).r
-	                          : DofTap(TESR_RenderedBuffer, PackedUV(float2(1.0f, 1.0f), l)).g;
-	float radius_v = radius_base * amount_v;
-	if (radius_v <= 0.0f) return centre_v;
-
-	float2 lo_v = qq * 0.5f * TESR_RenderScale.xy + 0.5f * TESR_ReciprocalResolution.xy;
-	float2 hi_v = (qq + 1.0f) * 0.5f * TESR_RenderScale.xy - 0.5f * TESR_ReciprocalResolution.xy;
-	float4 sum_v = 0.0f;
-	float count_v = 0.0f;
-	float4 best_v = centre_v;
-	float best_luma = -1.0f;
-	for (int k = 0; k < 12; k++)
+	float4 acc = tex2D(TESR_RenderedBuffer, IN.UVCoord);
+	float4 bokeh = acc; // will accumulate as bokeh-like dilation
+	float wSum = 1;
+	float rad = lerp(bokehRadius, baseRadius, useBokeh); // select the bokeh radius or post blur radius
+	for (int k = 1; k < 12; k++)
 	{
-		// 12 taps on a disc: 30 degree steps, alternating between the outer (1) and inner (0.5) ring
-		float a = (float)k * 0.52359878f;
-		float r = fmod((float)k, 2.0f) < 0.5f ? 1.0f : 0.5f;
-		float2 t = uv + float2(cos(a), sin(a)) * (r * radius_v) * TESR_ReciprocalResolution.xy;
-		float valid_v = (all(t >= lo_v) && all(t <= hi_v)) ? 1.0f : 0.0f;
-		float4 c = DofTap(TESR_RenderedBuffer, clamp(t, lo_v, hi_v));
-		sum_v += c * valid_v;
-		count_v += valid_v;
-		float lum_v = DofLuma(c.rgb);
-		if (valid_v > 0.5f && lum_v > best_luma)
-		{
-			best_luma = lum_v;
-			best_v = c;
-		}
+		float2 off = TESR_ReciprocalResolution.xy * poissonTaps[k] * rad * centerW; //scale taps based on coc of pixel
+		float2 sp = IN.UVCoord + off;
+
+		// sample blur in the relative space of the bottom quadrant
+		float2 bsp = p + off * 2;
+		farAmt = tex2D(TESR_RenderedBuffer, bsp * 0.5 + float2(0.5, 0.5)).g;
+		float maskB = dot(float3(1, farAmt, 1), q.xyz); //chose a blur mask or not based on quadrant
+
+		// check that the sampling position is in the same quadrant to prevent edge bleeding
+		float4 sq = quadMask(sp);
+		float valid = dot(q, sq) * maskB; // check if sample is in the right quadrant
+
+		float4 sc = valid?tex2D(TESR_RenderedBuffer, sp):float4(0, 0, 0, 0);
+		sc *= valid;
+		acc += sc; // only accumulate valid pixels (within blur mask and quadrant)
+
+		bokeh = (luma(sc.rgb)>luma(bokeh.rgb))? sc: bokeh; // bokeh dilation blur
+		wSum += valid;
 	}
-	if (count_v < 0.5f) return centre_v;
-	if (bokeh_v && best_luma > TESR_DepthOfFieldData.z) return best_v;
-	return sum_v / count_v;
+
+	acc /= wSum;
+	return lerp(acc, bokeh, (luma(bokeh.rgb) > bokehCut) * useBokeh); // select a bokeh effect or normal blur based on luma
 }
 
-float4 BokehPass(VSOUT px) : COLOR0
+float4 Combine(VSOUT IN) : COLOR0
 {
-	return BlurQuad(px.UVCoord, TESR_DepthOfFieldBlur.w, true);
+	float2 p = IN.UVCoord;
+
+	// Sample each quadrant, pulling the coordinates in by half a pixel so the bottom quadrants do not leak into the top ones
+	float2 hp = TESR_ReciprocalResolution.xy * 1.5;
+	float2 nearImgUV = clamp(p * 0.5, float2(0, 0), float2(0.5, 0.5 - hp.y));
+	float2 nearBlrUV = clamp(p * 0.5 + float2(0, 0.5), float2(0, 0.5 + hp.y), float2(0.5 + hp.x, 1));
+	float2 farImgUV = clamp(p * 0.5 + float2(0.5, 0), float2(0.5 + hp.x, 0), float2(1, 0.5 - hp.y));
+	float2 farBlrUV = clamp( p * 0.5 + float2(0.5, 0.5), float2(0.5 +hp.x, 0.5 + hp.y), float2(1, 1));
+
+	float4 nearImgC = tex2D(TESR_RenderedBuffer, nearImgUV);
+	float4 farImgC = tex2D(TESR_RenderedBuffer, farImgUV);
+	float nearAmt = tex2D(TESR_RenderedBuffer, nearBlrUV).r; // near field is blurred
+	float farAmt = tex2D(TESR_RenderedBuffer, farBlrUV).g;
+
+	// blend the layers by their blur amounts
+	float4 baseC = tex2D(TESR_SourceBuffer, p);
+	float4 col = lerp(baseC, farImgC, farAmt);
+	col = lerp(col, nearImgC, nearAmt);
+
+	#if showDepth
+		col *= float4(nearAmt, farAmt, 0, 1);
+	#endif
+
+	return float4(col.rgb, 1);
 }
 
-float4 PlainBlurPass(VSOUT px) : COLOR0
+// The common gameplay configuration keeps autofocus disabled but uses distant blur to hide LOD.
+// Running the bokeh packing and five blur/combine passes for that case wastes most of the cost.
+float4 DistantOnly(VSOUT IN) : COLOR0
 {
-	return BlurQuad(px.UVCoord, TESR_DepthOfFieldData.y, false);
-}
-
-// Combine: the sharp image, the near blur where the near amount is, then the far blur where the far amount is.
-float4 CombinePass(VSOUT px) : COLOR0
-{
-	float2 uv = px.UVCoord;
-	float2 l = LocalOf(uv);
-	float4 sharp_v = DofTap(TESR_SourceBuffer, uv);
-	float near_amount = DofTap(TESR_RenderedBuffer, PackedUV(float2(0.0f, 1.0f), l)).r;
-	float far_amount = DofTap(TESR_RenderedBuffer, PackedUV(float2(1.0f, 1.0f), l)).g;
-	float3 near_colour = DofTap(TESR_RenderedBuffer, PackedUV(float2(0.0f, 0.0f), l)).rgb;
-	float3 far_colour = DofTap(TESR_RenderedBuffer, PackedUV(float2(1.0f, 0.0f), l)).rgb;
-	float3 c = lerp(sharp_v.rgb, near_colour, near_amount);
-	c = lerp(c, far_colour, far_amount);
-	return float4(c, sharp_v.a);
-}
-
-// DistantBlurOnly: the far-distance blur, four diagonal taps weighted by their depth's closeness to the centre's.
-float4 DistantPass(VSOUT px) : COLOR0
-{
-	float2 uv = px.UVCoord;
-	float2 duv_v = uv - TESR_DepthOfFieldJitter.xy;
-	float4 centre_v = DofTap(TESR_RenderedBuffer, uv);
-	float dc_v = readDepthLod(duv_v);
-	float blur_v = DistantAmount(dc_v, uv);
-	if (blur_v <= 0.0f) return centre_v;
-
-	static const float2 k_diagonal[4] = { float2(1.0f, 1.0f), float2(-1.0f, 1.0f), float2(1.0f, -1.0f), float2(-1.0f, -1.0f) };
-	float radius_v = TESR_DepthOfFieldBlur.w * (1.0f + blur_v);
-	float4 sum_v = 0.0f;
-	float wsum_v = 0.0f;
-	for (int k = 0; k < 4; k++)
-	{
-		float2 t = clampToRectIfOn(uv + k_diagonal[k] * radius_v * TESR_ReciprocalResolution.xy, TESR_ReciprocalResolution.xy);
-		float td_v = readDepthLod(t - TESR_DepthOfFieldJitter.xy);
-		float w = 1.0f - smoothstep(0.07f, 0.22f, abs(td_v - dc_v) / max(dc_v, 1.0f));
-		sum_v += DofTap(TESR_RenderedBuffer, t) * w;
-		wsum_v += w;
+	float2 uv = IN.UVCoord;
+	float depth = readDepth(uv - TESR_DepthOfFieldJitter.xy);	// UNOFFICIAL 2026-11-01 JitterFix
+	float3 cameraVector = toWorld(uv) * depth;
+	float worldHeight = TESR_CameraPosition.z + cameraVector.z;
+	float blur = saturate(invlerps(blurFrom, blurTo, depth) * distantOn * invlerps(100000, 5000, worldHeight));
+	// Reads the current image (TESR_RenderedBuffer), not TESR_SourceBuffer: this pass never writes to
+	// the texture it reads, and it lets the caller skip the full-resolution SourceBuffer copy.
+	float4 center = tex2D(TESR_RenderedBuffer, uv);
+	// Pixels nearer than the blur start (most of the screen) are returned unchanged. The taps use an
+	// explicit LOD because gradient sampling is illegal inside a dynamic branch; the buffer has one
+	// mip level and the taps are 1-2 texels apart, so LOD 0 is what tex2D selected anyway.
+	[branch] if (blur <= 0.0)
+		return float4(center.rgb, 1);
+	// Only neighbours at about the same distance are mixed in (full weight within ~7% of this pixel's depth, none beyond
+	// ~22%): blurring the sky with a thin pole, branch or wire in front of it drew a dark halo round them that flickered
+	// as they moved. Where the four are at the same distance this is the plain average it always was.
+	float2 radius = TESR_ReciprocalResolution.xy * baseRadius * (1.0 + blur);
+	const float2 corners[4] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1) };
+	float4 blurred = 0;
+	float weights = 0;
+	[unroll] for (int k = 0; k < 4; k++) {
+		float2 tapUV = uv + radius * corners[k];
+		float weight = saturate(1.5 - abs(readDepthLod(tapUV - TESR_DepthOfFieldJitter.xy) - depth) / (0.15 * depth));
+		blurred += tex2Dlod(TESR_RenderedBuffer, float4(tapUV, 0, 0)) * weight;
+		weights += weight;
 	}
-	float4 blurred_v = centre_v;
-	if (wsum_v > kTiny) blurred_v = sum_v / wsum_v;
-	return lerp(centre_v, blurred_v, blur_v);
+	blurred = weights > 0.0001 ? blurred / weights : center;
+	return float4(lerp(center.rgb, blurred.rgb, blur), 1);
 }
+
 
 technique
 {
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader  = compile ps_3_0 FocusPass( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 DoF();
 	}
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader  = compile ps_3_0 MosaicPass( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 halfRes();
 	}
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader  = compile ps_3_0 BokehPass( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 BokehBlur(float(1.0f));
 	}
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader  = compile ps_3_0 BokehPass( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 BokehBlur(float(1.0f));
 	}
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader  = compile ps_3_0 PlainBlurPass( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 BokehBlur(float(0.0f));
 	}
+
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader  = compile ps_3_0 CombinePass( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 Combine();
 	}
 }
 
@@ -264,7 +282,7 @@ technique DistantBlurOnly
 {
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader  = compile ps_3_0 DistantPass( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 DistantOnly();
 	}
 }

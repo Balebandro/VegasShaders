@@ -82,6 +82,9 @@ public:
 	bool DisjointTrusted() const { return !DisjointBroken; }
 #endif
 	inline static bool Enabled = false;
+	// UNOFFICIAL 2026-10-17, test only: told about every GpuProfileScope begin and end while set (the frame recorder's markers,
+	// FrameRecorder.h). Null in normal play.
+	inline static void (*MarkerHook)(const char* name, bool begin) = nullptr;
 	const char* GetName() const { return Name; }
 
 private:
@@ -271,8 +274,8 @@ class GpuProfileScope {
 public:
 #ifndef NVR_GPU_PROFILER_TEST
 	// UNOFFICIAL 2026-10-26 GpuDebugLabels: the timer's name is also a debug group around the scope (GpuDebug.h), timer on or off.
-	GpuProfileScope(GpuTimer& timer, IDirect3DDevice9* device) : Label(GpuDebug::Labels && GpuDebug::Begin(timer.GetName())), Timer(timer), Active(timer.Begin(device)) {}
-	~GpuProfileScope() { if (Active) Timer.End(); if (Label) GpuDebug::End(); }
+	GpuProfileScope(GpuTimer& timer, IDirect3DDevice9* device) : Label(GpuDebug::Labels && GpuDebug::Begin(timer.GetName())), Timer(timer), Active((GpuTimer::MarkerHook ? GpuTimer::MarkerHook(timer.GetName(), true) : (void)0, timer.Begin(device))) {}
+	~GpuProfileScope() { if (Active) Timer.End(); if (Label) GpuDebug::End(); if (GpuTimer::MarkerHook) GpuTimer::MarkerHook(Timer.GetName(), false); }
 #else
 	GpuProfileScope(GpuTimer& timer, IDirect3DDevice9* device) : Label(false), Timer(timer), Active(timer.Begin(device)) {}
 	~GpuProfileScope() { if (Active) Timer.End(); }

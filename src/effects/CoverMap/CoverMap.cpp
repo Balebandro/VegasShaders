@@ -51,7 +51,7 @@ void CoverMapEffect::UpdateSettings() {
 	if (s.wet && !Settings.wet) { resyncWet = true; mapValid = false; }
 	if (s.snow && !Settings.snow) { resyncSnow = true; mapValid = false; }
 	if (s.size != Settings.size) mapValid = false;
-	if ((!s.wet && !s.snow) || s.resolution != Settings.resolution) { ReleaseMap(); mapFailed = false; }
+	if ((!s.wet && !s.snow) || s.resolution != Settings.resolution) { ReleaseMap(); mapFailed = false; mapMakeFailed.Clear(); }
 	Settings = s;
 }
 
@@ -85,12 +85,12 @@ void CoverMapEffect::RegisterTextures() {
 
 bool CoverMapEffect::WetActive() const {
 	const WetWorldEffect* wetWorld = TheShaderManager->Effects.WetWorld;
-	return Settings.wet && Effect && Enabled && !mapFailed && wetWorld && wetWorld->Enabled && wetWorld->Effect && (wetBound > 0.0f || rainNow > 0.0f);
+	return Settings.wet && Effect && Enabled && !mapFailed && !mapMakeFailed.Blocked() && wetWorld && wetWorld->Enabled && wetWorld->Effect && (wetBound > 0.0f || rainNow > 0.0f);
 }
 
 bool CoverMapEffect::SnowActive() const {
 	const SnowAccumulationEffect* snow = TheShaderManager->Effects.SnowAccumulation;
-	return Settings.snow && Effect && Enabled && !mapFailed && snow && snow->Enabled && snow->Effect && (snowBound > 0.0f || snowNow);
+	return Settings.snow && Effect && Enabled && !mapFailed && !mapMakeFailed.Blocked() && snow && snow->Enabled && snow->Effect && (snowBound > 0.0f || snowNow);
 }
 
 UINT CoverMapEffect::WetTechnique(WetWorldEffect* wetWorld, UINT normal) const {
@@ -206,7 +206,7 @@ void CoverMapEffect::UpdateConstants() {
 
 bool CoverMapEffect::EnsureMap(IDirect3DDevice9* Device) {
 	if (mapTexture[0] && mapTexture[1] && auxTexture[0] && auxTexture[1]) return true;
-	if (mapFailed) return false;
+	if (mapFailed || mapMakeFailed.Blocked()) return false;
 	ReleaseMap();
 	const UINT n = (UINT)Settings.resolution;
 	// The update writes both maps in one pass (two render targets of one format: every D3D9 card with ps_3_0 has at least four).
@@ -238,7 +238,7 @@ bool CoverMapEffect::EnsureMap(IDirect3DDevice9* Device) {
 		}
 		ReleaseMap();
 	}
-	mapFailed = true;
+	mapMakeFailed.Set("its textures could not be made: WetWorld and SnowAccumulation keep their single amount");
 	Logger::Log("[ERROR] UNOFFICIAL Persistent wetness/snow: the cover map (%ux%u) could not be made; WetWorld and SnowAccumulation keep their single amount", n, n);
 	return false;
 }

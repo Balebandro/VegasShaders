@@ -2,6 +2,10 @@
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
 #include "RtLampShadows.h"	// UNOFFICIAL 2026-10-28 RT lamp shadows
 #include "MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
+#include "TestTools.h"
+#if NVR_TEST_TOOLS
+#include "SettingShots.h"	// UNOFFICIAL, test only (includes FrameRecorder.h)
+#endif
 
 // The point size value that tells an AMD/Intel driver (and DXVK) to resolve the bound depth texture (the RESZ trick).
 static const DWORD kReszResolve = 0x7FA05000;
@@ -286,6 +290,9 @@ void RenderManager::Initialize() {
 	const UInt8 anisotropy = TheSettingManager->SettingsMain.Main.AnisotropicFilter;
 	if (anisotropy >= 2) device->SetSamplerState(0, D3DSAMP_MAXANISOTROPY, anisotropy);
 	BackBuffer = this->CreateHDRRenderTarget();	// the HDR back buffer NVR renders into
+#if NVR_TEST_TOOLS
+	FrameRecorder::EarlyStart(device, SettingShots::RequestFile);	// UNOFFICIAL, test only: 'record' in the shot list (upload journal)
+#endif
 	DxvkCompute::Initialize(device);	// UNOFFICIAL 2026-10-23 (NVR DXVK): is the NVR extension on this d3d9.dll? (logged)
 	RtLampShadows::Initialize();	// UNOFFICIAL 2026-10-28: POINT_SHADOW_RT for the session, before any shader is loaded (logged)
 	ShaderWarmUp2::Install(device);	// UNOFFICIAL ShaderWarmUp2 (off unless [Main.Main.Performance] ShaderWarmUp2 is 1 or 2): before any shader is created
@@ -370,6 +377,10 @@ void RenderManager::ResolveDepthBuffer(IDirect3DTexture9* depthTarget) {
 		}
 		RECT target = { 0, 0, source.right, source.bottom };
 		IDirect3DResource9* copyFrom = textures->DepthTextureINTZ ? (IDirect3DResource9*)textures->DepthTextureINTZ : (IDirect3DResource9*)textures->DepthSurface;
+#if NVR_TEST_TOOLS
+		// UNOFFICIAL, test only: NvAPI bypasses the device, so the frame recorder notes the copy itself (FrameRecorder.h; whole surface).
+		FrameRecorder::NvStretchRect(copyFrom, depthTarget);
+#endif
 		NvAPI_D3D9_StretchRectEx(device, copyFrom, sourceRect, depthTarget, sourceRect ? &target : NULL, D3DTEXF_NONE);
 	}
 }

@@ -25,6 +25,7 @@
 #include "DisplaceHeight.h"	// UNOFFICIAL 2026-11-01 SameHeight: the draw hook gives it each draw
 #include "DrawState.h"	// UNOFFICIAL 2026-10-29 SharedDrawState: the tracked state lives there
 #include "PassSums.h"
+#include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects
 #include "GpuProfiler.h"	// UNOFFICIAL ShadowContrast step timer	// UNOFFICIAL 2026-10-29 lean hook: AfterStateBlock
 
 namespace CapturedNormals {
@@ -38,6 +39,8 @@ namespace CapturedNormals {
 	inline IDirect3DSurface9* MsaaSurface = nullptr;	// with the game's MSAA: what the draws write, resolved into Texture after the list
 	inline D3DSURFACE_DESC Made = {};
 	inline int Recreations = 0;
+	inline UInt32 RecreationsSince = 0;	// UNOFFICIAL 2026-11-02 RetryFailedEffects: LiveFrames when the Recreations window began
+	inline FailOnce::Latch MakeFail{ "CapturedNormals target" };	// a target that could not be made, or the thrash stop below (not the self-check)
 	inline D3DXVECTOR4 Data = { 0.0f, 0.004f, 2.0f, 0.5f };	// TESR_CapturedNormalsData: x 1 = holds this frame's, y z the distance match's share and units, w the least cosine to the depth normal (CapturedNormalAgrees)
 	inline std::unordered_set<IDirect3DPixelShader9*> Writers;	// the templates' pixel shaders compiled with CAPTURED_NORMALS_ON (ShaderRecord)
 	inline IDirect3DPixelShader9* LastPS = nullptr;  inline bool LastWriter = false;
@@ -471,10 +474,15 @@ namespace CapturedNormals {
 
 	inline bool Ensure(IDirect3DDevice9* d, const D3DSURFACE_DESC& t) {
 		if (Texture && Made.Width == t.Width && Made.Height == t.Height && Made.MultiSampleType == t.MultiSampleType && Made.MultiSampleQuality == t.MultiSampleQuality) return true;
+		// UNOFFICIAL 2026-11-02 RetryFailedEffects: the stop counted every size change of the session, so the 5th render-scale or upscaler
+		// change switched the normals off for good. With RetryFailedEffects on it counts within 600 captured frames (a real thrash is
+		// several a second), and the stop is a FailOnce latch: tried again after the next cell change. Off: as before.
+		if (Texture && FailOnce::RetryOn() && LiveFrames - RecreationsSince > 600) { RecreationsSince = LiveFrames; Recreations = 0; }
 		if (Texture && ++Recreations > 4) {	// the world's target never changes; something else draws its list into another full-screen target
-			Logger::Log("[WARNING] CapturedNormals: the world's main list draws into changing targets; off for the session");
+			Logger::Log("[WARNING] CapturedNormals: the world's main list draws into changing targets");
 			Release();
 			Failed = true;
+			MakeFail.Set("the world's main list draws into changing targets");
 			return false;
 		}
 		Release();
@@ -510,9 +518,10 @@ namespace CapturedNormals {
 			}
 		}
 		if (!ok) {
-			Logger::Log("[ERROR] CapturedNormals: could not make the %ux%u target (msaa %u); off for the session", t.Width, t.Height, (unsigned)t.MultiSampleType);
+			Logger::Log("[ERROR] CapturedNormals: could not make the %ux%u target (msaa %u)", t.Width, t.Height, (unsigned)t.MultiSampleType);
 			Release();
 			Failed = true;
+			MakeFail.Set("could not make its target");
 			return false;
 		}
 		Made = t;
@@ -878,6 +887,7 @@ namespace CapturedNormals {
 	// Render.cpp, once a frame. wanted: a reader will use this frame's normals (SnowAccumulation with CapturedNormals on).
 	inline void BeginFrame(IDirect3DDevice9* d, bool wanted) {
 		Data.x = 0.0f;	// nothing captured yet this frame
+		if (Failed && MakeFail.failed && !MakeFail.Blocked()) { Failed = false; Recreations = 0; RecreationsSince = LiveFrames; }	// UNOFFICIAL 2026-11-02 RetryFailedEffects (not after the self-check)
 		Live = CompiledIn() && !Failed && wanted;
 		if (Live && !Hooked) {
 			Hook(d);

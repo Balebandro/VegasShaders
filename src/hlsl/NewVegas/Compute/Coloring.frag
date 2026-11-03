@@ -1,138 +1,158 @@
-// Coloring as a Vulkan pass (needs NVR DXVK): Effects/Coloring.fx.hlsl line for line. lutPass 0 = Coloring (the grade alone),
-// 1 = ColoringLUT (the grade, then the LUT). Bindings: 0 the picture, 1 day, 2 night, 3 interior LUT (read only when lutPass is 1).
+// Coloring as a Vulkan pass (needs NVR DXVK): Effects/Coloring.fx.hlsl line for line. effects/Coloring.cpp ExtRender.
+// lutPass 0 is the technique Coloring (ColorPass); lutPass 1 is ColoringLUT (ColorLUTPass): the colouring, then the LUT
+// (LUT.frag's SampleLUT and LUTGrade) in the same pass. The LUT textures are only read when lutPass is 1.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "Common.glsl"
 
-layout(set = 1, binding = 0) uniform texture2D t_rendered;   // TESR_RenderedBuffer (LINEAR, CLAMP)
-layout(set = 1, binding = 1) uniform texture2D t_day;        // TESR_LUTDayBuffer
-layout(set = 1, binding = 2) uniform texture2D t_night;      // TESR_LUTNightBuffer
-layout(set = 1, binding = 3) uniform texture2D t_interior;   // TESR_LUTInteriorBuffer
+layout(set = 1, binding = 0) uniform texture2D t_rendered;   // TESR_RenderedBuffer
+layout(set = 1, binding = 1) uniform texture2D t_day;        // TESR_LUTDayBuffer (ColoringLUT only)
+layout(set = 1, binding = 2) uniform texture2D t_night;      // TESR_LUTNightBuffer (ColoringLUT only)
+layout(set = 1, binding = 3) uniform texture2D t_interior;   // TESR_LUTInteriorBuffer (ColoringLUT only)
 
 layout(push_constant) uniform Push {
-    vec4 colorCurve;    // 0: TESR_ColoringColorCurve (x ColorCurve, yzw the tone mask curves)
-    vec4 effectGamma;   // 16: TESR_ColoringEffectGamma (x EffectGamma, yzw per channel)
-    vec4 data;          // 32: TESR_ColoringData (x Strength, y BaseGamma, z Fade, w Contrast)
-    vec4 values;        // 48: TESR_ColoringValues (x Saturation, y Bleach, z BleachLuma, w Linearization)
-    vec4 lutData;       // 64: TESR_LUTData (the LUT's values; zero for the grade alone)
-    vec4 lutBlend;      // 80: TESR_LUTBlend
-    uint samplerIndex;  // 96: LINEAR, CLAMP
-    uint lutPass;       // 100: 1 = ColoringLUT
+    vec4 colorCurve;     // 0: TESR_ColoringColorCurve
+    vec4 effectGamma;    // 16: TESR_ColoringEffectGamma
+    vec4 coloringData;   // 32: TESR_ColoringData
+    vec4 coloringValues; // 48: TESR_ColoringValues
+    vec4 lutData;        // 64: TESR_LUTData (x day N, y strength, z night N, w interior N)
+    vec4 lutBlend;       // 80: TESR_LUTBlend (x day/night, y interior, z hdr compat)
+    uint samplerIndex;   // 96: LINEAR, CLAMP (no mips)
+    uint lutPass;        // 100: 1 = ColoringLUT, 0 = Coloring
 } pc;
 
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
-// a sampler from the heap at point of use (GLSL rejects a sampler built outside the call)
-#define COL_SAMPLE(t, p) texture(sampler2D(t, NVR_SAMPLER(pc.samplerIndex)), p)
+// XYZ_RGB[1] of the .fx.hlsl: the row GetLuminance takes the dot product with
+const vec3 xyzGreenRow = vec3(0.212671, 0.715160, 0.072169);
 
-float sCurve(float x, float k) {
-    if (abs(k) < 1e-3) return x;
-    float s = 1.0 / (1.0 + exp(-k * (x - 0.5)));
-    float y0 = 1.0 / (1.0 + exp(k * 0.5));
-    float y1 = 1.0 / (1.0 + exp(-k * 0.5));
-    return (s - y0) / (y1 - y0);
+float getLuminance(vec3 rgb) { return dot(xyzGreenRow, rgb); }
+
+// the S-curve, normalised so 0 and 1 stay put; k = 0 is no change
+float coloringCurve(float x, float k) {
+    float y0 = 1.0 / (1.0 + exp(k / 2.0));
+    return abs(k) < 1e-4 ? x : (1.0 / (1.0 + exp(-k * (x - 0.5))) - y0) / (1.0 - 2.0 * y0);
 }
 
-vec3 overlay(vec3 base, float blend) {
-    vec3 dark = 2.0 * base * blend;
-    vec3 light = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend);
-    return mix(light, dark, lessThanEqual(base, vec3(0.5)));
+vec3 colorGrade(vec3 color) {
+    vec3 H = vec3(0.01);
+
+    vec3 lumCoeff = vec3(0.2126, 0.7152, 0.0722);
+    float lum = clamp(dot(lumCoeff, color), 0.0, 1.0);
+    float L = clamp(10.0 * (lum - 0.45), 0.0, 1.0);
+    vec3 result1 = min(2.0 * color * lum, vec3(65504.0));
+    vec3 result2 = 1.0 - 2.0 * (1.0 - lum) * (1.0 - color);
+    vec3 newColor = mix(result1, result2, L);
+    color = mix(color, newColor, pc.coloringValues.z);
+
+    color = pows(color, pc.coloringValues.w);
+    color = mix(H, color, pc.coloringData.w);
+
+    vec3 luminance = vec3(getLuminance(color));
+    luminance.r = coloringCurve(luminance.r, pc.colorCurve.y);
+    luminance.g = coloringCurve(luminance.g, pc.colorCurve.z);
+    luminance.b = coloringCurve(luminance.b, pc.colorCurve.w);
+    luminance = pow(max(luminance, vec3(0.0)), vec3(1.0 / pc.effectGamma.x));
+
+    vec3 luminancei = 1.0 - luminance;
+    luminance = mix(luminance, luminancei, pc.coloringValues.y);
+    luminance.r = pow(abs(luminance.r), 1.0 / pc.effectGamma.y);
+    luminance.g = pow(abs(luminance.g), 1.0 / pc.effectGamma.z);
+    luminance.b = pow(abs(luminance.b), 1.0 / pc.effectGamma.w);
+
+    color = pows(color, 1.0 / pc.coloringData.y);
+    vec3 color2 = color;
+
+    if (luminance.r < 0.5)
+        color2.r = (2.0 * luminance.r - 1.0) * (color.r - color.r * color.r) + color.r;
+    else
+        color2.r = (2.0 * luminance.r - 1.0) * (sqrt(max(color.r, 0.0)) - color.r) + color.r;
+
+    if (luminance.g < 0.5)
+        color2.g = (2.0 * luminance.g - 1.0) * (color.g - color.g * color.g) + color.g;
+    else
+        color2.g = (2.0 * luminance.g - 1.0) * (sqrt(max(color.g, 0.0)) - color.g) + color.g;
+
+    if (luminance.b < 0.5)
+        color2.b = (2.0 * luminance.b - 1.0) * (color.b - color.b * color.b) + color.b;
+    else
+        color2.b = (2.0 * luminance.b - 1.0) * (sqrt(max(color.b, 0.0)) - color.b) + color.b;
+
+    vec3 color3 = mix(color, color2, pc.coloringData.x);
+    color3 = vec3(coloringCurve(color3.r, pc.colorCurve.x), coloringCurve(color3.g, pc.colorCurve.x), coloringCurve(color3.b, pc.colorCurve.x));
+
+    float r2R = 1.0 - pc.coloringValues.x;
+    float g2R = 0.0 + pc.coloringValues.x;
+    float b2R = 0.0 + pc.coloringValues.x;
+
+    float r2G = 0.0 + pc.coloringValues.x;
+    float g2G = (1.0 - pc.coloringData.z) - pc.coloringValues.x;
+    float b2G = (0.0 + pc.coloringData.z) + pc.coloringValues.x;
+
+    float r2B = 0.0 + pc.coloringValues.x;
+    float g2B = (0.0 + pc.coloringData.z) + pc.coloringValues.x;
+    float b2B = (1.0 - pc.coloringData.z) - pc.coloringValues.x;
+
+    vec3 mixIn = color3;
+    color3.r = (mixIn.r * r2R + mixIn.g * g2R + mixIn.b * b2R);
+    color3.g = (mixIn.r * r2G + mixIn.g * g2G + mixIn.b * b2G);
+    color3.b = (mixIn.r * r2B + mixIn.g * g2B + mixIn.b * b2B);
+
+    float luminance2 = getLuminance(color3);
+    vec3 color4 = color3;
+
+    if (luminance2 < 0.5)
+        color4 = (2.0 * luminance2 - 1.0) * (color3 - color3 * color3) + color3;
+    else
+        color4 = (2.0 * luminance2 - 1.0) * (sqrt(max(color3, vec3(0.0))) - color3) + color3;
+
+    color4 = pows(color4, 1.0 / pc.coloringValues.w);
+
+    return mix(color, color4, pc.coloringData.x);
 }
 
-vec3 splitTone(vec3 c, vec3 mask) {
-    vec3 t = clamp(mask, 0.0, 1.0);
-    vec3 a = abs(c);
-    vec3 darkAmount = clamp((0.5 - t) * 2.0, 0.0, 1.0);
-    vec3 brightAmount = clamp((t - 0.5) * 2.0, 0.0, 1.0);
-    vec3 mag = mix(mix(a, a * a, darkAmount), sqrt(a), brightAmount);
-    return sign(c) * mag;
+// Sample a horizontal-strip LUT texture (LUT.frag's SampleLUT). N below 2: the colour passes through.
+vec3 sampleLUT(texture2D lut, vec3 color, float slotN) {
+    float N = max(slotN, 2.0);
+    float b = color.b * (N - 1.0);
+    float bCell = floor(b);
+    float bFrac = fract(b);
+
+    float invW = 1.0 / (N * N);
+    float invH = 1.0 / N;
+
+    vec2 uv1, uv2;
+    uv1.x = (bCell * N + color.r * (N - 1.0) + 0.5) * invW;
+    uv1.y = (color.g * (N - 1.0) + 0.5) * invH;
+    uv2.x = ((bCell + 1.0) * N + color.r * (N - 1.0) + 0.5) * invW;
+    uv2.y = uv1.y;
+
+    vec3 graded = mix(texture(sampler2D(lut, NVR_SAMPLER(pc.samplerIndex)), uv1).rgb, texture(sampler2D(lut, NVR_SAMPLER(pc.samplerIndex)), uv2).rgb, bFrac);
+    return slotN >= 2.0 ? graded : color;
 }
 
-vec3 grade(vec3 picture) {
-    float strength = pc.data.x;
-    float baseGamma = pc.data.y;
-    float fade = clamp(pc.data.z, 0.0, 1.0);
-    float contrast = pc.data.w;
-    float saturation = pc.values.x;
-    float bleach = pc.values.y;
-    float bleachLuma = pc.values.z;
-    float linearization = max(pc.values.w, 0.01);
+vec3 lutGrade(vec3 color) {
+    float strength = pc.lutData.y;
+    float hdrCompat = pc.lutBlend.z;
 
-    // 1. Overlay with its own luma, weighted by BleachLuma in the highlights
-    float l = luma(picture);
-    vec3 overlaid = min(overlay(picture, l), vec3(65504.0));
-    vec3 c = mix(picture, overlaid, bleachLuma * smoothstep(0.45, 1.0, l));
+    float scale = max(max(color.r, color.g), max(color.b, 1.0));
+    vec3 lutInput = color / mix(1.0, scale, hdrCompat);
 
-    // 2. Linearization
-    c = pows(c, linearization);
+    vec3 dayColor = sampleLUT(t_day, lutInput, pc.lutData.x);
+    vec3 nightColor = sampleLUT(t_night, lutInput, pc.lutData.z);
+    vec3 interiorColor = sampleLUT(t_interior, lutInput, pc.lutData.w);
 
-    // 3. Contrast
-    c = mix(vec3(0.01), c, contrast);
+    vec3 exteriorColor = mix(nightColor, dayColor, pc.lutBlend.x);
+    vec3 graded = mix(exteriorColor, interiorColor, pc.lutBlend.y);
 
-    // 4. Tone mask
-    float lum = max(dot(c, vec3(-0.9689, 1.8758, 0.0415)), 0.0);
-    vec3 curves = pc.colorCurve.yzw;
-    vec3 mask = vec3(sCurve(lum, curves.x), sCurve(lum, curves.y), sCurve(lum, curves.z));
-    mask = pow(clamp(mask, 0.0, 1.0), vec3(1.0 / max(pc.effectGamma.x, 0.01)));
-    mask = mix(mask, 1.0 - mask, bleach);
-    mask = pow(clamp(mask, 0.0, 1.0), 1.0 / max(pc.effectGamma.yzw, vec3(0.01)));
+    graded *= mix(1.0, scale, hdrCompat);
 
-    // 5. Base gamma
-    c = pows(c, 1.0 / max(baseGamma, 0.01));
-    vec3 beforeSplit = c;
-
-    // 6. Split tone, blended by Strength
-    c = mix(c, splitTone(c, mask), strength);
-
-    // 7. Whole-grade S-curve
-    float k = pc.colorCurve.x;
-    c = vec3(sCurve(c.r, k), sCurve(c.g, k), sCurve(c.b, k));
-
-    // 8. Channel mixing
-    float meanC = (c.r + c.g + c.b) / 3.0;
-    c = mix(c, vec3(meanC), saturation);
-    float greenBlue = 0.5 * (c.g + c.b);
-    c.g = mix(c.g, greenBlue, fade);
-    c.b = mix(c.b, greenBlue, fade);
-
-    // 9. Second split tone, masked by the mixed picture's luma, then the Linearization power back
-    float mixedLuma = luma(c);
-    vec3 split = splitTone(c, vec3(mixedLuma));
-    vec3 relinearized = pows(split, 1.0 / linearization);
-
-    // 10. Output
-    return mix(beforeSplit, relinearized, strength);
-}
-
-vec3 lutStrip(texture2D table, float cells, vec3 c) {
-    float b = c.b * (cells - 1.0);
-    float cellLo = floor(b);
-    float cellHi = min(cellLo + 1.0, cells - 1.0);
-    float blendB = b - cellLo;
-    vec2 inCell = vec2(c.r * (cells - 1.0), c.g * (cells - 1.0));
-    vec2 uvLo = vec2((cellLo * cells + 0.5 + inCell.x) / (cells * cells), (0.5 + inCell.y) / cells);
-    vec2 uvHi = vec2((cellHi * cells + 0.5 + inCell.x) / (cells * cells), (0.5 + inCell.y) / cells);
-    return mix(COL_SAMPLE(table, uvLo).rgb, COL_SAMPLE(table, uvHi).rgb, blendB);
-}
-
-vec3 lutGradeWith(texture2D table, float cells, vec3 c) {
-    return (cells >= 2.0) ? lutStrip(table, cells, clamp(c, vec3(0.0), vec3(1.0))) : c;
-}
-
-vec3 lutGrade(vec3 col) {
-    float scale = (pc.lutBlend.z > 0.5) ? max(1.0, max(col.r, max(col.g, col.b))) : 1.0;
-    vec3 lookup = col / scale;
-    vec3 day = lutGradeWith(t_day, pc.lutData.x, lookup);
-    vec3 night = lutGradeWith(t_night, pc.lutData.z, lookup);
-    vec3 interior = lutGradeWith(t_interior, pc.lutData.w, lookup);
-    vec3 exterior = mix(night, day, pc.lutBlend.x);
-    vec3 graded = mix(exterior, interior, pc.lutBlend.y) * scale;
-    return mix(col, graded, pc.lutData.y);
+    return mix(color, graded, strength);
 }
 
 void main() {
-    vec3 col = grade(COL_SAMPLE(t_rendered, uv).rgb);
-    if (pc.lutPass == 1u) col = lutGrade(col);
-    o_color = vec4(col, 1.0);
+    vec3 graded = colorGrade(texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uv).rgb);
+    if (pc.lutPass != 0u) graded = lutGrade(graded);
+    o_color = vec4(graded, 1.0);
 }

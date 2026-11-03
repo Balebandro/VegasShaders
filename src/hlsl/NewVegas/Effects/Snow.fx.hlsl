@@ -1,117 +1,131 @@
-// Snow: drifting snowflakes in 7 layers on cylinders round the camera, lit flakes tinted toward the sun colour.
-// Written from the spec (rw-tools/specs/Snow.md). Samplers keep the spec's declaration order; the C++ binds them by name.
-// The spec gives the behaviour, not every formula: the cell hash, the flake shape and the sway amplitude are this shader's choices.
+// Snow fullscreen shader for Oblivion Reloaded
+#define SnowLayers 8
 
-uniform float4 TESR_SnowData;		// x snow amount, z fall speed (Speed)
-uniform float4 TESR_GameTime;		// z animation clock
-uniform float4 TESR_SunColor;
-uniform float4 TESR_SunAmbient;
-uniform float4x4 TESR_ShadowCameraToLightTransformOrtho;
+float4x4 TESR_WorldViewProjectionTransform;
+float4x4 TESR_ShadowCameraToLightTransformOrtho;
+float4 TESR_GameTime;
+float4 TESR_SnowData; // x: amount of snow; z: snow falling speed
+float4 TESR_SunColor;
+float4 TESR_SunAmbient;
 
-uniform sampler2D TESR_RenderedBuffer : register(s0) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_DepthBuffer : register(s1) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-uniform sampler2D TESR_OrthoMapBuffer : register(s2) = sampler_state {
-    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_DepthBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_OrthoMapBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 
-#include "includes/Helpers.hlsl"
-#include "includes/Depth.hlsl"
+static const float PI = 3.14159265;
+static const float timetick = TESR_GameTime.z;
+static const float hscale = 0.1f;
+static const float3x3 p = float3x3(30.323122,30.323122,30.323122,30.323122,30.323122,30.323122,30.323122,30.323122,30.323122);
+static const float DEPTH = 50; // distance between each snow layer
+static const float SPEED = TESR_SnowData.z;
+static const float angle = 1.0;
 
-struct VSOUT { float4 vertPos : POSITION; float2 UVCoord : TEXCOORD0; };
 
-struct VSIN { float4 vertPos : POSITION0; float2 UVCoord : TEXCOORD0; };
-
-VSOUT FrameVS(VSIN px)
+struct VSOUT
 {
-	VSOUT res = (VSOUT)0.0f;
-	res.vertPos = px.vertPos;
-	res.UVCoord = px.UVCoord;
-	return res;
+	float4 vertPos : POSITION;
+	float2 UVCoord : TEXCOORD0;
+};
+
+struct VSIN
+{
+	float4 vertPos : POSITION0;
+	float2 UVCoord : TEXCOORD0;
+};
+
+VSOUT FrameVS(VSIN IN)
+{
+	VSOUT OUT = (VSOUT)0.0f;
+	OUT.vertPos = IN.vertPos;
+	OUT.UVCoord = IN.UVCoord;
+	return OUT;
 }
 
-static const int SnowLayers = 7;	// layers 1 to 7 at 50 x i game units along the ray
+#include "Includes/Depth.hlsl"
+#include "Includes/Helpers.hlsl"
 
-// Fixed 3 by 3 mixing: a pseudo-random value in 0 to 1 for a grid cell.
-float SnowHash(float2 p)
+float2 cylindrical(float3 world)
 {
-	float3 qq = frac(float3(p.xyx) * float3(0.1031f, 0.1030f, 0.0973f));
-	qq += dot(qq, qq.yzx + 33.33f);
-	return frac((qq.x + qq.y) * qq.z);
+	float u = -atan2(world.y, world.x) / PI;
+	float v = world.z / length(world.xy);
+	return float2(0.5f * u + 0.5f, hscale * v);
 }
 
-// Ortho map test at a camera-relative point: visible when the map's top is not closer to the sun than the point (bias 0.0001), or
-// when the point lies outside the map (outside counts as open for snow).
-float SnowSunOpen(float3 rel_v)
-{
-	float4 o = mul(float4(rel_v, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
-	o.xyz /= (abs(o.w) < 1.0e-6f ? 1.0e-6f : o.w);
-	if (abs(o.x) > 1.0f || abs(o.y) > 1.0f || o.z < 0.0f || o.z > 1.0f) return 1.0f;
-	float2 uv = float2(o.x * 0.5f + 0.5f, o.y * -0.5f + 0.5f);
-	float top_v = tex2Dlod(TESR_OrthoMapBuffer, float4(uv, 0.0f, 0.0f)).r;
-	return step(o.z - 0.0001f, top_v);
+
+// checks wether a point is underneath something occluding
+float GetOrtho(float4 OrthoPos) {	
+	OrthoPos.xyz /= OrthoPos.w;
+    float outofbounds = (OrthoPos.x < -1.0f || OrthoPos.x > 1.0f ||
+        OrthoPos.y < -1.0f || OrthoPos.y > 1.0f ||
+        OrthoPos.z <  0.0f || OrthoPos.z > 1.0f);
+ 
+    OrthoPos.x = OrthoPos.x *  0.5f + 0.5f;
+    OrthoPos.y = OrthoPos.y * -0.5f + 0.5f;
+	float Ortho = tex2D(TESR_OrthoMapBuffer, OrthoPos.xy).r;
+	return (Ortho > OrthoPos.z - 0.0001) || outofbounds; // always return true if out of bounds 
 }
 
-// The snow tint: the larger of the linearised sun ambient and sun colour, per channel.
-float4 SnowPS(VSOUT px) : COLOR0
+
+float4 Snow( VSOUT IN ) : COLOR0
 {
-	float2 uv = px.UVCoord;
-	float4 src_c = tex2D(TESR_RenderedBuffer, uv);
-	float ray_depth = getHomogenousDepth(uv);
-	float3 dir = normalize(toWorld(uv));
-	float clock_v = TESR_GameTime.z;
-	float snow_amount = TESR_SnowData.x;
-	float speed_v = TESR_SnowData.z;
+	float4 color = tex2D(TESR_RenderedBuffer, IN.UVCoord);
+    color.rgb = pows(color.rgb, 2.2); // linearise
 
-	float flakes_v = 0.0f;
-	if (snow_amount > 0.0f)
-	{
-		[loop] for (int i = 1; i <= SnowLayers; i++)
-		{
-			float len_v = 50.0f * i;
-			if (len_v >= ray_depth) continue;		// closer geometry hides the layer
+	// calculating the ray along which the volumetric snow will be calculated
+	float3 rayStart = toWorld(IN.UVCoord);
+    float3 rayEnd = rayStart * DEPTH * SnowLayers;
+    float4 orthoStart = mul(float4(rayStart, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
+    float4 orthoEnd = mul(float4(rayEnd, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
+	float4 step = (orthoEnd - orthoStart) / SnowLayers;
+	
+	// each iteration adds a cylindrical layer of drops
+    float depth = readDepth(IN.UVCoord);
+	float2 uv = cylindrical(rayStart.xyz); // converts world coordinates to cylinder coordinates around the player
 
-			float3 rel_p = dir * len_v;
-			float horiz_v = max(length(rel_p.xy), 1.0f);
-			// Cylinder mapping: azimuth negated, divided by pi, mapped into 0 to 1; height over horizontal distance times 0.1.
-			float u_v = -atan2(rel_p.y, rel_p.x) / (2.0f * PI) + 0.5f;
-			float v = rel_p.z / horiz_v * 0.1f;
+	float totalSnow = 0.0f;
 
-			// Sway: a sine of half the clock with unit amplitude, offset per layer (period about 4 pi clock units).
-			float sway_f = sin(0.5f * clock_v + i * 1.3f);
-			float2 grid_v = float2(40.0f, 24.0f);
-			float2 g_v = float2(u_v * grid_v.x + sway_f * 0.6f + SnowHash(float2(i, 5.0f)) * 11.0f, v * grid_v.y - speed_v * clock_v * (1.0f + 0.15f * i));
-			float2 cell_v = floor(g_v);
-			float2 f = frac(g_v) - 0.5f;
+	[unroll]
+	for (int i = 1; i < SnowLayers; i++){
+		float2 noiseSurfacePosition = uv * (1.0f + i * DEPTH); // scale cylinder coordinates with iterations
+		float wind = sin(timetick * 0.5 + i) * angle; // horizontal offset animated over time 
+		noiseSurfacePosition += float2( wind * noiseSurfacePosition.y * (fmod(i * 107.238917f, 1.0f) - 0.5f), SPEED * timetick); // animate y offset, not sure what x does?
 
-			float h_v = SnowHash(cell_v + float2(i * 3.0f, i * 5.0f));
-			if (h_v < 0.5f) continue;		// only some cells hold a flake
-			// Brightness: a guarded division (the divisor is at least 1, so it never reaches zero).
-			float frac_prod = frac(h_v * 7.0f) * frac(h_v * 13.0f + 0.5f);
-			float brightness_v = h_v / max(1.0f + frac_prod, 1.0e-4f);
+		// creating the noise with magic
+		float3 m = float3(floor(noiseSurfacePosition), i); // places the drops at the same distance from the camera?
+		float3 mp = m/frac(mul(p, m)); // bayer matrix? grid of grey values stretch depending on the world positions
+		float3 snowNoise = frac(mp); //r.x is a random generated grid of different darknesses
 
-			// Flake size grows with the layer index and the snow amount; never zero.
-			float edge_v = 0.05f * min((float)i, 4.0f * snow_amount) + 0.005f;
-			float shape_v = smoothstep(edge_v, edge_v * 0.5f, length(f));
+        // determin flake shape
+		float2 shape = abs(fmod(noiseSurfacePosition, 1.0f) + snowNoise.xy - 1.0f);
+		shape += 0.01f * abs(2.0f * frac(10.0f * noiseSurfacePosition.yx) - 1.0f); // shape is a horizontal gradient on each square 
+		float dropGradient = 0.6f * max(shape.x - shape.y, shape.x + shape.y) + max(shape.x, shape.y) - 0.01f; // creates a circular gradient on each square of the noise grid to focus the drop
+		float edge = 0.005f + 0.05f * min(1.0f * i, 4.0f * TESR_SnowData.x); // can't be 0 or smoothstep will fail. the smaller this value, the smaller the drops
 
-			flakes_v += shape_v * brightness_v * SnowSunOpen(rel_p) * snow_amount;
-		}
+		// add new snowflake influence to the fragment, by extracting the brightest spots in the gradients grid using the edge parameter
+		// float flake = smoothstep(edge, -edge, dropGradient) * (snowNoise.x / (1.0f + 0.2f * i)); // fade opacity with each iteration
+		float flake = smoothstep(edge, -edge, dropGradient) * snowNoise.x; 
+		flake *= GetOrtho(orthoStart + step * i) * (depth > DEPTH * i); // depth and ortho check for snow layer
+		totalSnow += flake;
 	}
-	flakes_v = saturate(flakes_v);
+	totalSnow = saturate(totalSnow);
 
-	if (flakes_v <= 0.0f) return float4(src_c.rgb, src_c.a);
+	// a rain tint color that scales with the sun direction
+	//float4 rainColor = lerp(TESR_SunColor, TESR_SkyColor * 0.5, pow(shades(normalize(world), TESR_SunDirection.xyz), 2));
+	float4 snowColor = max(float4(pows(TESR_SunAmbient.rgb,2.2),TESR_SunAmbient.a), float4(pows(TESR_SunColor.rgb,2.2),TESR_SunColor.a));
 
-	float3 base_l = linearize(max(src_c.rgb, 0.0f));
-	float3 tint_l = max(linearize(max(TESR_SunAmbient.rgb, 0.0f)), linearize(max(TESR_SunColor.rgb, 0.0f)));
-	float3 out_l = lerp(base_l, tint_l, flakes_v);
-	return float4(delinearize(max(out_l, 0.0f)), src_c.a);
+	color = lerp(color, snowColor, totalSnow);
+    color.rgb = pows(color.rgb, 1.0/2.2); // delinearise
+
+	return color;
 }
+
+
 
 technique
 {
 	pass
 	{
-		VertexShader = compile vs_3_0 FrameVS( );
-		PixelShader = compile ps_3_0 SnowPS( );
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 Snow();
 	}
 }

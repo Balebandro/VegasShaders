@@ -1,612 +1,1569 @@
-// WetWorld: rain wetness on open ground, puddles in hollows, rain splashes, wall streaks and puddle reflections.
-// Written from the spec (rw-tools/specs/WetWorld.md). Techniques, sampler registers and constant names match WetWorld.cpp.
-// Technique 0 and 2 keep the original puddle trace (no reflection, as the source describes it); 3, 4 and 6 use the fixed trace.
+// WetWorld fullscreen shader for Oblivion/NewVegas Reloaded
+// Original contributors: Boomstick and Mac
+// UNOFFICIAL 2026-10-13: shared with this build by its authors and used as is (rain splashes, streaks down walls, puddles
+// in hollows, cloud-lit puddles, puddle SSR); only the texture paths take single backslashes like the other effects.
+// Rain splashes, wet surfaces, puddles and screen-space reflections.
+// Shader Model 3.0; requires the engine Includes directory.
 
-float4 TESR_ReciprocalResolution;
-float4 TESR_GameTime;
+// Engine parameters
 float4 TESR_SunDirection;
-float4 TESR_SunPosition;
-float4 TESR_SunAmount;
-float4 TESR_SunColor;
-float4 TESR_SkyData;
-float4 TESR_SkyColor;
-float4 TESR_SkyLowColor;
-float4 TESR_HorizonColor;
-float4 TESR_OrthoData;
-float4 TESR_WaterSettings;
-float4 TESR_WetWorldData;	// x rain, y rainy flag (unused: see the rain fade note), z puddle amount, w darkness
-float4 TESR_WetWorldLook;	// x KeepHighlights
+float4 TESR_ReciprocalResolution;
+float4x4 TESR_WorldViewProjectionTransform;
 float4x4 TESR_ShadowCameraToLightTransformOrtho;
+
+float4 TESR_GameTime;
+float4 TESR_SkyColor;
+float4 TESR_HorizonColor;
+float4 TESR_SunColor;
+float4 TESR_SunAmbient;
+float4 TESR_OrthoData;
+float4 TESR_WetWorldCoeffs;
+float4 TESR_WaterSettings;
+float4 TESR_WetWorldData;
+// UNOFFICIAL 2026-10-16 x: KeepHighlights. This pass writes every pixel while it rains (the sky too, through the far branch) into
+// the HDR scene before the tonemapper; saturate() cut everything brighter than 1 (sun, bright sky, lit wet highlights). On: only
+// negative values are cut, so what this pass does not change reaches the tonemapper as it was.
+float4 TESR_WetWorldLook;
+float3 WetOut(float3 c) { return TESR_WetWorldLook.x > 0.5f ? max(c, 0.0f) : saturate(c); }
+float4 TESR_SunPosition;
+float4 TESR_SkyData;
+float4 TESR_SkyLowColor;
+float4 TESR_SunAmount;
 float4 TESR_LightPosition[12];
 float4 TESR_ShadowLightPosition[12];
 float4 TESR_LightColor[24];
 
-sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-sampler2D TESR_DepthBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-sampler2D TESR_SourceBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+// Texture samplers
+sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_DepthBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_SourceBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_RippleSampler : register(s3) < string ResourceName = "Precipitations\ripples.dds"; > = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
-sampler2D TESR_OrthoMapBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-sampler2D TESR_NormalsBuffer : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
-sampler2D TESR_PointShadowBuffer : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-sampler2D TESR_DepthBufferViewModel : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+sampler2D TESR_OrthoMapBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_NormalsBuffer : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = NONE; MINFILTER = NONE; MIPFILTER = NONE; };
+sampler2D TESR_PointShadowBuffer : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D TESR_DepthBufferViewModel : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_SplashSampler : register(s8) < string ResourceName = "Precipitations\splash.dds"; > = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_SplashNormalSampler : register(s9) < string ResourceName = "Precipitations\splash_n.dds"; > = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_PuddleCloudSampler : register(s10) < string ResourceName = "water\water_d.dds"; > = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_PuddleNormalSampler : register(s11) < string ResourceName = "water\water_nrm.dds"; > = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_WaterStreakSampler : register(s12) < string ResourceName = "Precipitations\water-streaks_n.dds"; > = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+// UNOFFICIAL 2026-10-27 Persistent ([Shaders.WetWorld.Main] Persistent, CoverMap.h): wetness and puddle water kept per spot. Declared
+// last (samplers bind in declaration order); only techniques 5 and 6 read it.
 sampler2D TESR_CoverMapBuffer : register(s13) = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
-
-#include "Includes/Helpers.hlsl"
-#include "Includes/Depth.hlsl"
-#include "Includes/Normals.hlsl"
-#include "Includes/Sky.hlsl"
 #include "Includes/CoverMap.hlsl"
 
+// General settings
+static const float PI = 3.14159265;
+static const float DrawD = TESR_OrthoData.x * 0.9;
+static const float rippleScale = 120.0f;
+static const float refractionScale = 50.0f;
+static const float time1 = TESR_GameTime.z * 0.96f;
+static const float time2 = TESR_GameTime.z * 0.97f;
+static const float time3 = TESR_GameTime.z * 0.98f;
+static const float time4 = TESR_GameTime.z * 0.99f;
+
+// Splash settings
+static const float SplashMaxDist    = 2000.0f;
+static const float SplashFadeStart  = 1200.0f;
+static const float SplashWorldScale = 8.0f;
+static const float SplashAnimSpeed  = 1.35f;
+static const float SplashIntensity  = 0.17f;
+
+// Vertical streak settings
+static const float2 StreakWorldSize = float2(64.0f, 90.0f);
+static const float StreakFlowSpeed = 12.0f;
+static const float StreakFlowMinMultiplier = 0.45f;
+static const float StreakFlowMaxMultiplier = 1.65f;
+static const float StreakFlowGroups = 8.0f;
+static const float StreakNormalStrength = 0.25f;
+static const float StreakNormalYSign = -1.0f;
+static const float StreakMaskStrength = 1.0f;
+static const float StreakDarken = 0.45f;
+static const float StreakSpecularStrength = 1.20f;
+static const float StreakSunSpecularPower = 80.0f;
+static const float StreakHighlightLimit = 0.25f;
+static const float StreakFadeStart = 800.0f;
+static const float StreakFadeFull = 1000.0f;
+
+// Puddle coverage settings
+static const float PuddleAccumulationStart = 0.08f;
+static const float PuddleAccumulationFull = 1.0f;
+static const float PuddleBlurRadius = 12.0f;
+static const float FlatPuddleBlurStrength = 0.0f;
+static const float PuddleBlurDepthTolerance = 0.08f;
+static const float CurvatureWorldRadius = 100.0f;
+static const float CurvatureDepthSign = 1.0f;
+static const float CurvatureSurfaceTolerance = 0.0005f;
+static const float DepressionMinCurvature = 0.25f;
+static const float DepressionFullCurvature = 2.0f;
+static const float DepressionSlopeFadeStart = 0.906f;
+static const float DepressionSlopeCutoff = 0.707f;
+static const float DepressionMaxDepthJump = 80.0f;
+
+// Puddle surface settings
+static const float PuddleNormalStrength = 0.25f;
+static const float FlatPuddleNormalStrength = 0.15f;
+static const float PuddleNormalYSign = 1.0f;
+static const float PuddleCloudStrength = 0.38f;
+static const float PuddleCloudWorldSize = 256.0f;
+static const float PuddleCloudBrightness = 1.65f;
+static const float PuddleCloudContrast = 15.0f;
+static const float PuddleCloudRippleDistortion = 0.035f;
+static const float2 PuddleCloudDrift = float2(-0.02f, -0.01f);
+
+// Puddle lighting settings
+static const float PuddleSkyStrength   = 0.55f;
+static const float PuddleSkyMinReflect = 0.12f;
+static const float PuddleSkyMaxBlend   = 0.28f;
+static const float PuddleSkyBrightness = 0.55f;
+static const float PuddleSkyTintInfluence = 0.25f;
+static const float PuddleSunStrength   = 2.25f;
+static const float PuddleLightStrength = 2.50f;
+static const float PuddleSunLimit      = 1.95f;
+static const float PuddleLightLimit    = 0.90f;
+static const float PuddleSunHighlightLimit = 1.90f;
+static const float PuddlePointHighlightLimit = 1.8f;
+static const float PuddleSkyLumaFloor = 0.015f;
+static const float PuddleSkyLumaScale = 0.65f;
+
+// Screen-space reflection settings
+static const float PuddleSSRCandidateBlend = 0.55f;
+static const float PuddleSSRMinTraceOpacity = 0.005f;
+static const float PuddleSSRScreenFadeStart = 1.0f / 3.0f;
+static const float PuddleSSRScreenFadeFull = 2.0f / 3.0f;
+static const float PuddleSSRFadeStart = 0.20f;
+static const float PuddleSSRFadeFull = 0.40f;
+static const int PuddleSSRSteps = 8;
+static const float PuddleSSRMaxDistance = 1800.0f;
+static const float PuddleSSRSurfaceBias = 3.0f;
+static const float PuddleSSRNormalInfluence = 0.25f;
+static const int PuddleSSRRefinementSteps = 2;
+static const float PuddleSSRRefinementTolerance = 12.0f;
+// UNOFFICIAL 2026-10-17 FixedReflectionTrace: settings of the corrected hit test (see TraceWetReflection)
+static const float PuddleSSRThickness = 24.0f;			// game units a hit may lie behind the depth surface (plus 30% of the step bracket)
+static const float PuddleSSRThicknessPerStep = 0.30f;
+static const float PuddleSSREdgeFade = 0.05f;			// the reflection fades to nothing over this share of the screen at its borders
+
+// Shader types
 struct VSOUT
 {
-	float4 vertPos : POSITION;
-	float2 UVCoord : TEXCOORD0;
+    float4 vertPos : POSITION;
+    float2 UVCoord : TEXCOORD0;
 };
 
 struct VSIN
 {
-	float4 vertPos : POSITION0;
-	float2 UVCoord : TEXCOORD0;
+    float4 vertPos : POSITION0;
+    float2 UVCoord : TEXCOORD0;
 };
 
+// Shared includes
+#include "Includes/Helpers.hlsl"
+#include "Includes/Depth.hlsl"
+#include "Includes/Blur.hlsl"
+#include "Includes/Normals.hlsl"
+#include "Includes/Sky.hlsl"
+#include "Includes/PBR.hlsl"
+
+// Surface reconstruction and exposure
+float SampleOrthoDepth(float2 uv)
+{
+    return tex2Dlod(TESR_OrthoMapBuffer, float4(uv, 0.0f, 0.0f)).r;
+}
+
+float GetRoofMask(float4 OrthoPos)
+{
+    OrthoPos.xyz /= OrthoPos.w;
+
+    float outofbounds =
+    (OrthoPos.x < -1.0f || OrthoPos.x > 1.0f ||
+        OrthoPos.y < -1.0f || OrthoPos.y > 1.0f ||
+        OrthoPos.z <  0.0f || OrthoPos.z > 1.0f);
+
+    OrthoPos.x = OrthoPos.x *  0.5f + 0.5f;
+    OrthoPos.y = OrthoPos.y * -0.5f + 0.5f;
+
+    float Ortho = SampleOrthoDepth(OrthoPos.xy);
+
+    return (Ortho > OrthoPos.z - 0.0001f) * (1.0f - outofbounds);
+}
+
+float4 ScreenCoordToTexCoord(float4 coord, float mult)
+{
+    coord.xyz /= coord.w;
+    coord.x = coord.x * 0.5f + 0.5f;
+    coord.y = coord.y * -0.5f + 0.5f;
+    coord *= mult;
+    return coord;
+}
+
+float4 GetOrthoSurfacePosition(float2 screenUV)
+{
+    float3 viewPosition = reconstructPosition(screenUV);
+    float3 relativeWorldPosition = mul(float4(viewPosition, 0.0f), TESR_InvViewTransform).xyz;
+    return float4(relativeWorldPosition, 1.0f);
+}
+
+// Puddle placement
+float GetOrthoDepthScale()
+{
+    float3 depthAxis = float3(TESR_ShadowCameraToLightTransformOrtho[0][2],
+        TESR_ShadowCameraToLightTransformOrtho[1][2],
+        TESR_ShadowCameraToLightTransformOrtho[2][2]);
+    return max(length(depthAxis) / max(abs(TESR_ShadowCameraToLightTransformOrtho[3][3]),
+        0.000001f), 0.00000001f);
+}
+
+float2 GetCurvatureSampleRadius()
+{
+    float3 axisX = float3(TESR_ShadowCameraToLightTransformOrtho[0][0],
+        TESR_ShadowCameraToLightTransformOrtho[1][0],
+        TESR_ShadowCameraToLightTransformOrtho[2][0]);
+    float3 axisY = float3(TESR_ShadowCameraToLightTransformOrtho[0][1],
+        TESR_ShadowCameraToLightTransformOrtho[1][1],
+        TESR_ShadowCameraToLightTransformOrtho[2][1]);
+    float invW = 1.0f / max(abs(TESR_ShadowCameraToLightTransformOrtho[3][3]), 0.000001f);
+    return max(float2(length(axisX), length(axisY))
+        * (0.5f * CurvatureWorldRadius * invW), 0.000001f.xx);
+}
+
+// First-person masks
+float GetViewModelMask(float2 screenUV)
+{
+    float vmDepthX = tex2D(TESR_DepthBufferViewModel, screenUV).x;
+    return ((TESR_DepthConstants.z == 0 && vmDepthX < 0.9f) ||
+        (TESR_DepthConstants.z > 0 && vmDepthX > 0.01f)) ? 1.0f : 0.0f;
+}
+
+float GetPuddleViewModelExclusion(float2 uv, float centerMask)
+{
+    float2 pixel = TESR_ReciprocalResolution.xy;
+    float mask = centerMask;
+    mask = max(mask, GetViewModelMask(uv + float2(pixel.x, 0)));
+    mask = max(mask, GetViewModelMask(uv - float2(pixel.x, 0)));
+    mask = max(mask, GetViewModelMask(uv + float2(0, pixel.y)));
+    mask = max(mask, GetViewModelMask(uv - float2(0, pixel.y)));
+    return mask;
+}
+
+// Puddle coverage helper
+float ComputeDepressionMask(float4 relativeSurface, float viewDepth, float vmMask)
+{
+    float4 mapPos = ScreenCoordToTexCoord(
+        mul(relativeSurface, TESR_ShadowCameraToLightTransformOrtho), 1.0f);
+    float2 uv = mapPos.xy;
+    float2 radius = GetCurvatureSampleRadius();
+    float valid = step(radius.x, uv.x) * step(uv.x, 1.0f - radius.x)
+    * step(radius.y, uv.y) * step(uv.y, 1.0f - radius.y)
+    * step(0.0f, mapPos.z) * step(mapPos.z, 1.0f);
+
+    float c = SampleOrthoDepth(uv);
+    float left = SampleOrthoDepth(uv + float2(-radius.x, 0));
+    float right = SampleOrthoDepth(uv + float2(radius.x, 0));
+    float top = SampleOrthoDepth(uv + float2(0, -radius.y));
+    float bottom = SampleOrthoDepth(uv + float2(0, radius.y));
+    float2 diagonalRadius = radius * 0.70710678f;
+    float d1 = SampleOrthoDepth(uv - diagonalRadius);
+    float d2 = SampleOrthoDepth(uv + diagonalRadius);
+    float d3 = SampleOrthoDepth(uv + float2(-diagonalRadius.x, diagonalRadius.y));
+    float d4 = SampleOrthoDepth(uv + float2(diagonalRadius.x, -diagonalRadius.y));
+    float depthScale = GetOrthoDepthScale();
+    float meanRing = (left + right + top + bottom + d1 + d2 + d3 + d4) * 0.125f;
+    float signedCurve = (c - meanRing) * CurvatureDepthSign / depthScale;
+    float concave = smoothstep(DepressionMinCurvature, DepressionFullCurvature, signedCurve);
+
+    float2 depthGradient = float2(right - left, bottom - top) / (2.0f * radius);
+    float3 clipGradient = float3(-0.5f * depthGradient.x, 0.5f * depthGradient.y, 1.0f);
+    float3 heightNormal = mul((float3x3)TESR_ShadowCameraToLightTransformOrtho, clipGradient);
+    heightNormal /= max(length(heightNormal), 0.000001f);
+    float slopeFilter = smoothstep(DepressionSlopeCutoff, DepressionSlopeFadeStart, abs(heightNormal.z));
+
+    float depthJump = max(max(abs(left - c), abs(right - c)),
+        max(abs(top - c), abs(bottom - c))) / depthScale;
+    float edgeFilter = 1.0f - smoothstep(DepressionMaxDepthJump * 0.5f, DepressionMaxDepthJump, depthJump);
+    concave *= slopeFilter;
+    concave *= edgeFilter;
+
+    float surfaceMatch = 1.0f - smoothstep(CurvatureSurfaceTolerance,
+        CurvatureSurfaceTolerance * 2.0f, abs(mapPos.z - c));
+    valid *= surfaceMatch * step(0.0f, viewDepth);
+    concave *= valid * (1.0f - vmMask);
+    return concave;
+}
+
+// Rain ripple helper
+float3 ComputeRipple(float2 UV, float CurrentTime, float Weight)
+{
+    float4 Ripple = tex2D(TESR_RippleSampler, UV);
+    Ripple.yz = expand(Ripple.yz);
+
+    float period     = frac(Ripple.w + CurrentTime);
+    float TimeFrac   = period - 1.0f + Ripple.x;
+    float DropFactor = saturate(0.2f + Weight * 0.8f - period);
+    float FinalFactor = DropFactor * Ripple.x * sin(clamp(TimeFrac * 9.0f, 0.0f, 3.0f) * PI);
+
+    return float3(Ripple.yz * FinalFactor * 0.35f, 1.0f);
+}
+
+// Rain splash helpers
+float hash12(float2 p)
+{
+    float3 p3 = frac(float3(p.xyx) * 0.1031f);
+    p3 += dot(p3, p3.yzx + 33.33f);
+    return frac((p3.x + p3.y) * p3.z);
+}
+
+float2 hash22(float2 p)
+{
+    float n = hash12(p);
+    return float2(n, hash12(p + n * 19.19f));
+}
+
+float4 SampleSplash(float2 worldXY, float time, float density, out float splashAlpha, out float2 splashNXY)
+{
+    float2 cell = floor(worldXY / SplashWorldScale);
+    float r = hash12(cell);
+
+    float spawn = step(1.0f - density, r);
+    float phase = frac(time * SplashAnimSpeed + r * 7.13f);
+
+    float fade = smoothstep(0.00f, 0.10f, phase) * (1.0f - smoothstep(0.85f, 1.00f, phase));
+
+    float frame = floor(phase * 16.0f);
+    float2 frameXY = float2(fmod(frame, 4.0f), floor(frame / 4.0f));
+
+    float2 local = frac(worldXY / SplashWorldScale);
+    float2 jitter = (hash22(cell + 13.0f) - 0.5f) * 0.25f;
+    local = frac(local + jitter);
+
+    float2 uv = (local + frameXY) * 0.25f;
+
+    float4 s = tex2D(TESR_SplashSampler, uv);
+
+    float3 nTex = tex2D(TESR_SplashNormalSampler, uv).xyz;
+    float2 nXY = nTex.xy * 2.0f - 1.0f;
+    splashNXY = normalize(float3(nXY, 1)).xy;
+
+    float a = saturate((s.a - 0.25f) * 1.6f);
+    splashAlpha = a * spawn * fade;
+
+    return s;
+}
+
+// Variable streak flow helper
+float4 SampleScrollingStreaks(float2 uv, float flowTravel, float seed, float2 uvDx, float2 uvDy)
+{
+    float laneCoord = uv.x * max(StreakFlowGroups, 1.0f);
+    float lane = floor(laneCoord);
+    float blend = smoothstep(0.40f, 0.60f, frac(laneCoord));
+    float2 randomSpeed = float2(hash12(float2(lane, seed)),
+        hash12(float2(lane + 1.0f, seed)));
+    float minSpeed = max(min(StreakFlowMinMultiplier, StreakFlowMaxMultiplier), 0.0f);
+    float maxSpeed = max(max(StreakFlowMinMultiplier, StreakFlowMaxMultiplier), minSpeed);
+    float2 speed = lerp(minSpeed, maxSpeed, randomSpeed);
+    float2 uvA = uv - float2(0.0f, flowTravel * speed.x);
+    float2 uvB = uv - float2(0.0f, flowTravel * speed.y);
+    float4 sampleA = tex2Dgrad(TESR_WaterStreakSampler, uvA, uvDx, uvDy);
+    float4 sampleB = tex2Dgrad(TESR_WaterStreakSampler, uvB, uvDx, uvDy);
+    float alpha = lerp(sampleA.a, sampleB.a, blend);
+    float3 rgb = lerp(sampleA.rgb * sampleA.a, sampleB.rgb * sampleB.a, blend)
+        / max(alpha, 0.000001f);
+    return float4(rgb, alpha);
+}
+
+// Vertical streak coordinates
+float4 GetWaterStreakUVs(float3 surfacePosition, float3 surfaceNormal)
+{
+    float2 side = float2(surfaceNormal.x < 0.0f ? -1.0f : 1.0f,
+        surfaceNormal.y < 0.0f ? -1.0f : 1.0f);
+    float2 worldSize = max(StreakWorldSize, 1.0f.xx);
+    float verticalUV = -surfacePosition.z / worldSize.y;
+    float2 uvX = float2(surfacePosition.y * side.x / worldSize.x, verticalUV);
+    float2 uvY = float2(-surfacePosition.x * side.y / worldSize.x + 0.37f, verticalUV + 0.19f);
+    return float4(uvX, uvY);
+}
+
+// Vertical streak helper
+float4 SampleWaterStreaks(float4 streakUV, float3 surfaceNormal, float4 uvDx, float4 uvDy)
+{
+    float2 projectionWeights = pow(abs(surfaceNormal.xy), 4.0f);
+    projectionWeights /= max(projectionWeights.x + projectionWeights.y, 0.000001f);
+    float2 side = float2(surfaceNormal.x < 0.0f ? -1.0f : 1.0f,
+        surfaceNormal.y < 0.0f ? -1.0f : 1.0f);
+    float2 worldSize = max(StreakWorldSize, 1.0f.xx);
+    float flowTravel = TESR_GameTime.z * StreakFlowSpeed / worldSize.y;
+    float4 sampleX = SampleScrollingStreaks(streakUV.xy, flowTravel, 17.0f, uvDx.xy, uvDy.xy);
+    float4 sampleY = SampleScrollingStreaks(streakUV.zw, flowTravel, 53.0f, uvDx.zw, uvDy.zw);
+    float2 normalX = sampleX.xy * 2.0f - 1.0f;
+    float2 normalY = sampleY.xy * 2.0f - 1.0f;
+    normalX.y *= StreakNormalYSign;
+    normalY.y *= StreakNormalYSign;
+    float2 coverage = saturate(float2(sampleX.a, sampleY.a) * StreakMaskStrength) * projectionWeights;
+    float3 offsetX = float3(0.0f, normalX.x * side.x, -normalX.y);
+    float3 offsetY = float3(-normalY.x * side.y, 0.0f, -normalY.y);
+    float3 offset = offsetX * coverage.x + offsetY * coverage.y;
+    offset -= surfaceNormal * dot(surfaceNormal, offset);
+    return float4(offset * StreakNormalStrength, coverage.x + coverage.y);
+}
+
+// Screen-space reflection helpers
+float3 GetSSRViewPosition(float2 uv)
+{
+    float4 d = tex2Dlod(TESR_DepthBuffer, float4(uv, 0, 0));
+    float2 s = rectToScreen(uv);	// UNOFFICIAL 2026-10-27 RenderScale v2: NDC from the screen position
+    float4 p = mul(float4(s.x * 2.0f - 1.0f, 1.0f - s.y * 2.0f,
+        0.5f, 1.0f), TESR_InvProjectionTransform);
+    float safeW = (p.w < 0.0f ? -1.0f : 1.0f) * max(abs(p.w), 0.000001f);
+    float3 viewPosition = p.xyz / safeW;
+    viewPosition *= (d.x * farZ) / max(abs(viewPosition.z), 0.000001f);
+    return viewPosition;
+}
+
+float3 TraceWetReflection(float2 sourceUV, float3 waterNormal)
+{
+    float3 selectedHit = float3(0, 0, 0);
+    float3 origin = GetSSRViewPosition(sourceUV);
+    float4 sourceClip = mul(float4(origin, 1.0f), TESR_ProjectionTransform);
+    if (abs(sourceClip.w) < 0.0001f || abs(origin.z) < 0.0001f)
+        return float3(0, 0, 0);
+    float viewSign = origin.z < 0.0f ? -1.0f : 1.0f;
+    float clipSign = sourceClip.w < 0.0f ? -1.0f : 1.0f;
+    float3 viewNormal = normalize(mul(float4(waterNormal, 0.0f), TESR_ViewTransform).xyz);
+
+    if (dot(viewNormal, origin) > 0.0f) viewNormal = -viewNormal;
+    float3 rayDirection = normalize(reflect(normalize(origin), viewNormal));
+    origin += viewNormal * PuddleSSRSurfaceBias;
+    float4 projectedOrigin = mul(float4(origin, 1.0f), TESR_ProjectionTransform);
+    float4 projectedDirection = mul(float4(rayDirection, 0.0f), TESR_ProjectionTransform);
+    float previousDelta = -PuddleSSRRefinementTolerance;
+    float previousTravel = 0.0f;
+    [loop]
+    for (int ssrStep = 1; ssrStep <= PuddleSSRSteps; ssrStep++)
+    {
+        float fraction = (float)ssrStep / (float)PuddleSSRSteps;
+        float travel = 8.0f + PuddleSSRMaxDistance * fraction * fraction;
+        float3 probe = origin + rayDirection * travel;
+        float4 projected = projectedOrigin + projectedDirection * travel;
+        if (projected.w * clipSign <= 0.0001f || probe.z * viewSign <= 0.0001f) break;
+        float2 hitS = projected.xy / projected.w * float2(0.5f, -0.5f) + 0.5f;	// UNOFFICIAL 2026-10-27 RenderScale v2: screen position, read in the rect
+        if (hitS.x <= 0.001f || hitS.x >= 0.999f || hitS.y <= 0.001f || hitS.y >= 0.999f) break;
+        float2 hitUV = screenToRect(hitS);
+        float4 depthSample = tex2Dlod(TESR_DepthBuffer, float4(hitUV, 0, 0));
+        float delta = probe.z * viewSign - depthSample.x * farZ;
+        if (depthSample.x > 0.0f && depthSample.x < 0.99999f
+            && delta >= 0.0f && previousDelta < 0.0f)
+        {
+            float lowerTravel = previousTravel;
+            float upperTravel = travel;
+            [loop]
+            for (int refinement = 0; refinement < PuddleSSRRefinementSteps; refinement++)
+            {
+                float midTravel = (lowerTravel + upperTravel) * 0.5f;
+                float3 midProbe = origin + rayDirection * midTravel;
+                float4 midClip = projectedOrigin + projectedDirection * midTravel;
+                float2 midUV = screenToRect(midClip.xy / midClip.w * float2(0.5f, -0.5f) + 0.5f);
+                float midZ = tex2Dlod(TESR_DepthBuffer, float4(midUV, 0, 0)).x * farZ;
+                float midDelta = midProbe.z * viewSign - midZ;
+                if (midDelta >= 0.0f)
+                {
+                    upperTravel = midTravel;
+
+                    if (midDelta <= PuddleSSRRefinementTolerance) break;
+                }
+                else lowerTravel = midTravel;
+            }
+            float3 hitProbe = origin + rayDirection * upperTravel;
+            float4 hitClip = projectedOrigin + projectedDirection * upperTravel;
+            float2 refinedS = hitClip.xy / hitClip.w * float2(0.5f, -0.5f) + 0.5f;	// UNOFFICIAL 2026-10-27 RenderScale v2
+            float2 refinedUV = screenToRect(refinedS);
+            float hitDepth = tex2Dlod(TESR_DepthBuffer, float4(refinedUV, 0, 0)).x;
+            float hitDelta = hitProbe.z * viewSign - hitDepth * farZ;
+            float vmHitDepth = tex2Dlod(TESR_DepthBufferViewModel, float4(refinedUV, 0, 0)).x;
+            bool hitViewModel = (TESR_DepthConstants.z == 0 && vmHitDepth < 0.9f)
+            || (TESR_DepthConstants.z > 0 && vmHitDepth > 0.01f);
+            float2 pixelSeparation = (refinedUV - sourceUV) / TESR_ReciprocalResolution.xy;
+            bool validHitDepth = hitDepth > 0.0f && hitDepth < 0.99999f;
+            bool separatedHit = dot(pixelSeparation, pixelSeparation) >= 16.0f;
+
+            if (hitDelta >= 0.0f && validHitDepth && !hitViewModel && separatedHit)
+            {
+                float edge = min(min(refinedS.x, 1.0f-refinedS.x), min(refinedS.y, 1.0f-refinedS.y));
+                float edgeVisibility = smoothstep(0.0f, 0.02f, edge);
+                float distanceVisibility = max(1.0f - smoothstep(PuddleSSRMaxDistance * 0.65f,
+                    PuddleSSRMaxDistance, upperTravel), 0.25f);
+                if (edgeVisibility * distanceVisibility > 0.0f)
+                    return float3(0, 0, 0);
+            }
+
+            selectedHit = float3(0, 0, 0);
+            if (validHitDepth && !hitViewModel && separatedHit && !(hitDelta < 0.0f))
+                selectedHit = float3(refinedUV, 1.0f);
+        }
+
+        previousDelta = delta;
+        previousTravel = travel;
+    }
+    return selectedHit;
+}
+
+// UNOFFICIAL 2026-10-17 FixedReflectionTrace (setting [Shaders.WetWorld.Main] FixedReflectionTrace, off by default; compiled as
+// separate techniques so the original program stays what it was).
+// FOUND IN GAME (puddlessr debug maps, 2026-10-17): in the original trace above, none of the break / return statements inside the
+// march loop stops anything on the real GPU path (the D3DX listing writes every exit as 'break_ne -c, -c', a comparison of a value with
+// itself, i.e. never taken; the early 'return float3(0,0,0)' is therefore a flag that later iterations overwrite). The march always
+// runs all steps, samples past the screen border as if they were hits (clamped depth), keeps the LAST bracket it finds instead of
+// the first, and the edge / distance fade and the 'return no reflection' never act: puddles show hard-edged full-strength copies of
+// the screen (clamped border pixels where the ray left it), which flip under any recompile.
+// This version has no break / return inside a loop: a done flag guards each step, the refinement always runs both halvings, and
+// the result is written once. Hit test: first depth crossing, thickness bound (McGuire and Mara, Efficient GPU Screen-Space Ray
+// Tracing, JCGT 2014: a ray that passed behind a thin occluder is not a hit; the allowance grows with the step bracket because the
+// 2-step refinement only locates the surface to a quarter of it), fade to nothing towards the screen border and with distance
+// (Stachowiak, Stochastic Screen-Space Reflections, SIGGRAPH 2015). xy = hit UV, z = visibility (a weight, 0 = miss: the puddle
+// keeps its analytic sky/cloud colour as before).
+float3 TraceWetReflectionFixed(float2 sourceUV, float3 waterNormal)
+{
+    float3 result = float3(0, 0, 0);
+    float3 origin = GetSSRViewPosition(sourceUV);
+    float4 sourceClip = mul(float4(origin, 1.0f), TESR_ProjectionTransform);
+    float viewSign = origin.z < 0.0f ? -1.0f : 1.0f;
+    float clipSign = sourceClip.w < 0.0f ? -1.0f : 1.0f;
+    float3 viewNormal = normalize(mul(float4(waterNormal, 0.0f), TESR_ViewTransform).xyz);
+    if (dot(viewNormal, origin) > 0.0f) viewNormal = -viewNormal;
+    float3 rayDirection = normalize(reflect(normalize(origin), viewNormal));
+    origin += viewNormal * PuddleSSRSurfaceBias;
+    float4 projectedOrigin = mul(float4(origin, 1.0f), TESR_ProjectionTransform);
+    float4 projectedDirection = mul(float4(rayDirection, 0.0f), TESR_ProjectionTransform);
+    float previousDelta = -PuddleSSRRefinementTolerance;
+    float previousTravel = 0.0f;
+    bool done = abs(sourceClip.w) < 0.0001f || abs(origin.z) < 0.0001f;
+    [loop]
+    for (int ssrStep = 1; ssrStep <= PuddleSSRSteps; ssrStep++)
+    {
+        float fraction = (float)ssrStep / (float)PuddleSSRSteps;
+        float travel = 8.0f + PuddleSSRMaxDistance * fraction * fraction;
+        float3 probe = origin + rayDirection * travel;
+        float4 projected = projectedOrigin + projectedDirection * travel;
+        float2 hitS = projected.xy / max(abs(projected.w), 0.0001f) * float2(0.5f, -0.5f) + 0.5f;	// UNOFFICIAL 2026-10-27 RenderScale v2
+        bool onScreen = projected.w * clipSign > 0.0001f && probe.z * viewSign > 0.0001f
+            && hitS.x > 0.001f && hitS.x < 0.999f && hitS.y > 0.001f && hitS.y < 0.999f;
+        float2 hitUV = screenToRect(hitS);
+        float4 depthSample = tex2Dlod(TESR_DepthBuffer, float4(hitUV, 0, 0));
+        float delta = probe.z * viewSign - depthSample.x * farZ;
+        // one branch per step; 'done' (a hit was taken, or the ray left the screen) replaces the loop exits that do not work
+        [branch]
+        if (!done && onScreen && depthSample.x > 0.0f && depthSample.x < 0.99999f && delta >= 0.0f && previousDelta < 0.0f)
+        {
+            float lowerTravel = previousTravel;
+            float upperTravel = travel;
+            [unroll]
+            for (int refinement = 0; refinement < PuddleSSRRefinementSteps; refinement++)
+            {
+                float midTravel = (lowerTravel + upperTravel) * 0.5f;
+                float3 midProbe = origin + rayDirection * midTravel;
+                float4 midClip = projectedOrigin + projectedDirection * midTravel;
+                float2 midUV = screenToRect(midClip.xy / midClip.w * float2(0.5f, -0.5f) + 0.5f);
+                float midZ = tex2Dlod(TESR_DepthBuffer, float4(midUV, 0, 0)).x * farZ;
+                bool behind = midProbe.z * viewSign - midZ >= 0.0f;
+                upperTravel = behind ? midTravel : upperTravel;
+                lowerTravel = behind ? lowerTravel : midTravel;
+            }
+            float3 hitProbe = origin + rayDirection * upperTravel;
+            float4 hitClip = projectedOrigin + projectedDirection * upperTravel;
+            float2 refinedS = hitClip.xy / hitClip.w * float2(0.5f, -0.5f) + 0.5f;	// UNOFFICIAL 2026-10-27 RenderScale v2
+            float2 refinedUV = screenToRect(refinedS);
+            float hitDepth = tex2Dlod(TESR_DepthBuffer, float4(refinedUV, 0, 0)).x;
+            float hitDelta = hitProbe.z * viewSign - hitDepth * farZ;
+            float vmHitDepth = tex2Dlod(TESR_DepthBufferViewModel, float4(refinedUV, 0, 0)).x;
+            bool hitViewModel = (TESR_DepthConstants.z == 0 && vmHitDepth < 0.9f)
+            || (TESR_DepthConstants.z > 0 && vmHitDepth > 0.01f);
+            float2 pixelSeparation = (refinedUV - sourceUV) / TESR_ReciprocalResolution.xy;
+            bool validHitDepth = hitDepth > 0.0f && hitDepth < 0.99999f;
+            bool separatedHit = dot(pixelSeparation, pixelSeparation) >= 16.0f;
+            float thickness = PuddleSSRThickness + PuddleSSRThicknessPerStep * (travel - previousTravel);
+            float edge = min(min(refinedS.x, 1.0f - refinedS.x), min(refinedS.y, 1.0f - refinedS.y));
+            float edgeVisibility = smoothstep(0.0f, PuddleSSREdgeFade, edge);
+            float distanceVisibility = max(1.0f - smoothstep(PuddleSSRMaxDistance * 0.65f,
+                PuddleSSRMaxDistance, upperTravel), 0.25f);
+            float visibility = edgeVisibility * distanceVisibility;
+            if (hitDelta >= 0.0f && hitDelta <= thickness && validHitDepth && !hitViewModel && separatedHit && visibility > 0.0f)
+            {
+                result = float3(refinedUV, visibility);
+                done = true;
+            }
+        }
+        done = done || !onScreen;
+        previousDelta = delta;
+        previousTravel = travel;
+    }
+    return result;
+}
+
+// Vertex shader
 VSOUT FrameVS(VSIN IN)
 {
-	VSOUT OUT = (VSOUT)0.0f;
-	OUT.vertPos = IN.vertPos;
-	OUT.UVCoord = IN.UVCoord;
-	return OUT;
+    VSOUT OUT = (VSOUT)0.0f;
+    OUT.vertPos = IN.vertPos;
+    OUT.UVCoord = IN.UVCoord;
+    return OUT;
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// Helpers
-
-float WetHash(float2 p)
+// Wet-map pass
+float4 WetMap(VSOUT IN) : COLOR0
 {
-	return frac(sin(dot(p, float2(12.9898f, 78.233f))) * 43758.5453f);
+    float depth = readDepth(IN.UVCoord);
+    if (depth > DrawD)
+        return float4(0, 0, 0, 1);
+    float4 surfacePosition = GetOrthoSurfacePosition(IN.UVCoord);
+    float vmMask = GetViewModelMask(IN.UVCoord);
+    float coverage = ComputeDepressionMask(surfacePosition, depth, vmMask);
+    float dotUp = dot(GetWorldNormal(IN.UVCoord), float3(0, 0, 1));
+    float4 roofPosition = mul(surfacePosition, TESR_ShadowCameraToLightTransformOrtho);
+    float flatCoverage = GetRoofMask(roofPosition) * smoothstep(0.65f, 0.92f, dotUp)
+        * (1.0f - vmMask);
+    float flatWetCoverage = flatCoverage * smoothstep(0.90f, 0.97f, dotUp);
+    return float4(coverage, flatCoverage, flatWetCoverage, 1.0f);
 }
 
-float DotLum(float3 c)
+// Wet-map blur pass
+float4 BlurWetMap(VSOUT IN, uniform float2 OffsetMask, uniform float blurRadius) : COLOR0
 {
-	return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+    float2 uv = IN.UVCoord;
+    float centerDepth = readDepth(uv);
+    float2 blurStep = TESR_ReciprocalResolution.xy * OffsetMask * max(blurRadius, 0.0f) * 0.5f;
+    float depthTolerance = max(PuddleBlurDepthTolerance * max(centerDepth, 1.0f), 0.0001f);
+    float weightSum = 0.375f;
+    float3 coverage = tex2D(TESR_RenderedBuffer, uv).rgb * weightSum;
+    [unroll]
+    for (int tap = -2; tap <= 2; tap++)
+    {
+        if (tap != 0)
+        {
+            float2 sampleUV = clampToRectIfOn(saturate(uv + blurStep * (float)tap), TESR_ReciprocalResolution.xy);	// UNOFFICIAL 2026-10-27 RenderScale v2
+            float sampleDepth = readDepth(sampleUV);
+            float depthWeight = 1.0f - smoothstep(depthTolerance * 0.5f,
+                depthTolerance, abs(sampleDepth - centerDepth));
+            float kernelWeight = abs(tap) == 1 ? 0.25f : 0.0625f;
+            float weight = kernelWeight * depthWeight;
+            coverage += tex2D(TESR_RenderedBuffer, sampleUV).rgb * weight;
+            weightSum += weight;
+        }
+    }
+    coverage /= weightSum;
+    return float4(coverage, 1.0f);
 }
 
-// Far limit: 0.9 of the ortho map's half width (TESR_OrthoData.x is the full width: ShadowManager sets it to 2 x Distance).
-float WetFarLimit()
+// UNOFFICIAL 2026-10-17 FastPaths helpers (see Wet below)
+float2 GetPuddleCloudUV(float4 worldPosRelRoof, float3 combinedNormals)
 {
-	return 0.9f * max(TESR_OrthoData.x, 1.0f) * 0.5f;
+    float3 cloudSurface = TESR_CameraPosition.xyz
+    + worldPosRelRoof.xyz;
+    float2 cloudUV = cloudSurface.xy / max(PuddleCloudWorldSize, 1.0f);
+    cloudUV += TESR_GameTime.z * PuddleCloudDrift;
+    cloudUV += combinedNormals.xy * PuddleCloudRippleDistortion;
+    return cloudUV;
 }
 
-// Vertical view-model test: a first-person pixel is nearer than the normal depth test (reversed depth: above 0.01).
-bool WetFirstPerson(float vm)
+// One lamp's highlight, as the main path's loop body; the half vector and the lobe only where the lamp reaches the pixel
+// (att > 0: elsewhere both terms are x * 0). (Not one uniform branch per slot: 24 of them need more than the 16 boolean
+// registers and pushed the pass past ps_3_0's 224 float constants. The whole loop sits behind one 'any lamp' boolean.)
+void AddLampHighlightFast(float4 lightPos, float3 c, float3 worldPos, float3 V, float3 N, float specMask, float streakMask,
+    inout float3 pointSpecCol, inout float3 streakPointCol)
 {
-	return invertedDepth > 0.5f ? (vm > 0.01f) : (vm < 0.9f);
+    float3 L = lightPos.xyz - worldPos;
+    float dist = length(L);
+    float d = dist / max(lightPos.w, 1e-4);
+    float att = saturate(1.0f - d);
+    att *= att;
+    att = lightPos.w > 0.0f ? att : 0.0f;	// an empty slot (w = 0) adds nothing, as the main path's test on w
+    [branch]
+    if (att > 0.0f)
+    {
+        L /= max(dist, 1e-4);
+        float3 H = normalize(L - V);
+
+        float ndh = saturate(dot(N, H));
+        float specLobe = pow(ndh, 30.0f);
+        float spec = specLobe * specMask;
+
+        pointSpecCol += c * spec * att;
+        float streakSpec = specLobe * streakMask * StreakSpecularStrength;
+        streakPointCol += c * streakSpec * att;
+    }
 }
 
-struct WetOrtho
+// Wet-surface pass
+// UNOFFICIAL 2026-10-17 FastPaths ([Shaders.WetWorld.Main] FastPaths: technique 2 compiles this with fast = true, technique 0
+// is the original, byte for byte). The compiler had flattened every early return of this pass and the 24-lamp loop (cmp
+// selects), so every pixel, sky included, ran all of it (~1600 instructions). With fast = true the same results are reached
+// through real branches:
+//  - the far/water return and the first-person return branch for real; so does a zero-weight return: a pixel that is not
+//    first-person, with LODfade*wetMask == 0, no streak and no SSR trace, ends exactly as WetOut(base + splashAdd), alpha 1;
+//  - the puddle colour (sky, clouds, sun and lamp highlights) is only built where LODfade*wetMask > 0 (its only way in);
+//  - the lamp loop runs only when a lamp slot is in use (one uniform boolean), and per pixel only where the lamp's
+//    attenuation is above 0 (an unlit lamp adds x * 0);
+// Every texture read of the original (all tex2D with implicit derivatives: ripples, puddle normals, cloud, refraction,
+// first-person mask, shadow buffer, puddle exclusion) still runs, the same way, on every pixel before the first new branch;
+// the branches only skip arithmetic (and the SSR trace, which was already a branch).
+// UNOFFICIAL 2026-10-27 persist ([Shaders.WetWorld.Main] Persistent; techniques 5 and 6, FastPaths with and without the fixed trace):
+// how wet the flat ground is and how full the puddles are come from the cover map (Includes/CoverMap.hlsl: per spot, built up where
+// the rain reached, dried by the sun) instead of the one value for the whole world (the rain fade and TESR_WetWorldData.z). The
+// ripples, splashes and wall streaks still follow the rain that falls now. With persist = false every line is as before.
+float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool persist) : COLOR0
 {
-	float2 uv;
-	float z;
-	float inside;
-	float top;
-	float open;	// 1 when nothing lies between the point and the sun (or the map's top is the point)
-};
+    // Surface reconstruction and weather
+    float4 baseColor = tex2D(TESR_SourceBuffer, IN.UVCoord);
 
-// rel: camera-relative world position. Outside the ortho map the point counts as covered (open 0).
-WetOrtho WetOrthoAt(float3 rel)
-{
-	WetOrtho r;
-	float4 o = mul(float4(rel, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
-	o.xyz /= max(abs(o.w), 1.0e-6f) * sign(o.w + 1.0e-12f);
-	r.uv = float2(o.x * 0.5f + 0.5f, o.y * -0.5f + 0.5f);
-	r.z = o.z;
-	r.inside = (abs(o.x) <= 1.0f && abs(o.y) <= 1.0f && o.z >= 0.0f && o.z <= 1.0f) ? 1.0f : 0.0f;
-	r.top = tex2Dlod(TESR_OrthoMapBuffer, float4(r.uv, 0.0f, 0.0f)).r;
-	r.open = r.inside * step(o.z - 0.0001f, r.top);
-	return r;
+    float depth = readDepth(IN.UVCoord);
+
+    float4 worldPosRelRoof = GetOrthoSurfacePosition(IN.UVCoord);
+    float4 orthoRoofPos = mul(worldPosRelRoof, TESR_ShadowCameraToLightTransformOrtho);
+    float roofMask = GetRoofMask(orthoRoofPos);
+
+    float3 eyeDirection = toWorld(IN.UVCoord);
+    float3 camera_vector = eyeDirection * depth;
+    float4 worldPos = float4(TESR_CameraPosition.xyz + camera_vector, 1.0f);
+
+    float3 normal = GetWorldNormal(IN.UVCoord);
+    float3 up = float3(0, 0, 1);
+
+    float floorAngle = smoothstep(0.94, 1, dot(normal, up));
+    eyeDirection = normalize(eyeDirection);
+    float3 V = normalize(eyeDirection);
+
+    float rainAmt  = saturate(TESR_WetWorldData.x / max(TESR_WetWorldData.y, 0.0001f));
+    float rainFade = smoothstep(0.05f, 0.35f, rainAmt);
+    float rainVis = rainFade * roofMask;
+
+    // First-person surface mask
+    float vmDepthX = tex2D(TESR_DepthBufferViewModel, IN.UVCoord).x;
+    float vmMask = GetViewModelMask(IN.UVCoord);
+    float puddleVMExclude = GetPuddleViewModelExclusion(IN.UVCoord, vmMask);
+
+    float2 d = float2(ddx(vmDepthX), ddy(vmDepthX));
+    float grad = length(d);
+    float vmFlatMask = 1.0f - saturate(grad * 80.0f);
+    vmFlatMask = smoothstep(0.55f, 0.90f, vmFlatMask);
+
+    // Rain splashes
+    float2 splashBumpXY = float2(0.0f, 0.0f);
+
+    float dotUp = dot(normal, up);
+    float splashDistFade = 1.0f - smoothstep(SplashFadeStart, SplashMaxDist, depth);
+    float splashFlatMask = smoothstep(0.7071f, 0.92f, dotUp);
+
+    float2 splashXY = worldPos.xy;
+
+    float rand = hash12(floor(worldPos.xy * 0.5f));
+
+    float worldSizeVar = lerp(0.75f, 1.35f, rand);
+    float2 worldSplashXY = splashXY / worldSizeVar;
+
+    float vmSizeVar = lerp(0.70f, 1.30f, rand);
+
+    float vmScale = 0.28f;
+
+    float vmSplashSizeMul = 1.0f;
+
+    float2 vmSplashXY = (splashXY / (vmScale * vmSplashSizeMul)) * vmSizeVar;
+
+    splashXY = lerp(worldSplashXY, vmSplashXY, vmMask);
+
+    float splashAlpha;
+    float2 splashNXY;
+    float4 splashSample = SampleSplash(splashXY, TESR_GameTime.z, (rainAmt * roofMask) * 0.395f, splashAlpha, splashNXY);
+    splashAlpha *= roofMask;
+
+    float splashStrength = 2.2f;
+    splashStrength *= splashAlpha;
+    splashStrength *= splashFlatMask;
+
+    splashStrength *= saturate(0.5f + 0.5f * rainVis);
+    splashBumpXY = splashNXY * splashStrength;
+
+    float vmIntensity = lerp(1.0f, 0.90f, vmMask);
+
+    float3 splashRGB = splashSample.rgb;
+    splashRGB = saturate((splashRGB - 0.5f) * 1.6f + 0.5f);
+    splashRGB = lerp(splashRGB, 1.0f.xxx, 0.35f);
+
+    float3 splashAdd = splashRGB * (splashAlpha * splashDistFade * splashFlatMask * SplashIntensity * vmIntensity);
+    splashAdd *= roofMask;
+    splashAdd *= 0.6f;
+
+    // Water exclusion and distance fade
+    float waterThreshold = (depth / farZ) * 500;
+    float isWaterSurface = (floorAngle > 0.9) &&
+    (worldPos.z > TESR_WaterSettings.x - waterThreshold) &&
+    (worldPos.z < TESR_WaterSettings.x + waterThreshold);
+
+    if (!fast && (depth > DrawD || isWaterSurface))
+        return float4(WetOut(baseColor.rgb + splashAdd), baseColor.a);
+    float4 baseColorIn = baseColor;	// (fast: the far/water return below uses the colour before the streak darkening)
+
+    float LODfade = smoothstep(DrawD, 0, depth);
+
+    // Puddle coverage and wetness
+    float3 blurredWetCoverage = saturate(tex2D(TESR_RenderedBuffer, IN.UVCoord).rgb);
+    float puddles = blurredWetCoverage.r;
+    puddles *= (1.0f - puddleVMExclude) * (1.0f - vmMask);
+    puddles *= smoothstep(DepressionSlopeCutoff, DepressionSlopeFadeStart, dotUp);
+
+    // UNOFFICIAL 2026-10-27 persist: this spot's wetness (x) and puddle water (y) from the cover map
+    float4 cover = persist ? CoverMapRead(camera_vector.xy) : float4(0, 0, 0, 0);
+    float puddleFade = smoothstep(PuddleAccumulationStart, PuddleAccumulationFull,
+        saturate(persist ? cover.y : TESR_WetWorldData.z));
+    float puddlemask = puddles * puddleFade;
+
+    float slopeMask = smoothstep(0.90f, 0.97f, dotUp);
+
+    float depthish = saturate(puddlemask * 1.15f);
+    depthish = depthish * depthish;
+
+    float rim = 4.0f * puddlemask * (1.0f - puddlemask);
+    float rimDark = rim * 0.15f;
+    float rimReflBoost = rim * 0.08f;
+
+    float rippleFlatMask = smoothstep(0.65f, 0.92f, dotUp);
+    float rippleFlatFinal = lerp(rippleFlatMask, rippleFlatMask * vmFlatMask, vmMask);
+    float rippleMask = rainVis * rippleFlatFinal;
+
+    rippleMask *= lerp(1.0f, vmFlatMask, vmMask);
+
+    float flatBlurStrength = saturate(FlatPuddleBlurStrength);
+    float flatCoverage = lerp(roofMask * rippleFlatMask, blurredWetCoverage.g, flatBlurStrength);
+    float flatWetCoverage = lerp(roofMask * rippleFlatMask * slopeMask,
+        blurredWetCoverage.b, flatBlurStrength);
+    rippleMask = lerp(rainFade * flatCoverage, rippleMask, vmMask);
+
+    float wetSlope = lerp(slopeMask, 1.0f, vmMask);
+    float wetRippleMask = lerp((persist ? cover.x : rainFade) * flatWetCoverage, rippleMask * wetSlope, vmMask);
+    float wetMask = saturate(max(puddlemask, wetRippleMask * 0.85f));
+    float specMask = saturate(max(puddlemask,
+        wetRippleMask + rim * 0.15f * wetSlope));
+
+    specMask = saturate(specMask + splashAlpha * 0.55f * splashFlatMask);
+
+    // Vertical streaks
+    float streakExposure = (1.0f - smoothstep(0.55f, 0.80f, abs(dotUp)))
+        * (1.0f - vmMask) * rainVis;
+    float streakDistance = length(camera_vector);
+    streakExposure *= 1.0f - smoothstep(StreakFadeStart, StreakFadeFull, streakDistance);
+    float3 streakSurfaceNormal = normalize(normal);
+    float4 streakUV = GetWaterStreakUVs(worldPos.xyz, streakSurfaceNormal);
+    float4 streakUVDx = ddx(streakUV);
+    float4 streakUVDy = ddy(streakUV);
+    float4 streakSample = float4(0, 0, 0, 0);
+    [branch]
+    if (streakDistance < StreakFadeFull && streakExposure > 0.0f)
+    {
+        streakSample = SampleWaterStreaks(streakUV, streakSurfaceNormal, streakUVDx, streakUVDy);
+    }
+    float streakMask = saturate(streakSample.a * streakExposure);
+    float3 streakNormalOffset = streakSample.xyz * streakExposure;
+    baseColor.rgb *= 1.0f - StreakDarken * streakMask;
+
+    // Ripple normals
+    float2 rippleUV_world = worldPos.xy / rippleScale;
+
+    float vmRippleScale   = 0.28f;
+    float vmRippleSizeMul = 0.2f;
+
+    float2 rippleUV_vm = worldPos.xy / (rippleScale * vmRippleScale * vmRippleSizeMul);
+
+    float2 rippleUV = lerp(rippleUV_world, rippleUV_vm, vmMask);
+
+    float4 Weights = float4(1, 0.75, 0.5, 0.25) * TESR_WetWorldData.x;
+    Weights = saturate(Weights * 4);
+
+    float3 Ripple1 = ComputeRipple(rippleUV + float2( 0.25f, 0.0f), time1, Weights.x);
+    float3 Ripple2 = ComputeRipple(rippleUV * 1.1 + float2(-0.55f, 0.3f), time2, Weights.y);
+    float3 Ripple3 = ComputeRipple(rippleUV * 1.3 + float2( 0.6f, 0.85f), time3, Weights.z);
+    float3 Ripple4 = ComputeRipple(rippleUV * 1.5 + float2( 0.5f,-0.75f), time4, Weights.w);
+
+    float4 Z = lerp(1, float4(Ripple1.z, Ripple2.z, Ripple3.z, Ripple4.z), Weights);
+
+    float3 ripple = float3(
+        Weights.x * Ripple1.xy + Weights.y * Ripple2.xy + Weights.z * Ripple3.xy + Weights.w * Ripple4.xy,
+        Z.x * Z.y * Z.z * Z.w
+        );
+
+    ripple.xy *= 2.2f;
+
+    float3 combinedNormals = normalize(ripple);
+    combinedNormals = normalize(lerp(float3(0,0,1), combinedNormals, LODfade * wetMask));
+
+    combinedNormals.xy += splashBumpXY * 2.0f;
+    combinedNormals = normalize(combinedNormals);
+
+    // Puddle waves
+    float t = TESR_GameTime.z;
+
+    float2 windDir = float2(1.0f, 0.0f);
+    float p = dot(worldPos.xy, windDir);
+
+    float2 swell;
+    swell.x =
+    sin(p * 0.260f + t * 3.10f) +
+    0.55f * sin((p + worldPos.y) * 0.200f + t * 3.90f);
+
+    swell.y =
+    sin(p * 0.240f + t * 3.40f) +
+    0.55f * sin((p + worldPos.x) * 0.210f + t * 3.60f);
+
+    float distFade = (1.0f - smoothstep(400.0f, 1800.0f, depth));
+    float swellAmp = 0.0030f * pow(puddlemask, 1.35f) * distFade;
+
+    combinedNormals.xy += swell * swellAmp;
+    combinedNormals = normalize(combinedNormals);
+
+    // Puddle texture normals
+    float3 puddleNormalSurface = TESR_CameraPosition.xyz + worldPosRelRoof.xyz;
+    float2 puddleSurfaceUV = puddleNormalSurface.xy / max(PuddleCloudWorldSize, 1.0f);
+    float2 puddleNormalUV = puddleSurfaceUV + TESR_GameTime.z * PuddleCloudDrift;
+    puddleNormalUV += combinedNormals.xy * PuddleCloudRippleDistortion;
+    float2 puddleNormalUV2 = puddleSurfaceUV * 1.37f + float2(0.23f, 0.61f)
+        - TESR_GameTime.z * PuddleCloudDrift * 0.65f;
+    puddleNormalUV2 += combinedNormals.xy * PuddleCloudRippleDistortion;
+    float2 puddleTexNormalA = tex2D(TESR_PuddleNormalSampler, puddleNormalUV).xy * 2.0f - 1.0f;
+    float2 puddleTexNormalB = tex2D(TESR_PuddleNormalSampler, puddleNormalUV2).xy * 2.0f - 1.0f;
+    float2 puddleTexNormal = lerp(puddleTexNormalA, puddleTexNormalB, 0.35f);
+    puddleTexNormal.y *= PuddleNormalYSign;
+    float flatNormalStrength = FlatPuddleNormalStrength * saturate(wetRippleMask) * (1.0f - vmMask);
+    float textureNormalStrength = lerp(flatNormalStrength, PuddleNormalStrength, puddlemask);
+    float2 puddleNormalOffset = puddleTexNormal * textureNormalStrength * LODfade;
+    combinedNormals = normalize(float3(combinedNormals.xy + puddleNormalOffset,
+        combinedNormals.z));
+
+    // Surface normals
+    float3 baseN = normalize(lerp(normal, up, puddlemask));
+    float3 N = normalize(lerp(baseN, combinedNormals, specMask));
+
+    N = normalize(N + streakNormalOffset);
+
+    // Refraction
+    float NdotV_refr = saturate(dot(N, -V));
+    float viewRefr   = smoothstep(0.18f, 0.45f, NdotV_refr);
+
+    float2 refrOff = expand(rectToScreen(projectPosition(combinedNormals).xy)) * TESR_ReciprocalResolution.xy * refractionScale;	// UNOFFICIAL 2026-10-27 RenderScale v2: the offset native frames get
+
+    float splashRefr = 0.35f * splashAlpha * splashFlatMask;
+    refrOff += splashBumpXY * (refractionScale * 0.35f) * TESR_ReciprocalResolution.xy * splashRefr;
+
+    refrOff *= lerp(1.0f, 0.35f, puddlemask);
+
+    refrOff *= viewRefr;
+
+    float swellUV = (swellAmp * 0.50f) * viewRefr;
+    refrOff += swell * swellUV;
+
+    float2 refrClamp = TESR_ReciprocalResolution.xy * (refractionScale * 0.75f);
+    refrOff = clamp(refrOff, -refrClamp, refrClamp);
+
+    // FastPaths: every texture read the original makes with tex2D (implicit derivatives) is made here, the same way, on every
+    // pixel before the first new branch: the mipmapped cloud read, and the refraction, first-person and shadow-buffer reads.
+    // (A tex2Dlod at level 0 behind a branch is the same fetch only if no anisotropic filtering applies, e.g. a driver override:
+    // the first build did that and left a small, local difference in game.) The branches below only skip arithmetic.
+    float4 cloudSample = float4(0, 0, 0, 0);
+    float wetWeight = LODfade * wetMask;
+    float3 refrLinPre = float3(0, 0, 0);
+    float vmSampleValidPre = 0.0f;
+    float4 shadowsPre = float4(0, 0, 0, 0);
+    if (fast)
+    {
+        cloudSample = tex2D(TESR_PuddleCloudSampler, GetPuddleCloudUV(worldPosRelRoof, combinedNormals));
+        refrLinPre = linearize(tex2D(TESR_SourceBuffer, IN.UVCoord + refrOff)).rgb;
+        vmSampleValidPre = GetViewModelMask(saturate(IN.UVCoord + refrOff));
+        shadowsPre = tex2D(TESR_PointShadowBuffer, IN.UVCoord);
+
+        // (shadowsPre.y < -1: never true - the shadow buffer is G16R16 UNORM - it only keeps the compiler from sinking that
+        // tex2D into a branch, where its implicit derivatives would no longer be the original's)
+        [branch]
+        if (depth > DrawD || isWaterSurface || shadowsPre.y < -1.0f)
+            return float4(WetOut(baseColorIn.rgb + splashAdd), baseColorIn.a);
+
+        // the SSR trace condition of the main path below (same expressions)
+        float fLinger = puddleFade * flatCoverage;
+        float fSsrMask = saturate(max(rippleMask, max(fLinger, puddlemask)));
+        float fScreen = smoothstep(PuddleSSRScreenFadeStart, PuddleSSRScreenFadeFull, IN.UVCoord.y);
+        float fAngle = 1.0f - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, saturate(dot(-V, up)));
+        float fOpacity = fScreen * fAngle;
+        float fTraceOpacity = saturate(PuddleSSRCandidateBlend) * saturate(fSsrMask * LODfade) * fOpacity;
+        bool fTraces = fSsrMask > 0.001f && PuddleSSRCandidateBlend > 0.0f && fOpacity > 0.0f
+            && fTraceOpacity > PuddleSSRMinTraceOpacity;
+
+        [branch]
+        // UNOFFICIAL 2026-10-18: without FixedReflectionTrace no trace runs (technique 0's returns 0 for every pixel), so a pixel that
+        // would only have traced ends exactly as this zero-weight exit.
+        if (vmMask <= 0.5f && !(wetWeight > 0.0f) && !(streakMask > 0.0f) && !(fixTrace && fTraces))
+            return float4(WetOut(baseColor.rgb + splashAdd), 1.0f);
+    }
+
+    if (!fast)
+    {
+        float3 refrLin = linearize(tex2D(TESR_SourceBuffer, IN.UVCoord + refrOff)).rgb;
+
+        float3 baseLin = linearize(baseColor).rgb;
+        float3 rippleColor = lerp(baseLin, refrLin, viewRefr);
+
+        // First-person composition
+        if (vmMask > 0.5f)
+        {
+            float2 vmRefrUV = saturate(IN.UVCoord + refrOff);
+            float vmSampleValid = GetViewModelMask(vmRefrUV);
+
+            float3 vmRefrLin = lerp(baseLin, refrLin, vmSampleValid);
+            float vmRippleBlend = saturate(LODfade * rippleMask) * viewRefr;
+            float3 vmWetLin = lerp(baseLin, vmRefrLin, vmRippleBlend);
+            float3 vmWetRGB = delinearize(float4(vmWetLin, 1.0f)).rgb;
+            return float4(WetOut(vmWetRGB + splashAdd), baseColor.a);
+        }
+
+        // Puddle sky lighting
+        float sunAmbient = max(luma(linearize(TESR_SunAmbient)), 0.0001f);
+        float4 shadows = tex2D(TESR_PointShadowBuffer, IN.UVCoord);
+        float inShadow = saturate(pow((shadows.r + shadows.g) / sunAmbient, 5));
+
+        float sunHeight = shade(TESR_SunPosition.xyz, up);
+
+        float3 fresnelColor = GetSkyColor(
+            0, 0.5, sunHeight, 0.0f, TESR_SkyData.z,
+            TESR_SkyColor.rgb, TESR_SkyLowColor.rgb, TESR_HorizonColor.rgb, TESR_SunColor.rgb
+            );
+
+        float NdotV = saturate(dot(N, -V));
+        float F = PuddleSkyMinReflect + (1.0f - PuddleSkyMinReflect)
+        * pow(1.0f - NdotV, 5.0f);
+
+        float reflDist = 1.0f - smoothstep(600.0f, DrawD, depth);
+        float reflStrength = saturate(puddlemask * F * PuddleSkyStrength
+            * lerp(1.0f, 1.15f, rainVis) * reflDist);
+
+        float3 puddleBase = rippleColor.rgb * lerp(1.0f, 0.55f, TESR_WetWorldData.w);
+        puddleBase = lerp(rippleColor.rgb, puddleBase, puddlemask);
+
+        float3 waterTint = float3(0.92f, 0.97f, 1.05f);
+        puddleBase *= lerp(1.0f, waterTint, depthish * 0.25f);
+        puddleBase *= (1.0f - depthish * 0.18f);
+        puddleBase *= (1.0f - rimDark);
+
+        float reflMix = min(PuddleSkyMaxBlend, reflStrength * (1.0f + depthish * 0.20f + rimReflBoost));
+        reflMix *= smoothstep(0.03f, 0.12f, puddlemask);
+
+        float3 reflectionSky = max(fresnelColor, 0.0f.xxx);
+        float reflectionSkyLuma = max(luma(reflectionSky), 0.0f);
+        reflectionSky = lerp(reflectionSkyLuma.xxx, reflectionSky,
+            saturate(PuddleSkyTintInfluence));
+        float3 skyReflColor = reflectionSky * PuddleSkyBrightness;
+        float skyPeak = max(skyReflColor.r, max(skyReflColor.g, skyReflColor.b));
+        skyReflColor /= (1.0f + skyPeak);
+
+        float skyLuma = max(luma(skyReflColor), 0.0001f);
+        float skyLumaLimit = PuddleSkyLumaFloor + luma(baseLin) * PuddleSkyLumaScale;
+        skyReflColor *= min(1.0f, skyLumaLimit / skyLuma);
+
+        // Puddle cloud reflection
+        float3 cloudSurface = TESR_CameraPosition.xyz
+        + worldPosRelRoof.xyz;
+        float2 cloudUV = cloudSurface.xy / max(PuddleCloudWorldSize, 1.0f);
+        cloudUV += TESR_GameTime.z * PuddleCloudDrift;
+        cloudUV += combinedNormals.xy * PuddleCloudRippleDistortion;
+        cloudSample = tex2D(TESR_PuddleCloudSampler, cloudUV);
+
+        float3 cloudDetail = saturate((cloudSample.rgb - 0.5f) * PuddleCloudContrast + 0.5f);
+        float cloudAlpha = saturate((cloudSample.a - 0.5f) * PuddleCloudContrast + 0.5f);
+
+        float3 cloudLight = reflectionSky;
+        cloudLight /= (1.0f + max(cloudLight.r, max(cloudLight.g, cloudLight.b)));
+        cloudLight *= min(1.0f, skyLumaLimit / max(luma(cloudLight), 0.0001f));
+        float3 cloudReflection = cloudLight * PuddleCloudBrightness
+        * lerp(0.12f.xxx, 1.0f.xxx, cloudDetail);
+        float cloudCoverage = saturate(cloudAlpha * PuddleCloudStrength);
+        skyReflColor = lerp(skyReflColor, cloudReflection, cloudCoverage);
+        float3 puddleColor = lerp(puddleBase, skyReflColor, reflMix);
+
+        // Screen-space reflections
+        float lingeringReflectionMask = puddleFade * flatCoverage;
+        float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask)));
+        float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
+            PuddleSSRScreenFadeFull, IN.UVCoord.y);
+        float ssrDownAngle = saturate(dot(-V, up));
+        float ssrAngleOpacity = 1.0f - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, ssrDownAngle);
+        float ssrOpacity = ssrScreenOpacity * ssrAngleOpacity;
+        float ssrTraceOpacity = saturate(PuddleSSRCandidateBlend)
+            * saturate(ssrMask * LODfade) * ssrOpacity;
+        float3 ssrHit = float3(0, 0, 0);
+        if (ssrMask > 0.001f && PuddleSSRCandidateBlend > 0.0f && ssrOpacity > 0.0f
+            && ssrTraceOpacity > PuddleSSRMinTraceOpacity)
+        {
+            float3 ssrNormal = normalize(lerp(baseN, N, saturate(PuddleSSRNormalInfluence)));
+            if (fixTrace)
+            ssrHit = TraceWetReflectionFixed(IN.UVCoord, ssrNormal);
+        else
+            ssrHit = TraceWetReflection(IN.UVCoord, ssrNormal);
+        }
+        float ssrCoverage = saturate(ssrHit.z * ssrMask * LODfade) * ssrOpacity;
+
+        // Sun highlights
+        float3 Ls = normalize(TESR_SunDirection.xyz);
+        float3 Hs = normalize(Ls - V);
+
+        float sunNdotH   = saturate(dot(N, Hs));
+        float sunSpecPow = lerp(lerp(80.0f, 200.0f, specMask), 700.0f, puddlemask);
+        float sunSpec    = pow(sunNdotH, sunSpecPow) * specMask;
+
+        float sunSpecMul = lerp(0.25f, 0.70f, saturate(sunHeight));
+        float3 sunSpecCol = linearize(TESR_SunColor).rgb * sunSpec * sunSpecMul * inShadow
+        * lerp(1.0f, PuddleSunStrength, puddlemask);
+        float sunHighlightLimit = lerp(PuddleSunLimit, PuddleSunHighlightLimit, puddlemask);
+        sunSpecCol = min(sunSpecCol, sunHighlightLimit.xxx);
+
+        float3 streakSunCol = float3(0, 0, 0);
+        [branch]
+        if (streakMask > 0.0f)
+        {
+            float streakSunSpec = pow(sunNdotH, StreakSunSpecularPower)
+                * streakMask * StreakSpecularStrength;
+            streakSunCol = linearize(TESR_SunColor).rgb * streakSunSpec * sunSpecMul * inShadow;
+        }
+
+        // Local light highlights
+        float3 pointSpecCol = float3(0, 0, 0);
+        float3 streakPointCol = float3(0, 0, 0);
+
+        [unroll]
+        for (int i = 0; i < 12; i++)
+        {
+            if (TESR_ShadowLightPosition[i].w > 0.0f)
+            {
+                float3 L = TESR_ShadowLightPosition[i].xyz - worldPos.xyz;
+                float dist = length(L);
+                L /= max(dist, 1e-4);
+
+                float d = dist / max(TESR_ShadowLightPosition[i].w, 1e-4);
+                float att = saturate(1.0f - d);
+                att *= att;
+
+                float3 H = normalize(L - V);
+
+                float ndh = saturate(dot(N, H));
+                float specLobe = pow(ndh, 30.0f);
+                float spec = specLobe * specMask;
+
+                float3 c = TESR_LightColor[i].rgb;
+                pointSpecCol += c * spec * att;
+                float streakSpec = specLobe * streakMask * StreakSpecularStrength;
+                streakPointCol += c * streakSpec * att;
+            }
+
+            if (TESR_LightPosition[i].w > 0.0f)
+            {
+                float3 L = TESR_LightPosition[i].xyz - worldPos.xyz;
+                float dist = length(L);
+                L /= max(dist, 1e-4);
+
+                float d = dist / max(TESR_LightPosition[i].w, 1e-4);
+                float att = saturate(1.0f - d);
+                att *= att;
+
+                float3 H = normalize(L - V);
+
+                float ndh = saturate(dot(N, H));
+                float specLobe = pow(ndh, 30.0f);
+                float spec = specLobe * specMask;
+
+                float3 c = TESR_LightColor[i + 12].rgb;
+                pointSpecCol += c * spec * att;
+                float streakSpec = specLobe * streakMask * StreakSpecularStrength;
+                streakPointCol += c * streakSpec * att;
+            }
+        }
+
+        pointSpecCol *= lerp(1.0f, PuddleLightStrength, puddlemask);
+        float pointHighlightLimit = lerp(PuddleLightLimit, PuddlePointHighlightLimit, puddlemask);
+        pointSpecCol = min(pointSpecCol, pointHighlightLimit.xxx);
+
+        // Final composition
+        float3 finalPuddle = puddleColor + sunSpecCol + pointSpecCol;
+
+        float4 outCol = float4(finalPuddle, 1.0f);
+        outCol = delinearize(outCol);
+
+        float3 wetRGB = lerp(baseColor.rgb, outCol.rgb, LODfade * wetMask);
+
+        if (ssrHit.z > (fixTrace ? 0.001f : 0.5f) && PuddleSSRCandidateBlend > 0.0f)
+        {
+            float3 reflectionRGB = tex2Dlod(TESR_SourceBuffer, float4(ssrHit.xy, 0, 0)).rgb;
+            float reflectionBlend = saturate(PuddleSSRCandidateBlend) * ssrCoverage;
+            wetRGB = lerp(wetRGB, reflectionRGB, reflectionBlend);
+        }
+
+        // Streak lighting composition
+        [branch]
+        if (streakMask > 0.0f)
+        {
+            float3 streakLighting = min(streakSunCol + streakPointCol,
+                (StreakHighlightLimit * streakMask).xxx);
+            float3 wetLinear = linearize(float4(wetRGB, 1.0f)).rgb;
+            wetRGB = delinearize(float4(wetLinear + streakLighting * LODfade, 1.0f)).rgb;
+        }
+        return float4(WetOut(wetRGB + splashAdd), 1.0f);
+    }
+
+    // FastPaths (fast == true): the same composition, with real branches. Pixels reaching this point are not far, not water,
+    // and have a puddle weight, a streak or an SSR trace (or are first-person).
+    float3 baseLin = linearize(baseColor).rgb;
+
+    // First-person composition
+    [branch]
+    if (vmMask > 0.5f)
+    {
+        float3 vmRefrLinRaw = refrLinPre;
+        float vmSampleValid = vmSampleValidPre;
+
+        float3 vmRefrLin = lerp(baseLin, vmRefrLinRaw, vmSampleValid);
+        float vmRippleBlend = saturate(LODfade * rippleMask) * viewRefr;
+        float3 vmWetLin = lerp(baseLin, vmRefrLin, vmRippleBlend);
+        float3 vmWetRGB = delinearize(float4(vmWetLin, 1.0f)).rgb;
+        return float4(WetOut(vmWetRGB + splashAdd), baseColor.a);
+    }
+
+    float sunAmbient = max(luma(linearize(TESR_SunAmbient)), 0.0001f);
+    float4 shadows = shadowsPre;
+    float inShadow = saturate(pow((shadows.r + shadows.g) / sunAmbient, 5));
+
+    float sunHeight = shade(TESR_SunPosition.xyz, up);
+
+    // Screen-space reflections
+    float lingeringReflectionMask = puddleFade * flatCoverage;
+    float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask)));
+    float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
+        PuddleSSRScreenFadeFull, IN.UVCoord.y);
+    float ssrDownAngle = saturate(dot(-V, up));
+    float ssrAngleOpacity = 1.0f - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, ssrDownAngle);
+    float ssrOpacity = ssrScreenOpacity * ssrAngleOpacity;
+    float ssrTraceOpacity = saturate(PuddleSSRCandidateBlend)
+        * saturate(ssrMask * LODfade) * ssrOpacity;
+    float3 ssrHit = float3(0, 0, 0);
+    [branch]
+    if (ssrMask > 0.001f && PuddleSSRCandidateBlend > 0.0f && ssrOpacity > 0.0f
+        && ssrTraceOpacity > PuddleSSRMinTraceOpacity)
+    {
+        float3 ssrNormal = normalize(lerp(baseN, N, saturate(PuddleSSRNormalInfluence)));
+        if (fixTrace)
+            ssrHit = TraceWetReflectionFixed(IN.UVCoord, ssrNormal);
+        // UNOFFICIAL 2026-10-18: no 'else' trace. Technique 0's TraceWetReflection returns (0,0,0) for every pixel (a hit whose refined
+        // UV is on screen returns 0, and refined UVs are always on screen). In this fast path the same code compiled with dead loop exits
+        // (break_ne -c,-c; evidence loopexits\disasm\WetWorld.txt 4611/4626/4654/4706) and kept the LAST bracket at full strength:
+        // grey patches on puddles at shallow angles that the original never showed. ssrHit = 0 is the original's result.
+    }
+    float ssrCoverage = saturate(ssrHit.z * ssrMask * LODfade) * ssrOpacity;
+
+    // Sun highlights (the half vector and the strength are shared with the streaks)
+    float3 Ls = normalize(TESR_SunDirection.xyz);
+    float3 Hs = normalize(Ls - V);
+    float sunNdotH   = saturate(dot(N, Hs));
+    float sunSpecMul = lerp(0.25f, 0.70f, saturate(sunHeight));
+
+    float3 streakSunCol = float3(0, 0, 0);
+    [branch]
+    if (streakMask > 0.0f)
+    {
+        float streakSunSpec = pow(sunNdotH, StreakSunSpecularPower)
+            * streakMask * StreakSpecularStrength;
+        streakSunCol = linearize(TESR_SunColor).rgb * streakSunSpec * sunSpecMul * inShadow;
+    }
+
+    // Local light highlights: a lamp slot that is empty (w = 0) is skipped for the whole screen, a lamp that does not reach
+    // the pixel (attenuation 0) for that pixel. Same accumulation order as the main path.
+    float3 pointSpecCol = float3(0, 0, 0);
+    float3 streakPointCol = float3(0, 0, 0);
+
+    float anyLamp = 0.0f;
+    [unroll]
+    for (int j = 0; j < 12; j++)
+        anyLamp = max(anyLamp, max(TESR_ShadowLightPosition[j].w, TESR_LightPosition[j].w));
+    [branch]
+    if (anyLamp > 0.0f)	// one uniform test (a preshader boolean): no lamp slot in use -> the loop adds nothing
+    {
+        [unroll]
+        for (int i = 0; i < 12; i++)
+        {
+            AddLampHighlightFast(TESR_ShadowLightPosition[i], TESR_LightColor[i].rgb, worldPos.xyz, V, N, specMask, streakMask,
+                pointSpecCol, streakPointCol);
+            AddLampHighlightFast(TESR_LightPosition[i], TESR_LightColor[i + 12].rgb, worldPos.xyz, V, N, specMask, streakMask,
+                pointSpecCol, streakPointCol);
+        }
+    }
+
+    float3 wetRGB = baseColor.rgb;
+    [branch]
+    if (wetWeight > 0.0f)
+    {
+        // Refraction
+        float3 refrLin = refrLinPre;
+        float3 rippleColor = lerp(baseLin, refrLin, viewRefr);
+
+        // Puddle sky lighting
+        float3 fresnelColor = GetSkyColor(
+            0, 0.5, sunHeight, 0.0f, TESR_SkyData.z,
+            TESR_SkyColor.rgb, TESR_SkyLowColor.rgb, TESR_HorizonColor.rgb, TESR_SunColor.rgb
+            );
+
+        float NdotV = saturate(dot(N, -V));
+        float F = PuddleSkyMinReflect + (1.0f - PuddleSkyMinReflect)
+        * pow(1.0f - NdotV, 5.0f);
+
+        float reflDist = 1.0f - smoothstep(600.0f, DrawD, depth);
+        float reflStrength = saturate(puddlemask * F * PuddleSkyStrength
+            * lerp(1.0f, 1.15f, rainVis) * reflDist);
+
+        float3 puddleBase = rippleColor.rgb * lerp(1.0f, 0.55f, TESR_WetWorldData.w);
+        puddleBase = lerp(rippleColor.rgb, puddleBase, puddlemask);
+
+        float3 waterTint = float3(0.92f, 0.97f, 1.05f);
+        puddleBase *= lerp(1.0f, waterTint, depthish * 0.25f);
+        puddleBase *= (1.0f - depthish * 0.18f);
+        puddleBase *= (1.0f - rimDark);
+
+        float reflMix = min(PuddleSkyMaxBlend, reflStrength * (1.0f + depthish * 0.20f + rimReflBoost));
+        reflMix *= smoothstep(0.03f, 0.12f, puddlemask);
+
+        float3 reflectionSky = max(fresnelColor, 0.0f.xxx);
+        float reflectionSkyLuma = max(luma(reflectionSky), 0.0f);
+        reflectionSky = lerp(reflectionSkyLuma.xxx, reflectionSky,
+            saturate(PuddleSkyTintInfluence));
+        float3 skyReflColor = reflectionSky * PuddleSkyBrightness;
+        float skyPeak = max(skyReflColor.r, max(skyReflColor.g, skyReflColor.b));
+        skyReflColor /= (1.0f + skyPeak);
+
+        float skyLuma = max(luma(skyReflColor), 0.0001f);
+        float skyLumaLimit = PuddleSkyLumaFloor + luma(baseLin) * PuddleSkyLumaScale;
+        skyReflColor *= min(1.0f, skyLumaLimit / skyLuma);
+
+        // Puddle cloud reflection (its texture read is above the branches)
+        float3 cloudDetail = saturate((cloudSample.rgb - 0.5f) * PuddleCloudContrast + 0.5f);
+        float cloudAlpha = saturate((cloudSample.a - 0.5f) * PuddleCloudContrast + 0.5f);
+
+        float3 cloudLight = reflectionSky;
+        cloudLight /= (1.0f + max(cloudLight.r, max(cloudLight.g, cloudLight.b)));
+        cloudLight *= min(1.0f, skyLumaLimit / max(luma(cloudLight), 0.0001f));
+        float3 cloudReflection = cloudLight * PuddleCloudBrightness
+        * lerp(0.12f.xxx, 1.0f.xxx, cloudDetail);
+        float cloudCoverage = saturate(cloudAlpha * PuddleCloudStrength);
+        skyReflColor = lerp(skyReflColor, cloudReflection, cloudCoverage);
+        float3 puddleColor = lerp(puddleBase, skyReflColor, reflMix);
+
+        // Sun highlight
+        float sunSpecPow = lerp(lerp(80.0f, 200.0f, specMask), 700.0f, puddlemask);
+        float sunSpec    = pow(sunNdotH, sunSpecPow) * specMask;
+        float3 sunSpecCol = linearize(TESR_SunColor).rgb * sunSpec * sunSpecMul * inShadow
+        * lerp(1.0f, PuddleSunStrength, puddlemask);
+        float sunHighlightLimit = lerp(PuddleSunLimit, PuddleSunHighlightLimit, puddlemask);
+        sunSpecCol = min(sunSpecCol, sunHighlightLimit.xxx);
+
+        pointSpecCol *= lerp(1.0f, PuddleLightStrength, puddlemask);
+        float pointHighlightLimit = lerp(PuddleLightLimit, PuddlePointHighlightLimit, puddlemask);
+        pointSpecCol = min(pointSpecCol, pointHighlightLimit.xxx);
+
+        // Final composition
+        float3 finalPuddle = puddleColor + sunSpecCol + pointSpecCol;
+
+        float4 outCol = float4(finalPuddle, 1.0f);
+        outCol = delinearize(outCol);
+
+        wetRGB = lerp(baseColor.rgb, outCol.rgb, wetWeight);
+    }
+
+    if (ssrHit.z > (fixTrace ? 0.001f : 0.5f) && PuddleSSRCandidateBlend > 0.0f)
+    {
+        float3 reflectionRGB = tex2Dlod(TESR_SourceBuffer, float4(ssrHit.xy, 0, 0)).rgb;
+        float reflectionBlend = saturate(PuddleSSRCandidateBlend) * ssrCoverage;
+        wetRGB = lerp(wetRGB, reflectionRGB, reflectionBlend);
+    }
+
+    // Streak lighting composition
+    [branch]
+    if (streakMask > 0.0f)
+    {
+        float3 streakLighting = min(streakSunCol + streakPointCol,
+            (StreakHighlightLimit * streakMask).xxx);
+        float3 wetLinear = linearize(float4(wetRGB, 1.0f)).rgb;
+        wetRGB = delinearize(float4(wetLinear + streakLighting * LODfade, 1.0f)).rgb;
+    }
+    return float4(WetOut(wetRGB + splashAdd), 1.0f);
 }
 
-// Ortho map scales: uv per game unit (x), and depth per game unit (z), from the sun's ortho matrix.
-void WetOrthoScales(out float uvPerUnit, out float depthPerUnit)
+// UNOFFICIAL 2026-10-14 (HudDrops, Shaders/Includes/HudRain.hlsl): is the camera under cover? One pixel, kept (counted by an
+// occlusion query, WetWorldEffect::RenderCoverTest) only if something in the ortho map lies above the camera (48 units up:
+// above the player's own head, below any roof worth the name). Outside the ortho map the sky is open. After mrfury97's HUD
+// raindrops (Physically-Based-Reloaded testbed), which read the same map for the same test.
+float4 CoverTest(VSOUT IN) : COLOR0
 {
-	float s = max(abs(TESR_ShadowCameraToLightTransformOrtho[3][3]), 1.0e-6f);
-	float3 xAxis = float3(TESR_ShadowCameraToLightTransformOrtho[0][0], TESR_ShadowCameraToLightTransformOrtho[1][0], TESR_ShadowCameraToLightTransformOrtho[2][0]);
-	float3 zAxis = float3(TESR_ShadowCameraToLightTransformOrtho[0][2], TESR_ShadowCameraToLightTransformOrtho[1][2], TESR_ShadowCameraToLightTransformOrtho[2][2]);
-	uvPerUnit = 0.5f * length(xAxis) / s;
-	depthPerUnit = length(zAxis) / s;
+    float4 o = mul(float4(0.0f, 0.0f, 48.0f, 1.0f), TESR_ShadowCameraToLightTransformOrtho);
+    o.xyz /= o.w;
+    float2 ouv = float2(o.x * 0.5f + 0.5f, o.y * -0.5f + 0.5f);
+    float top = SampleOrthoDepth(ouv);
+    bool inside = all(ouv > 0.0f) && all(ouv < 1.0f);
+    clip(inside && o.z > top + 0.003f ? 1.0f : -1.0f);
+    return float4(1.0f, 1.0f, 1.0f, 1.0f);
 }
 
-// Rain ripples: four layers of the ripple texture (mask, two encoded direction values, phase), built up with the rain.
-float2 WetRipples(float2 w, float clock, float rain, out float mask)
-{
-	float2 slope = float2(0.0f, 0.0f);
-	mask = 0.0f;
-	float strength = saturate(rain * 4.0f);
-	[unroll] for (int i = 0; i < 4; i++)
-	{
-		float scale = i == 0 ? 1.0f : (i == 1 ? 1.1f : (i == 2 ? 1.3f : 1.5f));
-		float layer = i == 0 ? 1.0f : (i == 1 ? 0.75f : (i == 2 ? 0.5f : 0.25f));
-		float rate = 0.96f + 0.01f * i;
-		float4 rip = tex2Dlod(TESR_RippleSampler, float4(w / (120.0f * scale), 0.0f, 0.0f));
-		float pulse = sin(frac(rip.a + clock * rate) * PI);
-		float amp = strength * layer * rip.r * pulse;
-		slope += (rip.gb * 2.0f - 1.0f) * amp;
-		mask = max(mask, amp);
-	}
-	return slope;
-}
-
-// One streak projection on a wall: two flow groups per lane (8 units wide), with their own random speeds.
-float4 WetStreakProj(float2 p, float seed, float clock)
-{
-	float4 acc = float4(0.0f, 0.0f, 0.0f, 0.0f);
-	float lane = floor(p.x / 8.0f);
-	[unroll] for (int g = 0; g < 2; g++)
-	{
-		float h0 = WetHash(float2(lane, seed + 3.0f * g));
-		float h1 = WetHash(float2(lane + 0.37f, seed + 7.0f * g + 1.0f));
-		float speed = lerp(0.45f, 1.65f, h0) * 12.0f;
-		float2 uvS = float2(p.x / 64.0f, (p.y + h1 * 90.0f - clock * speed) / 90.0f);
-		acc += 0.5f * tex2Dlod(TESR_WaterStreakSampler, float4(uvS, 0.0f, 0.0f));
-	}
-	return acc;
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Pass 0 (wet map): red puddle coverage in hollows on near-flat ground, green flat wetness, blue very flat wetness.
-
-static const float2 WetRing[8] =
-{
-	float2(1.0f, 0.0f), float2(0.7071f, 0.7071f), float2(0.0f, 1.0f), float2(-0.7071f, 0.7071f),
-	float2(-1.0f, 0.0f), float2(-0.7071f, -0.7071f), float2(0.0f, -1.0f), float2(0.7071f, -0.7071f)
-};
-
-float4 WetMapCore(float2 uv)
-{
-	float d = tex2Dlod(TESR_DepthBuffer, float4(uv, 0.0f, 0.0f)).x;
-	if (d >= 0.9999f) return float4(0.0f, 0.0f, 0.0f, 1.0f);
-	float viewZ;
-	float3 wp = reconstructWorldPosition(uv, viewZ).xyz;
-	float3 rel = wp - TESR_CameraPosition.xyz;
-	float farLim = WetFarLimit();
-	if (length(rel.xy) >= farLim) return float4(0.0f, 0.0f, 0.0f, 1.0f);
-	float3 n = normalize(GetWorldNormal(uv));
-	if (n.z > 0.99f && abs(wp.z - TESR_WaterSettings.x) < d * 500.0f) return float4(0.0f, 0.0f, 0.0f, 1.0f);
-	if (WetFirstPerson(tex2Dlod(TESR_DepthBufferViewModel, float4(uv, 0.0f, 0.0f)).x)) return float4(0.0f, 0.0f, 0.0f, 1.0f);
-
-	WetOrtho o = WetOrthoAt(rel);
-	if (o.open < 0.5f) return float4(0.0f, 0.0f, 0.0f, 1.0f);
-
-	float c = n.z;
-	float g = smoothstep(0.65f, 0.92f, c);
-	float b = smoothstep(0.90f, 0.97f, c);
-
-	float uvPerUnit, depthPerUnit;
-	WetOrthoScales(uvPerUnit, depthPerUnit);
-	float r = 100.0f * uvPerUnit;
-	float ringSum = 0.0f;
-	float maxJump = 0.0f;
-	[unroll] for (int k = 0; k < 8; k++)
-	{
-		float t = tex2Dlod(TESR_OrthoMapBuffer, float4(o.uv + WetRing[k] * r, 0.0f, 0.0f)).r;
-		ringSum += t;
-		maxJump = max(maxJump, abs(t - o.z));
-	}
-	float curvature = (o.z - ringSum / 8.0f) / max(depthPerUnit, 1.0e-6f);
-	float concave = smoothstep(0.25f, 2.0f, curvature);
-	float edge = 1.0f - smoothstep(40.0f, 80.0f, maxJump / max(depthPerUnit, 1.0e-6f));
-	float tilt = smoothstep(0.707f, 0.906f, c);
-	float onSurface = 1.0f - smoothstep(0.0003f, 0.0005f, abs(o.top - o.z));
-	float puddle = concave * edge * tilt * onSurface;
-
-	return float4(puddle, g, b, 1.0f);
-}
-
-float4 WetMapPS(VSOUT IN) : COLOR0
-{
-	return WetMapCore(IN.UVCoord);
-}
-
-// Passes 1 and 2: five-tap depth-aware blur of the wet map (weights 0.375, 0.25, 0.0625), across then down.
-float BlurKeep(float2 p, float dC, float tol)
-{
-	return abs(tex2Dlod(TESR_DepthBuffer, float4(p, 0.0f, 0.0f)).x - dC) <= tol ? 1.0f : 0.0f;
-}
-
-float4 BlurCore(float2 uv, float2 dir)
-{
-	float dC = tex2D(TESR_DepthBuffer, uv).x;
-	float tol = 0.02f * dC + 0.5f / max(farZ, 1.0f);
-	float2 o1 = dir * TESR_ReciprocalResolution.xy;
-	float2 o2 = 2.0f * o1;
-	float4 c = tex2D(TESR_RenderedBuffer, uv);
-	float4 p1 = tex2D(TESR_RenderedBuffer, uv + o1);
-	float4 m1 = tex2D(TESR_RenderedBuffer, uv - o1);
-	float4 p2 = tex2D(TESR_RenderedBuffer, uv + o2);
-	float4 m2 = tex2D(TESR_RenderedBuffer, uv - o2);
-	float w1p = 0.25f * BlurKeep(uv + o1, dC, tol);
-	float w1m = 0.25f * BlurKeep(uv - o1, dC, tol);
-	float w2p = 0.0625f * BlurKeep(uv + o2, dC, tol);
-	float w2m = 0.0625f * BlurKeep(uv - o2, dC, tol);
-	float wsum = 0.375f + w1p + w1m + w2p + w2m;
-	float4 sum = c * 0.375f + p1 * w1p + m1 * w1m + p2 * w2p + m2 * w2m;
-	return float4(sum.rgb / wsum, 1.0f);
-}
-
-float4 BlurAcrossPS(VSOUT IN) : COLOR0
-{
-	return BlurCore(IN.UVCoord, float2(1.0f, 0.0f));
-}
-
-float4 BlurDownPS(VSOUT IN) : COLOR0
-{
-	return BlurCore(IN.UVCoord, float2(0.0f, 1.0f));
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Puddle reflection trace (fixed): 8 steps in view space, squared spacing to 1800 units, first depth crossing decides.
-// Returns linear colour (rgb) and the hit visibility (a); a = 0 on a miss.
-float4 WetTrace(float2 uv, float3 pv, float3 rv, float3 nv)
-{
-	float4 res = float4(0.0f, 0.0f, 0.0f, 0.0f);
-	float3 start = pv + nv * 3.0f;
-	float prevT = 0.0f;
-	float2 texel = max(TESR_ReciprocalResolution.xy, 1.0e-6f);
-	[loop] for (int i = 0; i < 8; i++)
-	{
-		float s = (i + 1) / 8.0f;
-		float t = 1800.0f * s * s;
-		float3 q = start + rv * t;
-		float3 pr = projectPosition(q);
-		if (outsideRect(pr.xy)) break;
-		float sceneZ = readDepthLod(pr.xy);
-		float behind = q.z - sceneZ;
-		if (behind > 0.0f)
-		{
-			float reach = 24.0f + 0.3f * (t - prevT);
-			float pixelsAway = length((pr.xy - uv) / texel);
-			bool hit = behind < reach && pixelsAway >= 4.0f && !WetFirstPerson(tex2Dlod(TESR_DepthBufferViewModel, float4(pr.xy, 0.0f, 0.0f)).x);
-			if (hit)
-			{
-				float vis = lerp(1.0f, 0.25f, smoothstep(1170.0f, 1800.0f, t));
-				float2 es = rectToScreen(pr.xy);
-				float edge = smoothstep(0.0f, 0.05f, es.x) * smoothstep(0.0f, 0.05f, 1.0f - es.x) * smoothstep(0.0f, 0.05f, es.y) * smoothstep(0.0f, 0.05f, 1.0f - es.y);
-				float3 hitCol = linearize(max(tex2Dlod(TESR_SourceBuffer, float4(pr.xy, 0.0f, 0.0f)).rgb, 0.0f));
-				res = float4(hitCol, vis * edge);
-			}
-			break;
-		}
-		prevT = t;
-	}
-	return res;
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Wet pass. uniform flags pick the technique: fast (early exits), fixedTrace (corrected puddle trace), persistent (cover map).
-
-// One lamp's highlight on the ground (ng), the puddle (np) and a streak (nS): attenuation (1 - distance / radius)^2, exponent 30.
-void LampTerms(float4 lp, float3 colour, float shadowMask, float3 wp, float3 V, float3 ng, float3 np, float3 nS,
-	inout float3 lampG, inout float3 lampP, inout float3 lampS)
-{
-	if (lp.w <= 0.0f) return;
-	float3 Ld = lp.xyz - wp;
-	float dist = length(Ld);
-	float att = saturate(1.0f - dist / lp.w);
-	att *= att;
-	if (att <= 0.0f) return;
-	Ld /= max(dist, 1.0e-4f);
-	float3 lc = colour * att * shadowMask;
-	float3 Hl = normalize(Ld + V);
-	lampG += lc * pow(saturate(dot(ng, Hl)), 30.0f);
-	lampP += lc * pow(saturate(dot(np, Hl)), 30.0f);
-	lampS += lc * pow(saturate(dot(nS, Hl)), 30.0f);
-}
-
-float4 WetPassCore(float2 uv, uniform bool fast, uniform bool fixedTrace, uniform bool persistent)
-{
-	float4 base = tex2D(TESR_SourceBuffer, uv);
-	float rawDepth = tex2D(TESR_DepthBuffer, uv).x;
-	if (rawDepth >= 0.9999f) return base;
-	float viewZ;
-	float3 wp = reconstructWorldPosition(uv, viewZ).xyz;
-	float3 cam = TESR_CameraPosition.xyz;
-	float3 rel = wp - cam;
-	float dh = length(rel.xy);
-	float farLim = WetFarLimit();
-	if (dh >= farLim) return base;
-	float3 n = normalize(GetWorldNormal(uv));
-	if (n.z > 0.99f && abs(wp.z - TESR_WaterSettings.x) < rawDepth * 500.0f) return base;
-
-	float clock = TESR_GameTime.z;
-	float rain = TESR_WetWorldData.x;
-	float rainFade = smoothstep(0.05f, 0.35f, rain);
-	float farFade = 1.0f - smoothstep(0.5f * farLim, farLim, dh);
-
-	float rippleMask;
-	float2 rippleSlope = WetRipples(wp.xy, clock, rain, rippleMask);
-
-	bool fp = WetFirstPerson(tex2Dlod(TESR_DepthBufferViewModel, float4(uv, 0.0f, 0.0f)).x);
-	if (fp)
-	{
-		// First-person pixels: the base picture, refracted slightly by the ripples, blended by the ripple mask.
-		float3 baseL = linearize(max(base.rgb, 0.0f));
-		float3 srcL = linearize(max(tex2D(TESR_SourceBuffer, uv + rippleSlope * 0.004f).rgb, 0.0f));
-		float blend = saturate(rippleMask * 2.0f) * rainFade;
-		return float4(delinearize(lerp(baseL, srcL, blend)), base.a);
-	}
-
-	float4 m = tex2D(TESR_RenderedBuffer, uv);	// blurred wet map: r puddle, g flat wet, b very flat wet
-	float groundW, sheenW, fillP;
-	float4 cm = float4(0.0f, 0.0f, 0.0f, 0.0f);
-	if (persistent)
-	{
-		cm = CoverMapRead(rel.xy);
-		groundW = cm.x * m.g;
-		sheenW = cm.x * m.b;
-		fillP = smoothstep(0.08f, 1.0f, cm.y);
-	}
-	else
-	{
-		groundW = rainFade * m.g;
-		sheenW = rainFade * m.b;
-		fillP = smoothstep(0.08f, 1.0f, TESR_WetWorldData.z);
-	}
-	groundW *= farFade;
-	sheenW *= farFade;
-	float pm = saturate(m.r * fillP) * farFade;
-
-	WetOrtho o = WetOrthoAt(rel);
-	float open = o.open;
-	float rainVis = rainFade * open;
-	float flatMask = smoothstep(0.65f, 0.92f, n.z);
-
-	if (fast && groundW <= 0.0f && pm <= 0.0f && rainVis <= 0.0f) return base;
-
-	// Normals: ripples on flat rain-reached ground, puddle swell and puddle texture slopes.
-	float2 bendXY = rippleSlope * 0.35f * flatMask * rainVis;
-	float3 nR = normalize(float3(n.xy + bendXY, n.z));
-
-	float2 pslope = float2(0.0f, 0.0f);
-	float2 swell = float2(0.0f, 0.0f);
-	if (groundW > 0.0f || pm > 0.0f)
-	{
-		float swellFade = 1.0f - smoothstep(400.0f, 1800.0f, dh);
-		swell = float2(sin(wp.x * 0.2618f + clock * 1.1f), sin(wp.y * 0.2027f - clock * 0.9f)) * 0.003f * pow(max(pm, 0.0f), 1.35f) * swellFade;
-		float2 pa = tex2Dlod(TESR_PuddleNormalSampler, float4(wp.xy / 256.0f + float2(0.004f, 0.002f) * clock, 0.0f, 0.0f)).xy * 2.0f - 1.0f;
-		float2 pb = tex2Dlod(TESR_PuddleNormalSampler, float4(wp.xy / 350.72f - float2(0.003f, 0.0015f) * clock, 0.0f, 0.0f)).xy * 2.0f - 1.0f;
-		pslope = (0.65f * pa + 0.35f * pb) * farFade;
-	}
-	float3 ng = normalize(float3(nR.xy + pslope * 0.06f, nR.z));
-	float3 np = normalize(float3(swell + pslope * 0.25f + rippleSlope * 0.35f * rainVis, 1.0f));
-
-	// Splashes: one per 8-unit cell at most, density rain x roof x 0.395; the sheet's alpha is the strength.
-	float splashSt = 0.0f;
-	float splashAdd = 0.0f;
-	float2 splashN = float2(0.0f, 0.0f);
-	if (rain > 0.0f && open > 0.0f && flatMask > 0.0f && dh < 2000.0f)
-	{
-		float2 cf = wp.xy / 8.0f;
-		float2 cell = floor(cf);
-		float2 lf = frac(cf);
-		if (WetHash(cell) < rain * open * 0.395f)
-		{
-			float2 cc = 0.25f + 0.5f * float2(WetHash(cell + 17.3f), WetHash(cell + 41.7f));
-			float2 sp = (lf - cc) / 0.5f + 0.5f;
-			if (all(sp >= 0.0f) && all(sp <= 1.0f))
-			{
-				float cyc = frac(clock * 1.35f + WetHash(cell + 93.1f));
-				float fr = floor(cyc * 16.0f);
-				float fy = floor(fr / 4.0f);
-				float fx = fr - 4.0f * fy;
-				float fade = sin(cyc * PI);
-				float2 sheet = (float2(fx, fy) + sp) / 4.0f;
-				float4 sT = tex2Dlod(TESR_SplashSampler, float4(sheet, 0.0f, 0.0f));
-				float4 sN = tex2Dlod(TESR_SplashNormalSampler, float4(sheet, 0.0f, 0.0f));
-				float fadeFar = 1.0f - smoothstep(1200.0f, 2000.0f, dh);
-				splashSt = sT.a * fade * flatMask * rainVis * fadeFar;
-				float br = saturate((luma(sT) - 0.5f) * 1.5f + 0.5f);
-				br = lerp(br, 1.0f, 0.35f);
-				splashAdd = br * 0.17f * 0.6f * splashSt;
-				splashN = (sN.xy * 2.0f - 1.0f) * 2.2f * splashSt;
-			}
-		}
-	}
-	ng = normalize(float3(ng.xy + splashN, ng.z));
-
-	// Wall streaks: near-vertical surfaces, rain-reached, fading out between 800 and 1000 units.
-	float streakM = 0.0f;
-	float2 streakN = float2(0.0f, 0.0f);
-	float wall = 1.0f - smoothstep(0.55f, 0.8f, abs(n.z));
-	float streakOn = wall * open * rainFade * (1.0f - smoothstep(800.0f, 1000.0f, dh));
-	if (streakOn > 0.0f)
-	{
-		float ax = abs(n.x), ay = abs(n.y);
-		float wx = ax / max(ax + ay, 1.0e-4f);
-		float4 sx = WetStreakProj(float2(wp.y, wp.z), 1.0f, clock);
-		float4 sy = WetStreakProj(float2(wp.x, wp.z), 2.0f, clock);
-		float4 s = wx * sx + (1.0f - wx) * sy;
-		float ma = saturate(s.a);
-		streakM = ma * streakOn;
-		float3 sn = s.rgb / max(ma, 1.0e-4f);
-		streakN = (sn.xy * 2.0f - 1.0f) * 0.25f * ma;
-	}
-	float3 nS = normalize(float3(n.xy + streakN, n.z));
-
-	// Lighting terms.
-	float3 eyeW = normalize(rel);
-	float3 V = -eyeW;
-	float3 L = normalize(TESR_SunDirection.xyz);
-	float sunH = saturate(TESR_SunPosition.z);
-	float sunF = smoothstep(0.25f, 0.70f, sunH);
-	float sunS = tex2Dlod(TESR_PointShadowBuffer, float4(uv, 0.0f, 0.0f)).r;
-	float shG = tex2Dlod(TESR_PointShadowBuffer, float4(uv, 0.0f, 0.0f)).g;
-	float3 sunCol = linearize(max(TESR_SunColor.rgb, 0.0f));
-
-	float3 Hg = normalize(L + V);
-	float gExp = lerp(80.0f, 200.0f, saturate(sheenW));
-	float3 sunGround = pow(saturate(dot(ng, Hg)), gExp) * sunF * sunS * sunCol * groundW;
-	sunGround = min(sunGround, 1.95f);
-
-	float3 Hp = Hg;
-	float3 sunPud = pow(saturate(dot(np, Hp)), 700.0f) * sunF * sunS * sunCol * pm * 2.25f;
-	sunPud = min(sunPud, 1.9f);
-
-	float3 sunStreak = pow(saturate(dot(nS, Hg)), 80.0f) * sunF * sunS * sunCol;
-	float3 lampG = float3(0.0f, 0.0f, 0.0f);
-	float3 lampP = float3(0.0f, 0.0f, 0.0f);
-	float3 lampS = float3(0.0f, 0.0f, 0.0f);
-	if (groundW > 0.0f || pm > 0.0f || streakM > 0.0f)
-	{
-		// The shadow-casting lamps (colours 0..11), then the others (colours 12..23).
-		[loop] for (int li = 0; li < 12; li++)
-		{
-			LampTerms(TESR_ShadowLightPosition[li], TESR_LightColor[li].rgb, shG, wp, V, ng, np, nS, lampG, lampP, lampS);
-		}
-		[loop] for (int lj = 0; lj < 12; lj++)
-		{
-			LampTerms(TESR_LightPosition[lj], TESR_LightColor[12 + lj].rgb, 1.0f, wp, V, ng, np, nS, lampG, lampP, lampS);
-		}
-	}
-	lampG = min(lampG * groundW, 0.9f);
-	lampP = min(lampP * pm * 2.5f, 1.8f);
-	float3 streakSpec = min(1.2f * (sunStreak + lampS), 0.25f * streakM);
-
-	// The base picture, refracted by the splashes, linear.
-	float2 splashUV = splashN * float2(0.5f * TESR_ProjectionTransform[0][0], 0.5f * TESR_ProjectionTransform[1][1]) * 17.5f / max(viewZ, 1.0f);
-	float3 baseL = linearize(max(tex2D(TESR_SourceBuffer, uv + splashUV * splashSt).rgb, 0.0f));
-	float3 col = baseL * (1.0f - 0.3f * groundW);
-	col += sunGround + lampG;
-
-	// Puddles: refracted body, depth and rim, sky and cloud reflection, optional fixed trace, highlights.
-	if (pm > 0.0f)
-	{
-		float fac = lerp(1.0f, 0.5f, saturate(V.z));
-		float2 off = np.xy * 50.0f * 0.35f * fac;
-		off *= min(1.0f, 37.5f / max(length(off), 1.0e-4f));
-		float3 vo = mul(float4(off.x, off.y, 0.0f, 0.0f), TESR_ViewTransform).xyz;
-		float2 refrUV = uv + float2(vo.x * TESR_ProjectionTransform[0][0], -vo.y * TESR_ProjectionTransform[1][1]) * 0.5f / max(viewZ, 1.0f);
-		float3 refr = linearize(max(tex2D(TESR_SourceBuffer, refrUV).rgb, 0.0f));
-		float3 body = refr * lerp(1.0f, 0.55f, saturate(TESR_WetWorldData.w));
-		float depthM = pow(saturate(pm * 1.15f), 2.0f);
-		body = lerp(body, DotLum(body) * float3(0.6f, 0.8f, 1.0f), 0.25f * depthM);
-		body *= 1.0f - 0.18f * depthM;
-		float rim = saturate(4.0f * pm * (1.0f - pm));
-		body *= 1.0f - 0.15f * rim;
-
-		float3 R = reflect(eyeW, np);
-		float sunInf = saturate(dot(R, L));
-		float3 sky = GetSkyColor(saturate(R.z), 1.0f, sunH, sunInf, TESR_SkyData.z, TESR_SkyColor.rgb, TESR_SkyLowColor.rgb, TESR_HorizonColor.rgb, sunCol);
-		float cl = tex2Dlod(TESR_PuddleCloudSampler, float4(wp.xy / 256.0f + float2(0.002f, 0.001f) * clock, 0.0f, 0.0f)).r;
-		float cloudM = saturate((cl - 0.5f) * 15.0f + 0.5f);
-		sky *= lerp(1.0f, 1.65f, cloudM * 0.38f);
-		float fres = 0.12f + 0.88f * pow(1.0f - saturate(dot(np, V)), 5.0f);
-		float skyW = min(fres * 0.55f, 0.28f) + 0.08f * rim;
-		float3 skyScaled = sky * 0.55f;
-		float cap = max(DotLum(body) * 0.65f, 0.015f);
-		skyScaled *= min(1.0f, cap / max(DotLum(skyScaled), 1.0e-4f));
-		float3 refl = skyScaled;
-
-		if (fixedTrace)
-		{
-			float3 pv = reconstructPosition(uv);
-			float3 rv = normalize(mul(float4(R, 0.0f), TESR_ViewTransform).xyz);
-			float3 nv = normalize(mul(float4(np, 0.0f), TESR_ViewTransform).xyz);
-			float4 tr = WetTrace(uv, pv, rv, nv);
-			float fadeA = 1.0f - smoothstep(0.2f, 0.4f, V.z);
-			float fadeV = smoothstep(0.3333f, 0.6667f, rectToScreen(uv).y);
-			float tw = 0.55f * tr.a * fadeA * fadeV;
-			refl = lerp(refl, tr.rgb, tw);
-		}
-
-		float3 puddleCol = lerp(body, refl, skyW);
-		puddleCol += sunPud + lampP;
-		col = lerp(col, puddleCol, pm);
-	}
-
-	// Streaks darken the wall and add a clipped highlight.
-	col *= 1.0f - 0.45f * streakM;
-	col += streakSpec;
-
-	// Splash brightness.
-	col += splashAdd;
-
-	float3 outc = delinearize(max(col, 0.0f));
-	if (TESR_WetWorldLook.x > 0.5f) outc = max(outc, 0.0f);
-	else outc = saturate(outc);
-	return float4(outc, 1.0f);
-}
-
-float4 WetOriginalPS(VSOUT IN) : COLOR0 { return WetPassCore(IN.UVCoord, false, false, false); }
-float4 WetFastPS(VSOUT IN) : COLOR0 { return WetPassCore(IN.UVCoord, true, false, false); }
-float4 WetFixedPS(VSOUT IN) : COLOR0 { return WetPassCore(IN.UVCoord, false, true, false); }
-float4 WetFixedFastPS(VSOUT IN) : COLOR0 { return WetPassCore(IN.UVCoord, true, true, false); }
-float4 WetPersistentPS(VSOUT IN) : COLOR0 { return WetPassCore(IN.UVCoord, true, false, true); }
-float4 WetPersistentFixedPS(VSOUT IN) : COLOR0 { return WetPassCore(IN.UVCoord, true, true, true); }
-
-// Cover test: one pixel of a 1x1 target, kept (white) when something lies above a point 48 units over the camera.
-float4 CoverTestPS(VSOUT IN) : COLOR0
-{
-	WetOrtho o = WetOrthoAt(float3(0.0f, 0.0f, 48.0f));
-	if (o.inside < 0.5f || !(o.top < o.z - 0.003f)) discard;
-	return float4(1.0f, 1.0f, 1.0f, 1.0f);
-}
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Techniques, in the index order WetWorld.cpp uses.
-
+// Render technique
 technique
 {
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetMapPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurAcrossPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurDownPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetOriginalPS(); }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 WetMap();
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(1.0f, 0.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(0.0f, 1.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 Wet(false, false, false);
+    }
 }
 
 technique CoverTestTechnique
 {
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 CoverTestPS(); }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 CoverTest();
+    }
 }
 
+// UNOFFICIAL 2026-10-17 FastPaths ([Shaders.WetWorld.Main] FastPaths): technique 2, the same passes with Wet(true).
 technique FastPathsTechnique
 {
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetMapPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurAcrossPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurDownPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetFastPS(); }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 WetMap();
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(1.0f, 0.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(0.0f, 1.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 Wet(true, false, false);
+    }
 }
 
+// UNOFFICIAL 2026-10-17 FixedReflectionTrace ([Shaders.WetWorld.Main]): techniques 3 (the original pass) and 4 (FastPaths) with the
+// corrected puddle reflection hit test. The C++ side picks the technique (WetWorldEffect::MainTechnique).
 technique FixedTraceTechnique
 {
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetMapPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurAcrossPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurDownPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetFixedPS(); }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 WetMap();
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(1.0f, 0.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(0.0f, 1.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 Wet(false, true, false);
+    }
 }
 
 technique FixedTraceFastPathsTechnique
 {
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetMapPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurAcrossPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurDownPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetFixedFastPS(); }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 WetMap();
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(1.0f, 0.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(0.0f, 1.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 Wet(true, true, false);
+    }
 }
 
+// UNOFFICIAL 2026-10-27 Persistent ([Shaders.WetWorld.Main] Persistent, CoverMap.h): techniques 5 (FastPaths) and 6 (FastPaths with the
+// fixed reflection trace) read the wetness and the puddle water per spot from the cover map. (Persistent always takes the FastPaths
+// pass: the same picture as the original, and one compile less.)
 technique PersistentTechnique
 {
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetMapPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurAcrossPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurDownPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetPersistentPS(); }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 WetMap();
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(1.0f, 0.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(0.0f, 1.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 Wet(true, false, true);
+    }
 }
 
 technique PersistentFixedTraceTechnique
 {
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetMapPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurAcrossPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 BlurDownPS(); }
-	pass { VertexShader = compile vs_3_0 FrameVS(); PixelShader = compile ps_3_0 WetPersistentFixedPS(); }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 WetMap();
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(1.0f, 0.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 BlurWetMap(float2(0.0f, 1.0f), PuddleBlurRadius);
+    }
+    pass
+    {
+        VertexShader = compile vs_3_0 FrameVS();
+        PixelShader  = compile ps_3_0 Wet(true, true, true);
+    }
 }

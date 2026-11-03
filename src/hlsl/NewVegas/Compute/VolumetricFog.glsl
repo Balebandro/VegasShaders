@@ -1,43 +1,36 @@
-// VolumetricFog as Vulkan passes (needs NVR DXVK; effects/VolumetricFog.cpp ExtSetup, ExtDedicated, ExtShadowAO, ExtRender): what
-// VolumetricFogEstimate.frag and VolumetricFogApply.frag share, a port of Effects/VolumetricFog.fx.hlsl (same maths, same names).
-// The Vulkan path never runs in RenderScale rect frames (DxvkCompute::PassesOn), so the rect clamps of the D3D9 file are not needed.
-// Matrices arrive as the D3D9 effect uploads them (SetMatrix keeps the logical matrix): HLSL mul(v, M) is M * v here, mul(M, v) is
-// v * M, and M[i][j] is the same element.
-//
-// Compile-time variants (Compute/variants.txt, FOG_VARIANT): FOG_MODE (the Apply pass: 0 reconstruct, 1 composite, 2 interior
-// composite, 3 shadow + AO only, 4 the fog at full resolution), FOG_LEGACY, FOG_CLASSIC, FOG_INTERIOR (the Estimate of the interior
-// composite), FOG_PHYSICAL (the effect was compiled with PHYSICAL_SKY_ON). Without FOG_VARIANT the push block's fields decide.
-// Tests (NvrDxvkTestSuffix): FOG_TEST_NO_NOISE, FOG_TEST_NO_SHADOW, FOG_TEST_NO_SKY (no sky table / SH reads: the flat sky colour).
+// VolumetricFog as Vulkan passes (needs NVR DXVK): what the passes of Effects/VolumetricFog.fx.hlsl share, line for line (with
+// the parts of Includes/Depth.hlsl, Normals.hlsl, Shadows.hlsl, Sky.hlsl, SkyTake.hlsl and InteriorShadowApply.hlsl they use).
+// effects/VolumetricFog.cpp ExtDedicated, ExtShadowAO, ExtRender. The techniques' compile-time switches (legacy, classic,
+// interior; PHYSICAL_SKY_ON) arrive in the push block, so one shader serves each pass of every variant.
+// The matrices arrive as the D3D9 effect uploads them (SetMatrix keeps the logical matrix), so HLSL mul(v, M) is M * v here,
+// mul(M, v) is v * M, and M[i][j] is the same element. One uniform block for every pass.
+// VolumetricFogEstimate.frag (the half-resolution coefficients, two targets) includes this as it is; VolumetricFogApply.frag
+// (every full-resolution pass) defines FOG_APPLY first, for the fog buffers, the AO and the composites' other inputs.
 
-#include "Common.glsl"
-#include "SkyAtmosphere.glsl"
-
-// Set 1: binding i = input i of VolumetricFogEffect::ExtSetup (the Estimate declares the first 8).
-layout(set = 1, binding = 0) uniform texture2D t_scene;      // TESR_SourceBuffer slot: the scene this pass reads
-layout(set = 1, binding = 1) uniform texture2D t_depth;      // TESR_DepthBuffer
-layout(set = 1, binding = 2) uniform texture2D t_atlas;      // TESR_ShadowAtlas
-layout(set = 1, binding = 3) uniform texture2D t_normals;    // TESR_NormalsBuffer
-layout(set = 1, binding = 4) uniform texture2D t_pointShadow; // TESR_PointShadowBuffer
-layout(set = 1, binding = 5) uniform texture3D t_noise;      // NVR_FogNoise
-layout(set = 1, binding = 6) uniform texture2D t_skyView;    // NVR_FogSkyView (a stand-in unless the physical sky is drawn)
-layout(set = 1, binding = 7) uniform texture2D t_grid;       // NVR_FogGrid (a stand-in unless gridFlags.x)
+layout(set = 1, binding = 0) uniform texture2D t_scene;        // TESR_SourceBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 1) uniform texture2D t_depth;        // TESR_DepthBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 2) uniform texture2D t_atlas;        // TESR_ShadowAtlas (LINEAR, CLAMP; read at level 0)
+layout(set = 1, binding = 3) uniform texture2D t_normals;      // TESR_NormalsBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 4) uniform texture2D t_pointShadow;  // TESR_PointShadowBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 5) uniform texture3D t_noise;        // NVR_FogNoise (LINEAR, WRAP; read at level 0)
+layout(set = 1, binding = 6) uniform texture2D t_skyView;      // NVR_FogSkyView (LINEAR, CLAMP)
+layout(set = 1, binding = 7) uniform texture2D t_grid;         // NVR_FogGrid (LINEAR, CLAMP)
 #ifdef FOG_APPLY
-layout(set = 1, binding = 8) uniform texture2D t_fog;        // NVR_FogBuffer (multiply + depth)
-layout(set = 1, binding = 9) uniform texture2D t_fogAdd;     // NVR_FogBufferAdd
-layout(set = 1, binding = 10) uniform texture2D t_ao;        // NVR_AOBuffer
-layout(set = 1, binding = 11) uniform texture2D t_skyVis;    // NVR_SkyVis
-layout(set = 1, binding = 12) uniform texture2D t_sunFar;    // NVR_SunFar
+layout(set = 1, binding = 8) uniform texture2D t_fogMul;       // NVR_FogBuffer (POINT, CLAMP)
+layout(set = 1, binding = 9) uniform texture2D t_fogAdd;       // NVR_FogBufferAdd (POINT, CLAMP)
+layout(set = 1, binding = 10) uniform texture2D t_ao;          // NVR_AOBuffer (LINEAR, CLAMP)
+layout(set = 1, binding = 11) uniform texture2D t_skyVis;      // NVR_SkyVis (POINT, CLAMP)
+layout(set = 1, binding = 12) uniform texture2D t_sunFar;      // NVR_SunFar (POINT, CLAMP)
 #endif
 
-// Set 2: FogExtConstants (VolumetricFog.cpp), in its order.
-layout(set = 2, binding = 0, std140) uniform FogConstants {
+layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 shadowNear;               // TESR_ShadowCameraToLightTransformNear
-    mat4 shadowMiddle;             // ...Middle
-    mat4 shadowFar;                // ...Far
-    mat4 shadowLod;                // ...Lod
+    mat4 shadowMiddle;             // TESR_ShadowCameraToLightTransformMiddle
+    mat4 shadowFar;                // TESR_ShadowCameraToLightTransformFar
+    mat4 shadowLod;                // TESR_ShadowCameraToLightTransformLod
     mat4 viewTransform;            // TESR_ViewTransform
     mat4 projectionTransform;      // TESR_ProjectionTransform
-    vec4 fogWeatherColor;          // TESR_FogWeatherColor
+    vec4 fogColor;                 // TESR_FogColor
     vec4 fogData;                  // TESR_FogData
     vec4 reciprocalResolution;     // TESR_ReciprocalResolution
     vec4 gameTime;                 // TESR_GameTime
@@ -46,9 +39,9 @@ layout(set = 2, binding = 0, std140) uniform FogConstants {
     vec4 sunColor;                 // TESR_SunColor
     vec4 sunDiskColor;             // TESR_SunDiskColor
     vec4 sunAmbient;               // TESR_SunAmbient
-    vec4 horizonColor;             // TESR_FogHorizonColor
-    vec4 skyLowColor;              // TESR_FogSkyLowColor
-    vec4 skyColor;                 // TESR_FogSkyColor
+    vec4 horizonColor;             // TESR_HorizonColor
+    vec4 skyLowColor;              // TESR_SkyLowColor
+    vec4 skyColor;                 // TESR_SkyColor
     vec4 skyData;                  // TESR_SkyData
     vec4 sunsetColor;              // TESR_SunsetColor
     vec4 sunAmount;                // TESR_SunAmount
@@ -60,31 +53,31 @@ layout(set = 2, binding = 0, std140) uniform FogConstants {
     vec4 shadowFormatData;         // TESR_ShadowFormatData
     vec4 shadowBlur;               // TESR_ShadowBlur
     vec4 shadowFade;               // TESR_ShadowFade
-    vec4 fDensity;                 // TESR_VolumetricFogDensity
-    vec4 fShape;                   // TESR_VolumetricFogShape
-    vec4 fWind;                    // TESR_VolumetricFogWind
-    vec4 fScatter;                 // TESR_VolumetricFogScatter
-    vec4 fWeather;                 // TESR_VolumetricFogWeather
-    vec4 fAerial;                  // TESR_VolumetricFogAerial
-    vec4 fAerialTint;              // TESR_VolumetricFogAerialTint
-    vec4 fDistant;                 // TESR_VolumetricFogDistant
-    vec4 fGlobal;                  // TESR_VolumetricFogGlobal
-    vec4 fNight;                   // TESR_VolumetricFogNight
-    vec4 fNightScatter;            // TESR_VolumetricFogNightScatter
-    vec4 fSun;                     // TESR_VolumetricFogSun
-    vec4 fNightTint;               // TESR_VolumetricFogNightTint
+    vec4 fogDensity;               // TESR_VolumetricFogDensity
+    vec4 fogShape;                 // TESR_VolumetricFogShape
+    vec4 fogWind;                  // TESR_VolumetricFogWind
+    vec4 fogScatter;               // TESR_VolumetricFogScatter
+    vec4 fogWeather;               // TESR_VolumetricFogWeather
+    vec4 fogAerial;                // TESR_VolumetricFogAerial
+    vec4 fogAerialTint;            // TESR_VolumetricFogAerialTint
+    vec4 fogDistant;               // TESR_VolumetricFogDistant
+    vec4 fogGlobal;                // TESR_VolumetricFogGlobal
+    vec4 fogNight;                 // TESR_VolumetricFogNight
+    vec4 fogNightScatter;          // TESR_VolumetricFogNightScatter
+    vec4 fogSun;                   // TESR_VolumetricFogSun
+    vec4 fogNightTint;             // TESR_VolumetricFogNightTint
     vec4 physSky;                  // TESR_PhysSky
     vec4 physSkySun;               // TESR_PhysSkySun
     vec4 vlData;                   // TESR_VolumetricLightData
     vec4 vlData2;                  // TESR_VolumetricLightData2
-    vec4 gridLayout;               // TESR_VolumetricLightGridLayout
-    vec4 gridData;                 // TESR_VolumetricLightGridData
-    vec4 lLow;                     // TESR_VolumetricFogLow
-    vec4 lHigh;                    // TESR_VolumetricFogHigh
-    vec4 lSimple;                  // TESR_VolumetricFogSimple
-    vec4 lBlend;                   // TESR_VolumetricFogBlend
-    vec4 lHeight;                  // TESR_VolumetricFogHeight
-    vec4 lData;                    // TESR_VolumetricFogData
+    vec4 vlGridLayout;             // TESR_VolumetricLightGridLayout
+    vec4 vlGridData;               // TESR_VolumetricLightGridData
+    vec4 fogLow;                   // TESR_VolumetricFogLow
+    vec4 fogHigh;                  // TESR_VolumetricFogHigh
+    vec4 fogSimple;                // TESR_VolumetricFogSimple
+    vec4 fogBlend;                 // TESR_VolumetricFogBlend
+    vec4 fogHeight;                // TESR_VolumetricFogHeight
+    vec4 fogLegacyData;            // TESR_VolumetricFogData
     vec4 shadowData;               // TESR_ShadowData
     vec4 waterSettings;            // TESR_WaterSettings
     vec4 aoAOData;                 // TESR_AmbientOcclusionAOData
@@ -93,27 +86,23 @@ layout(set = 2, binding = 0, std140) uniform FogConstants {
     vec4 cameraPosition;           // TESR_CameraPosition
     vec4 skyIrradiance[9];         // TESR_SkyIrradiance
     vec4 skyIrradianceGame[9];     // TESR_SkyIrradianceGame
-    vec4 lin[9];                   // linearized on the CPU: FogExtLinearNames
+    // UNOFFICIAL 2026-10-26 (VolumetricFog.cpp FogExtLinearNames): these colours linearized once a draw on the CPU, as the D3D9
+    // effect's preshader does (linearized here on every pixel they cost most of the fog estimate's extra 0.04 ms, desert)
+    vec4 fogColorLin, skyColorLin, skyLowColorLin, horizonColorLin, sunDiskColorLin, sunsetColorLin, sunAmbientLin, fogAerialTintLin, sunColorLin;
 } cb;
 
-#define LIN_WEATHER (cb.lin[0].rgb)
-#define LIN_SKY (cb.lin[1].rgb)
-#define LIN_SKYLOW (cb.lin[2].rgb)
-#define LIN_HORIZON (cb.lin[3].rgb)
-#define LIN_SUNSET (cb.lin[5].rgb)
-#define LIN_AMBIENT (cb.lin[6].rgb)
-#define LIN_SUN (cb.lin[8].rgb)
-
-// VolumetricFogEffect::ExtFogPush
+// Push block: the samplers' heap indices (filled in by DXVK), the variant, and the effect's own NVR_ constants (set by the C++
+// with Effect->SetVector in the D3D9 path).
 layout(push_constant) uniform Push {
     uint pointIndex;               // 0: POINT, CLAMP
     uint linearIndex;              // 4: LINEAR, CLAMP
-    uint wrapIndex;                // 8: LINEAR, WRAP (the noise)
-    uint mode;                     // 12: the Apply pass (0 reconstruct, 1 composite, 2 interior composite, 3 shadow + AO, 4 full)
-    uint legacy;                   // 16
-    uint classic;                  // 20
-    uint interior;                 // 24: the Estimate of the interior composite
-    uint physicalSky;              // 28
+    uint wrapIndex;                // 8: LINEAR, WRAP (NVR_FogNoise)
+    uint mode;                     // 12: VolumetricFogApply.frag: 0 DedicatedFogCombine, 1 DedicatedFogComposite,
+                                   //     2 DedicatedFogCompositeInterior, 3 ShadowAOApply, 4 VolumetricFog
+    uint legacy;                   // 16: the *Legacy techniques
+    uint classic;                  // 20: the *Classic techniques
+    uint interior;                 // 24: CompositeFogInterior* (the estimate's sky test reads the darkened scene)
+    uint physicalSky;              // 28: PHYSICAL_SKY_ON (the effect was compiled with it)
     vec4 fogLayout;                // 32: NVR_FogLayout
     vec4 compositeFlags;           // 48: NVR_CompositeFlags
     vec4 compositeAOTexel;         // 64: NVR_CompositeAOTexel
@@ -121,147 +110,192 @@ layout(push_constant) uniform Push {
     vec4 sunFarFlags;              // 96: NVR_SunFarFlags
 } pc;
 
-#ifdef FOG_VARIANT
-    #define V_MODE FOG_MODE
-    #define V_LEGACY (FOG_LEGACY != 0)
-    #define V_CLASSIC (FOG_CLASSIC != 0)
-    #define V_INTERIOR (FOG_INTERIOR != 0)
-    #define V_PHYSICAL (FOG_PHYSICAL != 0)
-#else
-    #define V_MODE int(pc.mode)
-    #define V_LEGACY (pc.legacy != 0u)
-    #define V_CLASSIC (pc.classic != 0u)
-    #define V_INTERIOR (pc.interior != 0u)
-    #define V_PHYSICAL (pc.physicalSky != 0u)
-#endif
-#define LOOK_MODERN 0
-#define LOOK_LEGACY 1
-#define LOOK_CLASSIC 2
-#define COMP_NONE 0
-#define COMP_EXTERIOR 1
-#define COMP_INTERIOR 2
-#define V_LOOK (V_LEGACY ? LOOK_LEGACY : (V_CLASSIC ? LOOK_CLASSIC : LOOK_MODERN))
-
 layout(location = 0) in vec2 uv;
+
+// UNOFFICIAL 2026-10-26: the D3D9 techniques' switches (their uniform bool parameters and PHYSICAL_SKY_ON) are fixed when the
+// .fx compiles, so each pass there is its own trimmed shader. A variant .spv does the same: compiled with -DFOG_VARIANT and
+// FOG_MODE / FOG_LEGACY / FOG_CLASSIC / FOG_INTERIOR / FOG_PHYSICAL (tools/nvr-dxvk/compile-compute.sh; the C++ picks it,
+// effects/VolumetricFog.cpp ExtVariant). Without FOG_VARIANT the push block decides at run time: the generic shader, kept as
+// the fallback. Same code either way, so the same picture; a variant only drops the paths its pass never takes (one shader
+// with all five passes and every look made the light ShadowAO pass carry the whole fog's registers: 2x slower, 2026-10-25).
+#ifdef FOG_VARIANT
+#define FOG_MODE_IS(m) (uint(FOG_MODE) == (m))
+#define FOG_LEGACY_ON (FOG_LEGACY != 0)
+#define FOG_CLASSIC_ON (FOG_CLASSIC != 0)
+#define FOG_INTERIOR_ON (FOG_INTERIOR != 0)
+#define FOG_PHYSICAL_ON (FOG_PHYSICAL != 0)
+#else
+#define FOG_MODE_IS(m) (pc.mode == (m))
+#define FOG_LEGACY_ON (pc.legacy != 0u)
+#define FOG_CLASSIC_ON (pc.classic != 0u)
+#define FOG_INTERIOR_ON (pc.interior != 0u)
+#define FOG_PHYSICAL_ON (pc.physicalSky != 0u)
+#endif
 
 #define POINT_LOD(t, coord) textureLod(sampler2D(t, NVR_SAMPLER(pc.pointIndex)), (coord), 0.0)
 #define LINEAR_LOD(t, coord) textureLod(sampler2D(t, NVR_SAMPLER(pc.linearIndex)), (coord), 0.0)
 
-#define farZ (cb.cameraData.y)
-const float SkyDepth = 0.9961;
-const float NoiseTile = 6000.0;
-const float FogPi = 3.1415926538;
-const vec2 Quad[4] = vec2[4](vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 1.0));
+// ---- Includes/Helpers.hlsl ----
+#define compress(v) (((v) * 0.5) + 0.5)
+#define shade(n, l) max(dot(n, l), 0.0)
+#define invlerps(a, b, t) saturate(((t) - (a)) / ((b) - (a)))
+#define scaledReinhard(a, b) (((a) * (b)) / (1.0 + (a) * (b)))
+#define PI 3.1415926538
 
 vec2 saturate(vec2 x) { return clamp(x, vec2(0.0), vec2(1.0)); }
-vec4 saturate(vec4 x) { return clamp(x, vec4(0.0), vec4(1.0)); }
-float sqr(float x) { return x * x; }
 
-// Includes/Depth.hlsl toWorld
+// HLSL fmod (the sign of x), not GLSL mod.
+float hlslFmod(float x, float y) { return x - y * trunc(x / y); }
+// HLSL smoothstep, also for edge0 >= edge1 (undefined in GLSL).
+float hlslSmoothstep(float a, float b, float x) { float t = saturate((x - a) / (b - a)); return t * t * (3.0 - 2.0 * t); }
+// HLSL acos/asin as the effect compiler expands them for ps_3_0 (the cubic fit; no acos instruction there).
+float hlslAcos(float x) {
+    float a = abs(x);
+    float r = (((-0.0187292993 * a + 0.0742610022) * a - 0.212114394) * a + 1.57072878) * sqrt(1.0 - a);
+    return x < 0.0 ? 3.14159274 - r : r;
+}
+float hlslAsin(float x) {
+    float a = abs(x);
+    float r = (((-0.0187292993 * a + 0.0742610022) * a - 0.212114394) * a + 1.57072878) * sqrt(1.0 - a);
+    return 1.57079637 - (x < 0.0 ? 3.14159274 - r : r);
+}
+
+// ---- the static consts of VolumetricFog.fx.hlsl ----
+#define FOG_GROUND (-10000.0)
+#define SUNINFLUENCE (1.0 / cb.skyData.y)
+#define nearFog (cb.fogData.x)
+#define farFog (cb.fogData.y)
+#define FogPower (cb.fogData.w)
+
+#define FogAmount max(0.0, cb.fogGlobal.x)
+#define NightDisableSkyMask (cb.fogGlobal.y)
+#define MoonVisibility saturate(cb.fogGlobal.z)
+#define MinDensityFloor saturate(cb.fogGlobal.w)
+#define NightDensityScale max(0.0, cb.fogNight.x)
+#define NightAmountScale max(0.0, cb.fogNight.y)
+#define NightHeightFalloffScale max(0.0, cb.fogNight.z)
+#define NightMaxHeightOffset (cb.fogNight.w)
+#define NightNoiseStrengthScale max(0.0, cb.fogNightScatter.x)
+#define NightWindSpeedScale max(0.0, cb.fogNightScatter.y)
+#define NightExtinctionScale max(0.0, cb.fogNightScatter.z)
+#define NightInscatteringScale max(0.0, cb.fogNightScatter.w)
+#define NightTint max(vec3(0.0), cb.fogNightTint.xyz)
+#define NightAmbientStrength max(0.0, cb.fogNightTint.w)
+
+#define BaseDensity max(0.0, cb.fogDensity.x)
+#define WeatherImpact max(0.0, cb.fogDensity.y)
+#define MorningFogDip saturate(cb.fogDensity.z)
+#define SunriseSunsetBoost max(0.0, cb.fogDensity.w)
+
+#define HeightFalloff max(0.0001, cb.fogShape.x)
+#define MaxHeight (cb.fogShape.y)
+#define Extinction (max(0.0, cb.fogShape.z) * 0.1)
+#define Inscattering (max(0.0, cb.fogShape.w) * 0.1)
+
+#define WindDirection (cb.fogWind.xy)
+#define WindSpeed (cb.fogWind.z)
+#define NoiseScale max(0.0001, cb.fogWind.w)
+
+#define PhaseAsymmetry saturate(cb.fogScatter.x)
+#define ShadowStrength saturate(cb.fogScatter.y)
+#define NoiseStrength saturate(cb.fogScatter.z)
+#define HeightInfluence saturate(cb.fogScatter.w)
+
+#define WeatherFilterBlend saturate(cb.fogWeather.x)
+#define isExterior (cb.fogWeather.y)
+#define SkyAmbientAvailable (cb.fogWeather.z)
+#define FogSaturation max(0.0, cb.fogWeather.w)
+
+#define AerialStrength max(0.0, cb.fogAerial.x)
+#define AerialRangeStart saturate(cb.fogAerial.y)
+#define AerialTintBlend saturate(cb.fogAerial.z)
+#define AerialDayFadeStart saturate(cb.fogAerial.w)
+
+#define DistantFogRange exp(-4.0 * clamp(cb.fogDistant.x, 0.00000001, 1.0))
+#define DistantFogBlend (cb.fogDistant.y)
+#define DistantFogHeight (cb.fogDistant.z)
+#define EdgeAA max(0.0, cb.fogDistant.w)
+
+#define FogSkyColorCoeff 6.0
+
+#define LegacyBaseFogStrength max(0.0, cb.fogLegacyData.x)
+#define LegacyHeightFogSaturation max(0.0, cb.fogLegacyData.y)
+#define LegacyFogAmount max(0.0, cb.fogLegacyData.z)
+#define LegacyHeightFogInscattering (max(0.0, cb.fogLegacyData.w) * 0.1)
+#define LegacyFogSaturation max(0.0, cb.fogLow.x)
+#define LegacyWeatherImpact max(0.0, cb.fogLow.y)
+#define LegacyDistantFogRange exp(-4.0 * cb.fogLow.z)
+#define LegacySunPower max(0.0, cb.fogLow.w)
+#define LegacyHeightFogDensity max(0.0, cb.fogHigh.x)
+#define LegacyHeightFogFalloff max(0.0, cb.fogHigh.y)
+#define LegacyHeightFogDist (cb.fogHigh.z)
+#define LegacyHeightFogSkyColor (2.0 * cb.fogHigh.w)
+#define LegacyDistantFogHeight (cb.fogHeight.x)
+#define LegacyHeightFogHeight (cb.fogHeight.y)
+#define LegacySimpleFogHeight (cb.fogHeight.z * 1.5)
+#define LegacyIsExterior (cb.fogHeight.w)
+#define LegacyExtinction (max(0.0, cb.fogSimple.x) * 0.1)
+#define LegacyInscattering (max(0.0, cb.fogSimple.y) * 0.1)
+#define LegacyFogNight max(0.0, cb.fogSimple.z)
+#define LegacySimpleFogSkyColor max(0.0, cb.fogSimple.w)
+#define LegacyDistantFogBlend (cb.fogBlend.x)
+#define LegacyHeightFogBlend (cb.fogBlend.y)
+#define LegacyHeightFogRolloff (cb.fogBlend.z)
+#define LegacySimpleFogBlend (cb.fogBlend.w)
+
+#define CompositeAOEndFade 8000.0
+#define INTERIOR_SHADOW_MAXDISTANCE (cb.shadowFade.w)
+
+// ---- Includes/Depth.hlsl ----
+#define nearZ (cb.cameraData.x)
+#define farZ (cb.cameraData.y)
+
+float readDepthLod(vec2 coord) { return LINEAR_LOD(t_depth, coord).x * farZ; }
+
 vec3 toWorld(vec2 tex) {
     vec3 v = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
     v += (1.0 / cb.projectionTransform[0][0] * (2.0 * tex.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
     v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * tex.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
     return v;
 }
-float readDepthLod(vec2 coord) { return POINT_LOD(t_depth, coord).x * farZ; }
-// Includes/Normals.hlsl GetWorldNormalLod (HLSL mul(View, n))
+
+// ---- Includes/Normals.hlsl GetWorldNormalLod ----
 vec3 GetWorldNormalLod(vec2 coord) {
-    vec4 n = vec4(LINEAR_LOD(t_normals, coord).xyz * 2.0 - 1.0, 1.0);
-    return (n * cb.viewTransform).xyz;
+    vec4 normal = vec4(LINEAR_LOD(t_normals, coord).xyz * 2.0 - 1.0, 1.0);
+    return (normal * cb.viewTransform).xyz;
 }
 
-float NightShare(bool inside) {
-    return inside ? 0.0 : cb.fWeather.y * (1.0 - smoothstep(0.4, 0.8, cb.sunAmount.x));
+// ---- Includes/Sky.hlsl ----
+// (2026-10-26) sunColor and sunsetColor arrive linear (cb.*Lin, linearized on the CPU once a draw)
+vec3 GetSunColor(float sunHeight, float athmosphere, float dayTime, vec3 sunColor, vec3 sunsetColor) {
+    vec3 color = (1.0 + sunHeight) * sunColor;
+    float sunSet = saturate(pows(1.0 - sunHeight, 8.0)) * dayTime;
+    color += sunsetColor.rgb * sunSet * athmosphere;
+    return color;
 }
 
-vec3 SkyUp(bool game) {
-    return game ? max(cb.skyIrradianceGame[0].rgb + cb.skyIrradianceGame[2].rgb + 2.0 * cb.skyIrradianceGame[6].rgb, vec3(0.0))
-                : max(cb.skyIrradiance[0].rgb + cb.skyIrradiance[2].rgb + 2.0 * cb.skyIrradiance[6].rgb, vec3(0.0));
+// (2026-10-26) skyColor, skyLowColor and horizonColor arrive linear (cb.*Lin, linearized on the CPU once a draw)
+vec3 GetSkyColor(float verticality, float athmosphere, float sunHeight, float sunInfluence, float sunStrength, vec3 skyColor, vec3 skyLowColor, vec3 horizonColor, vec3 sunColor) {
+    float isDayTime = hlslSmoothstep(0.0, 0.5, cb.sunAmount.x);
+    vec3 color = mix(skyLowColor.rgb, skyColor.rgb, verticality);
+    color = mix(color, horizonColor.rgb, saturate(athmosphere * (0.5 + sunInfluence * 0.5)));
+    color += mix(vec3(0.0), sunColor * sunInfluence * (1.0 - sunHeight) * (((1.0 - verticality) + athmosphere) / 2.0) * sunStrength, isDayTime);
+    return color;
 }
 
-vec3 TintOf(vec3 c) { return c / max(max(c.r, max(c.g, c.b)), 1e-4); }
-
-float SkyNeighbour(vec2 coord) {
-    vec2 t = cb.reciprocalResolution.xy;
-    vec4 d = vec4(POINT_LOD(t_depth, coord + vec2(t.x, 0.0)).x, POINT_LOD(t_depth, coord - vec2(t.x, 0.0)).x,
-                  POINT_LOD(t_depth, coord + vec2(0.0, t.y)).x, POINT_LOD(t_depth, coord - vec2(0.0, t.y)).x);
-    return step(SkyDepth, max(max(d.x, d.y), max(d.z, d.w)));
-}
-
-float HeightRho(float z, float k, float base, float layer) {
-    float h = z - base;
-    return exp(clamp(-k * (layer > 0.5 ? max(h, 0.0) : h), -30.0, 30.0));
-}
-
-float HeightPathMean(float zc, float zp, float k, float base, float layer) {
-    float dz = zp - zc;
-    float mid = HeightRho(0.5 * (zc + zp), k, base, layer);
-    float mean;
-    if (layer > 0.5) {
-        float hc = zc - base, hp = zp - base;
-        float fc = hc <= 0.0 ? hc : (1.0 - exp(-k * hc)) / k;
-        float fp = hp <= 0.0 ? hp : (1.0 - exp(-k * hp)) / k;
-        mean = (fp - fc) / (abs(dz) < 1.0 ? 1.0 : dz);
-    }
-    else {
-        float x = clamp(k * dz, -30.0, 30.0);
-        float f = abs(x) < 1e-3 ? 1.0 - 0.5 * x : (1.0 - exp(-x)) / x;
-        mean = HeightRho(zc, k, base, 0.0) * f;
-    }
-    return clamp(abs(dz) < 1.0 ? mid : mean, 0.0, 1e4);
-}
-
-float NoiseAt(vec3 rel, vec3 wind, float scale) {
-#ifdef FOG_TEST_NO_NOISE
-    return 0.5;
-#else
-    vec3 c = (cb.cameraPosition.xyz + rel + wind) / (NoiseTile * scale);
-    return textureLod(sampler3D(t_noise, NVR_SAMPLER(pc.wrapIndex)), c, 0.0).g;
-#endif
-}
-
-// The froxel grid's sums from the camera to planar depth (see the .fx GridSums).
-vec4 GridSums(vec2 s01, float planar) {
-    float march = max(cb.vlData.w, 1.0);
-    float s = sqrt(saturate(planar / march)) * 64.0;
-    float z = min(floor(s), 63.0);
-    vec2 cells = cb.gridLayout.xy;
-    vec2 local = clamp(s01 * cells, vec2(0.5), cells - 0.5);
-    vec2 tileFar = vec2(z - 8.0 * floor(z / 8.0), floor(z / 8.0));
-    float zn = max(z - 1.0, 0.0);
-    vec2 tileNear = vec2(zn - 8.0 * floor(zn / 8.0), floor(zn / 8.0));
-    vec4 farSide = LINEAR_LOD(t_grid, (tileFar * cells + local) * cb.gridLayout.zw);
-    vec4 nearSide = z > 0.5 ? LINEAR_LOD(t_grid, (tileNear * cells + local) * cb.gridLayout.zw) : vec4(0.0);
-    return mix(nearSide, farSide, saturate(s - z));
-}
-
-vec3 PhysicalSky(vec3 d) {
-    vec2 sunH = cb.physSkySun.xy / max(length(cb.physSkySun.xy), 1e-5);
-    vec2 dirH = d.xy / max(length(d.xy), 1e-5);
-    float bearing = acos(clamp(dot(dirH, sunH), -1.0, 1.0));
-    float elevation = asin(saturate(d.z));
-    vec2 coord = vec2(bearing / FogPi, sqrt(elevation / (0.5 * FogPi)));
-    return LINEAR_LOD(t_skyView, coord).rgb * (0.001 * cb.physSky.y);
-}
-vec3 PhysicalBlend(vec3 game, vec3 phys) {
-    vec3 tinted = phys + (game * (luma(phys) / max(luma(game), 1e-6)) - phys) * cb.physSky.z;
-    return mix(game, tinted, cb.physSky.x);
-}
-
-// Includes/Shadows.hlsl (the parts the cascade lookup uses) and Includes/SunCascades.hlsl SunCascadeValue
+// ---- Includes/Shadows.hlsl, the parts the fog uses ----
 float Linstep(float a, float b, float v) { return saturate((v - a) / (b - a)); }
-float ChebyshevUpperBound(vec2 moments, float mean, float minVariance, float bleed) {
-    float variance = max(moments.y - moments.x * moments.x, minVariance);
+float ReduceLightBleeding(float pMax, float amount) { return Linstep(amount, 1.0, pMax); }
+
+float ChebyshevUpperBound(vec2 moments, float mean, float minVariance, float lightBleedingReduction) {
+    float variance = moments.y - (moments.x * moments.x);
+    variance = max(variance, minVariance);
     float d = mean - moments.x;
-    float pMax = Linstep(bleed, 1.0, variance / (variance + d * d));
-    return mean <= moments.x ? 1.0 : pMax;
+    float pMax = variance / (variance + (d * d));
+    pMax = ReduceLightBleeding(pMax, lightBleedingReduction);
+    return (mean <= moments.x ? 1.0 : pMax);
 }
-vec2 EVSMExponents(float formatBits) { return min(vec2(40.0, 5.0), vec2(formatBits == 0.0 ? 5.54 : 42.0)); }
-vec2 WarpDepth(float depth, vec2 exponents) {
-    depth = 2.0 * depth - 1.0;
-    return vec2(exp(exponents.x * depth), -exp(-exponents.y * depth));
-}
+
 float ShadowPCF2x2(vec2 coord, float depth, float texel) {
     vec2 p = coord / texel - 0.5;
     vec2 base = floor(p);
@@ -272,422 +306,736 @@ float ShadowPCF2x2(vec2 coord, float depth, float texel) {
     vec4 lit = vec4(lessThanEqual(vec4(depth), d));
     return mix(mix(lit.x, lit.y, f.x), mix(lit.z, lit.w, f.x), f.y);
 }
-float SunCascadeValue(mat4 lightTransform, vec4 coord, vec2 quadrant, float bias, float bleed) {
-    vec4 ls = lightTransform * coord;
-    ls.xyz /= ls.w;
-    ls.x = ls.x * 0.5 + 0.5;
-    ls.y = ls.y * -0.5 + 0.5;
-    ls.xy = ls.xy * 0.5 + quadrant;
-    if (cb.shadowFormatData.x == 3.0) return ShadowPCF2x2(ls.xy, ls.z - 0.0002, cb.shadowBlur.x);
-    vec4 moments = LINEAR_LOD(t_atlas, ls.xy);
-    if (cb.shadowFormatData.x == 0.0) return ChebyshevUpperBound(moments.xy, ls.z, bias, bleed);
-    vec2 e = EVSMExponents(cb.shadowFormatData.y);
-    vec2 warped = WarpDepth(ls.z, e);
-    vec2 minVariance = sqr(bias) * vec2(sqr(e.x * warped.x), sqr(e.y * warped.y));
-    float positive = ChebyshevUpperBound(moments.xy, warped.x, minVariance.x, bleed);
-    if (cb.shadowFormatData.x == 1.0) return positive;
-    return min(ChebyshevUpperBound(moments.xz, warped.x, minVariance.x, bleed), ChebyshevUpperBound(moments.yw, warped.y, minVariance.y, bleed));
+
+float GetLightAmountValueVSM(vec2 moments, float depth, float bias, float bleedReduction) {
+    return ChebyshevUpperBound(moments, depth, bias, bleedReduction);
 }
 
-// The .fx FogSunVisibility: one lookup in the first cascade holding the point, lit past the last one.
-float FogSunVisibility(vec3 p, vec3 n) {
-    vec4 radii = vec4(cb.shadowNearCenter.w, cb.shadowMiddleCenter.w, cb.shadowFarCenter.w, cb.shadowLodCenter.w);
-    vec4 d = vec4(length(p - cb.shadowNearCenter.xyz), length(p - cb.shadowMiddleCenter.xyz),
-                  length(p - cb.shadowFarCenter.xyz), length(p - cb.shadowLodCenter.xyz));
-    mat4 m = cb.shadowLod;
-    vec4 pick = vec4(0.5, 0.5, 0.8, radii.w);
-    if (d.x < radii.x) { m = cb.shadowNear; pick = vec4(0.0, 0.0, 0.1, radii.x); }
-    else if (d.y < radii.y) { m = cb.shadowMiddle; pick = vec4(0.5, 0.0, 0.2, radii.y); }
-    else if (d.z < radii.z) { m = cb.shadowFar; pick = vec4(0.0, 0.5, 0.6, radii.z); }
-    else if (d.w >= radii.w) return 1.0;
-    float offsetScale = saturate(1.0 - dot(n, cb.smoothedSunDir.xyz));
-    float offset = offsetScale * 10.0 * pick.w * max(cb.shadowBlur.x, 1.0 / 16384.0);
-    float bias = (cb.shadowFormatData.x == 0.0 ? 0.00001 : 0.01) * (1.0 + offsetScale);
-    float v = SunCascadeValue(m, vec4(p + offset * n, 1.0), pick.xy, bias, pick.z);
-    return mix(v, 1.0, smoothstep(radii.w * 0.9, radii.w, d.w) * step(radii.z, d.z));
+vec2 GetEVSMExponents(float positiveExponent, float negativeExponent, float formatBits) {
+    float maxExponent = formatBits == 0.0 ? 5.54 : 42.0;
+    vec2 lightSpaceExponents = vec2(positiveExponent, negativeExponent);
+    return min(lightSpaceExponents, vec2(maxExponent));
 }
 
-// The .fx RoundToHalf: a 16-bit render-target store's rounding (mode 0 nearest even, 2 toward zero, 1 none).
-vec3 RoundToHalf(vec3 c, float mode) {
-    if (mode > 0.5 && mode < 1.5) return c;
-    vec3 a = min(abs(c), vec3(65504.0));
-    vec3 m = max(a, vec3(6.103515625e-05));
-    vec3 e = floor(log2(m));
-    e = mix(e, e - 1.0, greaterThan(exp2(e), m));
-    e = mix(e, e + 1.0, lessThanEqual(exp2(e + 1.0), m));
-    vec3 ulp = exp2(e - 10.0);
-    vec3 q = a / ulp;
-    vec3 lo = floor(q);
-    vec3 rem = q - lo;
-    vec3 odd = lo - 2.0 * floor(0.5 * lo);
-    vec3 up = vec3(greaterThan(rem, vec3(0.5))) + vec3(equal(rem, vec3(0.5))) * vec3(greaterThan(odd, vec3(0.5)));
-    vec3 r = (mode > 1.5 ? lo : lo + min(up, vec3(1.0))) * ulp;
-    return mix(r, -r, lessThan(c, vec3(0.0)));
+vec2 WarpDepth(float depth, vec2 exponents) {
+    depth = 2.0 * depth - 1.0;
+    float pos = exp(exponents.x * depth);
+    float neg = -exp(-exponents.y * depth);
+    return vec2(pos, neg);
 }
 
-// Includes/Sky.hlsl GetSunColor, on the CPU-linearized colours
-vec3 SunColorAt(float sunHeight, float atmosphere, float dayTime) {
-    return (1.0 + sunHeight) * LIN_SUN + LIN_SUNSET * (saturate(pows(1.0 - sunHeight, 8.0)) * dayTime * atmosphere);
+float GetLightAmountValueEVSM2(vec2 moments, float depth, float bias, float bleedReduction, float formatBits) {
+    vec2 exponents = GetEVSMExponents(40.0, 5.0, formatBits);
+    vec2 warpedDepth = WarpDepth(depth, exponents);
+    vec2 depthScale = bias * exponents * warpedDepth;
+    vec2 minVariance = depthScale * depthScale;
+    return ChebyshevUpperBound(moments, warpedDepth.x, minVariance.x, bleedReduction);
 }
 
-// ==== the .fx FogTerms ====
-void FogTerms(vec2 tex, float dN, int look, bool inside, out vec3 mulOut, out vec3 addOut) {
-    bool modern = look == LOOK_MODERN;
-    bool classic = look == LOOK_CLASSIC;
-    bool legacy = look == LOOK_LEGACY;
-    float isExt = inside ? 0.0 : cb.fWeather.y;
-    float nf = NightShare(inside);
-    float sunAmt = cb.sunAmount.x;
-    float dayFade = smoothstep(0.1, 0.6, sunAmt);
+float GetLightAmountValueEVSM4(vec4 moments, float depth, float bias, float bleedReduction, float formatBits) {
+    vec2 exponents = GetEVSMExponents(40.0, 5.0, formatBits);
+    vec2 warpedDepth = WarpDepth(depth, exponents);
+    vec2 depthScale = bias * exponents * warpedDepth;
+    vec2 minVariance = depthScale * depthScale;
+    float posContrib = ChebyshevUpperBound(moments.xz, warpedDepth.x, minVariance.x, bleedReduction);
+    float negContrib = ChebyshevUpperBound(moments.yw, warpedDepth.y, minVariance.y, bleedReduction);
+    return min(posContrib, negContrib);
+}
 
-    float viewZ = max(dN * farZ, 1.0);
-    vec3 rel = toWorld(tex) * viewZ;
-    float dist = max(length(rel), 1.0);
-    vec3 dir = rel / dist;
-    float zc = cb.cameraPosition.z;
-    float zp = zc + rel.z;
-    float sky = dN >= SkyDepth ? 1.0 : 0.0;
+// ---- VolumetricFog.fx.hlsl ----
+// PhysicalFogSky (PHYSICAL_SKY_ON)
+vec3 PhysicalFogSky(vec3 dir, vec3 gameSky) {
+    float horizontal = length(dir.xy), sunHorizontal = length(cb.physSkySun.xy);
+    float cosBearing = (horizontal > 1e-4 && sunHorizontal > 1e-4) ? dot(dir.xy, cb.physSkySun.xy) / (horizontal * sunHorizontal) : 1.0;
+    vec2 tableUV = vec2(hlslAcos(clamp(cosBearing, -1.0, 1.0)) / 3.14159265, sqrt(hlslAsin(saturate(dir.z)) / 1.57079633));
+    vec3 phys = LINEAR_LOD(t_skyView, tableUV).rgb * (0.001 * cb.physSky.y * cb.sunsetColor.w);
+    vec3 weatherHue = gameSky / max(luma(gameSky), 1e-6);
+    return mix(gameSky, mix(phys, luma(phys) * weatherHue, cb.physSky.z), cb.physSky.x);
+}
 
-    float fogPow = max(mix(1.0, cb.fogData.w, saturate(cb.fDensity.y)), 0.05);
-    vec3 sunPos = cb.sunPosition.xyz / max(length(cb.sunPosition.xyz), 1e-5);
-    float sunH = saturate(sunPos.z);
-    vec2 weatherNF = saturate(1.0 - cb.fogData.xy / max(farZ, 1.0));
-    float anchor = sqr(0.5 * (weatherNF.x + weatherNF.y)) / (fogPow + 1.0);
+// FogGridSum, FogGridAir, FogGridLight (the volumetric light's froxel grid)
+vec4 FogGridSum(vec2 coord, float depth) {
+    float marchDistance = cb.vlData.w;
+    float planar = depth >= farZ * 0.996 ? marchDistance : min(depth, marchDistance);
+    float s = sqrt(planar / marchDistance) * 64.0;
+    float z = min(floor(s), 63.0);
+    vec2 gridSize = cb.vlGridLayout.xy;
+    vec2 local = clamp(coord * gridSize, vec2(0.5), gridSize - 0.5);
+    vec2 farTile = vec2(hlslFmod(z, 8.0), floor(z / 8.0));
+    vec2 nearTile = vec2(hlslFmod(z - 1.0, 8.0), floor((z - 1.0) / 8.0));
+    vec4 farSide = LINEAR_LOD(t_grid, (farTile * gridSize + local) * cb.vlGridLayout.zw);
+    vec4 nearSide = z > 0.5 ? LINEAR_LOD(t_grid, (nearTile * gridSize + local) * cb.vlGridLayout.zw) : vec4(0.0);
+    return mix(nearSide, farSide, saturate(s - z));
+}
 
-    vec3 skyTop = LIN_SKY;
-    vec3 horizon = LIN_HORIZON;
-    vec3 skyHaze = mix(horizon, LIN_SKYLOW, smoothstep(0.0, 0.35, saturate(dir.z)));
-    skyHaze = mix(skyTop, skyHaze, isExt);
-    horizon = mix(skyTop, horizon, isExt);
-    vec3 weatherCol = LIN_WEATHER;
-    vec3 sunLight = SunColorAt(sunH, cb.skyData.x, sunAmt) * cb.pbrData.z;
-#ifndef FOG_TEST_NO_SKY
-    if (V_PHYSICAL && modern && !inside && cb.physSky.x > 0.0 && isExt > 0.5) {
-        skyHaze = PhysicalBlend(skyHaze, PhysicalSky(dir));
-        horizon = PhysicalBlend(horizon, PhysicalSky(vec3(dir.xy, 0.0)));
-        vec3 through = exp(-AtmSunDepth(AtmGround + 300.0, cb.physSkySun.z, cb.physSky.w));
-        vec3 physSun = luma(sunLight) * through / max(luma(through), 1e-4);
-        sunLight = mix(sunLight, mix(physSun, sunLight, cb.physSky.z), cb.physSky.x);
-    }
-#endif
-    vec3 ambient = skyTop;
-#ifndef FOG_TEST_NO_SKY
-    if (cb.fWeather.z * isExt > 0.5) ambient = SkyUp(classic);
-#endif
-    ambient *= cb.pbrData.w;
-    ambient = max(ambient, LIN_AMBIENT * (cb.fGlobal.z * cb.fNightTint.w * nf));
+vec2 FogGridAir(vec2 coord, float depth) {
+    float marchDistance = cb.vlData.w;
+    float planar = depth >= farZ * 0.996 ? marchDistance : min(depth, marchDistance);
+    float sigma = cb.vlData.z * length(toWorld(coord));
+    return vec2(FogGridSum(coord, depth).r / cb.vlGridData.y, 1.0 - exp(-sigma * planar));
+}
 
-    float shadowUse = saturate(cb.fScatter.y) * isExt * step(0.5, cb.shadowFade.y) * (1.0 - saturate(cb.shadowFade.x)) * dayFade;
-    float sunVis = 1.0;
+vec3 FogGridLight(vec3 gammaColor, vec2 coord) {
+    vec2 air = FogGridAir(coord, readDepthLod(coord));
+    float cosTheta = dot(normalize(toWorld(coord)), cb.smoothedSunDir.xyz);
+    float g = cb.vlData2.y;
+    float phase = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosTheta, 1.0e-4), 1.5), 8.0);
+    float fade = cb.vlData2.z;
+    vec3 lin = linearize(max(gammaColor, vec3(0.0)));
+    float shadedAir = saturate(air.y - air.x);
+    lin = lin * (1.0 - cb.vlData.y * fade * shadedAir) + cb.sunColorLin.rgb * (cb.vlData.x * fade * phase * air.x);
+    return delinearize(max(lin, vec3(0.0)));
+}
 
-    float T;
-    vec3 inscatter;
-    vec3 hazeCol;
-    float amount;
-    vec4 distant;
+// hash, noise, fbm3 (master's procedural noise, ClassicLook)
+float hash(float n) { return fract(sin(n) * 43758.5453); }
 
-    if (legacy) {
-        float nightDist = mix(1.0, cb.lSimple.z, nf);
-        float nearL = cb.fogData.x * nightDist;
-        float farL = max(cb.fogData.y * nightDist, max(nearL + 1.0, 1.0));
-        float powL = max(cb.fogData.w, 0.05);
-        float weatherCover = pow(saturate((dist - nearL) / (farL - nearL)), powL) * saturate(cb.lLow.y);
-        float extL = max(cb.lSimple.x, 0.0) * 0.1;
-        float base = max(cb.lData.x, 0.0);
-        float simpleH = HeightPathMean(zc, zp, max(cb.lHeight.z, 0.0) * 1e-3, zc, 0.0);
-        float odS = base * extL * dist * 1e-4 * simpleH;
-        float coverS = (1.0 - exp(-odS) * (1.0 - weatherCover)) * saturate(cb.lBlend.w);
-        float kL = 1.5e-4 / (powL * max(cb.lHigh.y, 1e-4));
-        float seaL = -10000.0 + 1000.0 * cb.lHeight.y;
-        float pushed = farL * pow(max(dist * cb.lHigh.z / farL, 0.0), max(cb.lBlend.z, 0.05));
-        float odH = max(cb.lHigh.x, 0.0) * extL * pushed * 1e-4 * HeightPathMean(zc, zp, kL, seaL, 0.0);
-        float coverH = (1.0 - exp(-odH)) * saturate(cb.lBlend.y);
-        T = (1.0 - coverS) * (1.0 - coverH);
-        float wS = saturate(coverS * 10.0 / max(cb.lSimple.w, 0.01));
-        float wH = saturate(coverH * 10.0 / max(cb.lHigh.w, 0.01));
-        vec3 colS = mix(skyHaze, weatherCol, inside ? 1.0 : wS);
-        vec3 colH = mix(skyHaze, weatherCol, inside ? 1.0 : wH);
-        colS = mix(vec3(luma(colS)), colS, max(cb.lLow.x, 0.0));
-        colH = mix(vec3(luma(colH)), colH, max(cb.lData.y, 0.0));
-        colS = max(mix(colS, ambient, 0.5), vec3(0.0)) * mix(vec3(1.0), cb.fNightTint.rgb, nf);
-        colH = max(mix(colH, ambient, 0.5), vec3(0.0)) * mix(vec3(1.0), cb.fNightTint.rgb, nf);
-        float albS = saturate(max(cb.lSimple.y, 0.0) * 0.1 / max(extL, 1e-4));
-        float albH = saturate(max(cb.lData.w, 0.0) * 0.1 / max(extL, 1e-4));
-        float cosS = dot(dir, cb.smoothedSunDir.xyz);
-        vec3 sunL = sunLight * (max(cb.lLow.w, 0.0) * pow(saturate(0.5 + 0.5 * cosS), 4.0) * dayFade * isExt);
-        float coverAll = max(1.0 - T, 1e-4);
-        inscatter = ((colS * (albS * coverS * (1.0 - coverH)) + colH * (albH * coverH)) / coverAll) + sunL;
-        hazeCol = colS;
-        amount = saturate(cb.lData.z * mix(1.0, cb.fNight.y, nf));
-        distant = vec4(cb.lLow.z, cb.lBlend.x, cb.lHeight.x, 0.0);
+float valueNoise(vec3 x) {
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n = p.x + p.y * 57.0 + 113.0 * p.z;
+    return mix(mix(mix(hash(n + 0.0), hash(n + 1.0), f.x),
+               mix(hash(n + 57.0), hash(n + 58.0), f.x), f.y),
+               mix(mix(hash(n + 113.0), hash(n + 114.0), f.x),
+               mix(hash(n + 170.0), hash(n + 171.0), f.x), f.y), f.z);
+}
+
+float fbm3(vec3 p) {
+    float n = valueNoise(p) * 0.55 + valueNoise(p * 2.13) * 0.3 + valueNoise(p * 4.7) * 0.15;
+    return saturate(n * 1.4 - 0.2);
+}
+
+vec3 SkyIrradianceLinear(vec3 n) {
+    vec3 irradiance = cb.skyIrradiance[0].rgb
+         + cb.skyIrradiance[1].rgb * n.y
+         + cb.skyIrradiance[2].rgb * n.z
+         + cb.skyIrradiance[3].rgb * n.x
+         + cb.skyIrradiance[4].rgb * (n.x * n.y)
+         + cb.skyIrradiance[5].rgb * (n.y * n.z)
+         + cb.skyIrradiance[6].rgb * (3.0 * n.z * n.z - 1.0)
+         + cb.skyIrradiance[7].rgb * (n.x * n.z)
+         + cb.skyIrradiance[8].rgb * (n.x * n.x - n.y * n.y);
+    return max(irradiance, vec3(0.0));
+}
+
+vec3 SkyIrradianceGameLinear(vec3 n) {
+    vec3 irradiance = cb.skyIrradianceGame[0].rgb
+         + cb.skyIrradianceGame[1].rgb * n.y
+         + cb.skyIrradianceGame[2].rgb * n.z
+         + cb.skyIrradianceGame[3].rgb * n.x
+         + cb.skyIrradianceGame[4].rgb * (n.x * n.y)
+         + cb.skyIrradianceGame[5].rgb * (n.y * n.z)
+         + cb.skyIrradianceGame[6].rgb * (3.0 * n.z * n.z - 1.0)
+         + cb.skyIrradianceGame[7].rgb * (n.x * n.z)
+         + cb.skyIrradianceGame[8].rgb * (n.x * n.x - n.y * n.y);
+    return max(irradiance, vec3(0.0));
+}
+
+#define stepnum 32
+// getHeightFog: the 32-step sum in closed form (the geometric series), then the distance modifier.
+float getHeightFog(float dist, float falloff, vec3 worldPos, float heightOffset) {
+    vec3 eyeVector = worldPos - cb.cameraPosition.xyz;
+    vec3 stepV = eyeVector / float(stepnum);
+    float stepDist = length(stepV);
+    float z0 = cb.cameraPosition.z - (FOG_GROUND + heightOffset * 1000.0);
+    float x = falloff * stepV.z;
+    const float n = float(stepnum);
+    float series;
+    if (abs(x) < 0.01) {
+        float a = n * x;
+        float numerator = 1.0 - a / 2.0 + a * a / 6.0 - a * a * a / 24.0 + a * a * a * a / 120.0;
+        float denominator = 1.0 - x / 2.0 + x * x / 6.0 - x * x * x / 24.0 + x * x * x * x / 120.0;
+        series = n * numerator / denominator;
     }
     else {
-        float timeScale = 1.0 - saturate(cb.fDensity.z) * isExt * sunH * dayFade;
-        float nightDensity = mix(1.0, cb.fNight.x, nf);
-        float transition = 4.0 * saturate(sunAmt) * (1.0 - saturate(sunAmt)) * isExt;
-        float S = max(cb.fDensity.x * timeScale * nightDensity + cb.fDensity.y * anchor + cb.fDensity.w * transition, 0.0);
-
-        float layer = cb.fShape.x < 0.0 ? 1.0 : 0.0;
-        float hk = layer > 0.5 ? -cb.fShape.x
-            : 1.5e-4 / (fogPow * max(cb.fShape.x, 1e-4) * mix(1.0, max(cb.fNight.z, 0.0), nf));
-        float hbase = layer > 0.5 ? cb.fShape.y : -10000.0 + 1000.0 * (cb.fShape.y + cb.fNight.w * nf);
-        float influence = saturate(cb.fScatter.w);
-        float shape = mix(1.0, HeightPathMean(zc, zp, hk, hbase, layer), influence);
-
-        float ext = max(cb.fShape.z, 0.0) * 0.1 * mix(1.0, cb.fNightScatter.z, nf);
-        float ins = max(cb.fShape.w, 0.0) * 0.1 * mix(1.0, cb.fNightScatter.w, nf);
-        float ref = max(cb.fogData.y, 1000.0);
-        float flatOD = S * ext * ref * pow(dist / ref, fogPow) * 1e-4;
-        float floorOD = saturate(cb.fGlobal.w) * flatOD;
-        float plainOD = max(flatOD * shape, floorOD);
-
-        float gridOn = 0.0;
-        vec4 grid = vec4(0.0);
-        float gridCover = 0.0;
-        if (modern && !inside) {
-            gridOn = pc.gridFlags.x * cb.gridData.x * isExt;
-            if (gridOn > 0.5) {
-                float march = max(cb.vlData.w, 1.0);
-                grid = GridSums(tex, sky > 0.5 ? march : min(viewZ, march));
-                float c = saturate(march / viewZ);
-                gridCover = plainOD < 1e-4 ? c : (1.0 - exp(-plainOD * c)) / max(1.0 - exp(-plainOD), 1e-5);
-                gridCover *= step(1e-6, grid.g);
-            }
-        }
-
-        float noiseK = saturate(cb.fScatter.z * mix(1.0, cb.fNightScatter.x, nf));
-        float noise = 0.5;
-        if (noiseK > 0.001 && sky < 0.5) {
-            float scale = max(cb.fWind.w, 1e-4);
-            vec3 wind = vec3(cb.fWind.xy * (cb.fWind.z * mix(1.0, max(cb.fNightScatter.y, 0.0), nf) * cb.gameTime.x * 0.002), 0.0);
-            if (classic) {
-                float n = 0.5 * NoiseAt(rel, wind, scale) + 0.3 * NoiseAt(rel * 2.03, wind, scale) + 0.2 * NoiseAt(rel * 4.01, wind, scale);
-                noise = saturate((n - 0.5) * 1.8 + 0.5);
-            }
-            else {
-                float marched = 0.5;
-                if (gridCover < 0.999) {
-                    float tMax = min(dist, 12000.0);
-                    float sum = 0.0, weights = 0.0;
-                    for (int i = 0; i < 4; i++) {
-                        float t = tMax * (float(i) + 0.5) * 0.25;
-                        float w = mix(1.0, HeightRho(zc + dir.z * t, hk, hbase, layer), influence) + 1e-4;
-                        sum += w * NoiseAt(dir * t, wind, scale);
-                        weights += w;
-                    }
-                    marched = sum / weights;
-                }
-                float gridNoise = grid.b / max(grid.g, 1e-6);
-                noise = saturate((mix(marched, gridNoise, gridCover) - 0.5) * 1.8 + 0.5);
-            }
-        }
-        float od = max(plainOD * max(1.0 + noiseK * (2.0 * noise - 1.0), 0.0), floorOD);
-        T = exp(-od);
-
-        float useWeather = modern ? saturate(cb.fSun.y) * (1.0 - sky) : 0.0;
-        vec3 weatherSide = mix(skyHaze, weatherCol, useWeather);
-        vec3 col = mix(ambient, weatherSide, saturate(cb.fDensity.y));
-        col = mix(col, mix(weatherCol, skyHaze, sky), 1.0 - exp(-6.0 * S));
-        col = mix(vec3(luma(col)), col, max(cb.fWeather.w, 0.0) / (1.0 + S));
-        col = max(col, vec3(0.0)) * mix(vec3(1.0), cb.fNightTint.rgb, nf);
-
-#ifndef FOG_TEST_NO_SHADOW
-        if (shadowUse > 0.001) {
-            if (!classic && gridOn > 0.5) sunVis = mix(1.0, grid.a / max(grid.g, 1e-6), gridCover);
-            else if (sky < 0.5) sunVis = FogSunVisibility(rel, normalize(GetWorldNormalLod(tex)));
-            sunVis = mix(1.0, saturate(sunVis), shadowUse);
-        }
-#endif
-        float g = saturate(cb.fScatter.x);
-        float cosS = dot(dir, cb.smoothedSunDir.xyz);
-        float hg = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosS, 1e-4), 1.5), 8.0);
-        float glow = (classic ? 1.0 : cb.fSun.x) * 2.0 * max(hg - 1.0, 0.0) * sqr(1.0 - sunH) * (1.0 + cb.fogData.z * dN) * dayFade * isExt;
-        float sunShare = 0.35 * dayFade * isExt;
-        hazeCol = col * (1.0 - sunShare + sunShare * sunVis);
-        inscatter = (hazeCol + sunLight * (glow * sunVis)) * saturate(ins / max(ext, 1e-4));
-        amount = saturate(cb.fGlobal.x * mix(1.0, cb.fNight.y, nf));
-        distant = cb.fDistant;
+        series = (1.0 - exp(-n * x)) / (1.0 - exp(-x));
     }
-
-    float skyMask = mix(1.0 - sky * saturate(cb.fWeather.x), 1.0, nf * saturate(cb.fGlobal.y));
-    vec3 mulV = vec3(mix(1.0, T, skyMask));
-    vec3 addV = inscatter * ((1.0 - T) * skyMask);
-
-    if (!legacy && !inside) {
-        float aer = saturate(cb.fAerial.x * smoothstep(min(saturate(cb.fAerial.y), 0.999), 1.0, dN) * (1.0 - sky) *
-            smoothstep(0.1, max(cb.fAerial.w, 0.11), sunAmt) * isExt);
-        vec3 tint = saturate(mix(TintOf(skyTop), cb.fAerialTint.rgb, saturate(cb.fAerial.z)));
-        mulV *= mix(vec3(1.0), tint, aer);
-    }
-
-    if (!inside && isExt > 0.5 && (distant.y > 0.0 || distant.w > 0.0)) {
-        float start = min(max(exp(-4.0 * distant.x), 1e-8), 0.999);
-        float reach = sqrt(smoothstep(start, 1.0, dN));
-        float heightFade = distant.z > 0.0 ? min(1.0, exp(-zp / (80000.0 * distant.z))) : 1.0 - sky;
-        float hf = saturate(reach * distant.y * heightFade);
-        float edge = 0.0;
-        if (distant.w > 0.0 && sky < 0.5) edge = saturate(distant.w * 0.5) * SkyNeighbour(tex) * reach;
-        float k = saturate(hf + edge - hf * edge);
-        mulV *= 1.0 - k;
-        addV = addV * (1.0 - k) + horizon * k;
-    }
-
-    mulV = mix(vec3(1.0), mulV, amount);
-    addV *= amount;
-
-    if (modern && !inside && cb.fSun.z > 0.0 && isExt > 0.5 && sky < 0.5) {
-        float nearG = cb.fSun.w;
-        float gameFog = saturate(cb.fSun.z * pow(saturate((dist - nearG) / max(cb.fogData.y - nearG, 1.0)), max(cb.fogData.w, 0.01)));
-        float covered = luma(mulV);
-        float top = saturate(1.0 - (1.0 - gameFog) / max(covered, 1e-4));
-        mulV *= 1.0 - top;
-        addV = addV * (1.0 - top) + hazeCol * top;
-    }
-
-    mulOut = saturate(mulV);
-    addOut = max(addV, vec3(0.0));
+    float fog = stepDist * exp(-falloff * (z0 + stepV.z)) * series;
+    float distanceModifier = saturate(dist / max(length(eyeVector), 0.0001));
+    return fog * distanceModifier;
 }
 
-// The full-resolution pixel a half texel stands for (the nearest of those it covers).
-vec2 NearestCovered(vec2 halfPixel, vec2 per, out float depth) {
-    vec2 base = halfPixel * per;
-    vec2 bestUV = vec2(0.0);
-    depth = 2.0;
-    for (int i = 0; i < 4; i++) {
-        vec2 c = (base + Quad[i] * (per - 1.0) + 0.5) * cb.reciprocalResolution.xy;
-        float d = POINT_LOD(t_depth, c).x;
-        if (d < depth) { bestUV = c; depth = d; }
+void getHeightFogTerms(float dist, vec3 extinctionColor, vec3 inscatteringColor, float density, float falloff, vec3 worldPos, float offset, out vec3 extColor, out vec3 insColor) {
+    float fog = density * 0.00001 * getHeightFog(dist, falloff * 0.0001, worldPos, offset);
+    extColor = 1.0 - exp(-fog * extinctionColor);
+    insColor = 1.0 - exp(-fog * inscatteringColor);
+}
+
+vec3 getFogFlat(float dist, vec3 density) {
+    return 1.0 - exp(-dist * density * 0.0001);
+}
+
+void getFlatFogTerms(float dist, vec3 extinctionColor, vec3 inscatteringColor, float density, out vec3 extColor, out vec3 insColor) {
+    extColor = getFogFlat(dist, density * extinctionColor);
+    insColor = getFogFlat(dist, density * inscatteringColor);
+}
+
+// UNOFFICIAL 2026-11-01 HeightLayer: VolumetricFog.fx.hlsl FogLayerF / FogLayerMean / FogLayerAt line for line (see there; on = fogShape.x < 0)
+float FogLayerF(float z) { float h = z - cb.fogShape.y; return h <= 0.0 ? h - 1.0 / (-cb.fogShape.x) : -exp(-h * (-cb.fogShape.x)) / (-cb.fogShape.x); }
+float FogLayerMean(float zc, float zp) {
+    float dz = zp - zc;
+    if (abs(dz) < 1.0) return exp(-max(0.5 * (zc + zp) - cb.fogShape.y, 0.0) * (-cb.fogShape.x));
+    return saturate((FogLayerF(zp) - FogLayerF(zc)) / dz);
+}
+float FogLayerAt(float z) { return exp(-max(z - cb.fogShape.y, 0.0) * (-cb.fogShape.x)); }
+
+// ---- Interior composite: Includes/InteriorShadowApply.hlsl and the 16-bit rounding ----
+vec4 ApplyInteriorShadowDepth(vec2 coord, vec4 color, float shadowSample, float depth) {
+    color.rgb = pows(color.rgb, 2.2);
+    vec3 eyeDir = toWorld(coord);
+    float uniformDepth = length(depth * eyeDir);
+
+    float Shadow = saturate(shadowSample);
+    Shadow = mix(Shadow, 1.0, invlerps(300.0, INTERIOR_SHADOW_MAXDISTANCE, uniformDepth));
+    float darkness = scaledReinhard(cb.shadowData.y, 5.0);
+    darkness = saturate(1.0 - darkness * cb.shadowFade.y);
+
+    Shadow = saturate(mix(darkness, 1.0, Shadow));
+    float shadowPower = 1.0 - Shadow;
+
+    vec4 finalColor = clamp(Shadow * (pow(clamp(color, 0.0, 1.0), vec4(1.0 - shadowPower * 0.2))), 0.0, 1.0);
+    finalColor = mix(vec4(luma(finalColor)), finalColor, 1.0 + shadowPower * 0.3);
+
+    finalColor += max(color - 1.0, vec4(0.0));
+    finalColor.rgb = pows(finalColor.rgb, 1.0 / 2.2);
+
+    return vec4(finalColor.rgb, 1.0);
+}
+
+vec3 HalfExponent(vec3 a) {
+    vec3 e = floor(log2(a));
+    vec3 p = exp2(e);
+    e += vec3(greaterThanEqual(a, 2.0 * p));
+    e -= vec3(lessThan(a, p));
+    return max(e, vec3(-14.0));
+}
+
+vec3 RoundToHalf(vec3 x) {
+    vec3 a = abs(x);
+    vec3 e = HalfExponent(a);
+    vec3 q = a * exp2(10.0 - e);
+    vec3 r = floor(q + 0.5);
+    r -= vec3(equal(r - q, vec3(0.5))) * vec3(notEqual(fract(r * 0.5), vec3(0.0)));
+    return sign(x) * (r * exp2(e - 10.0));
+}
+
+vec3 TruncateToHalf(vec3 x) {
+    vec3 a = abs(x);
+    vec3 e = HalfExponent(a);
+    return sign(x) * (floor(a * exp2(10.0 - e)) * exp2(e - 10.0));
+}
+
+vec3 InteriorStoreRound(vec3 color) {
+    if (pc.compositeFlags.w < 0.5) color = RoundToHalf(color);
+    else if (pc.compositeFlags.w > 1.5) color = TruncateToHalf(color);
+    return color;
+}
+
+vec4 InteriorStoredColor(vec2 coord) {
+    vec4 scene = LINEAR_LOD(t_scene, coord);
+    return vec4(InteriorStoreRound(ApplyInteriorShadowDepth(coord, scene, LINEAR_LOD(t_pointShadow, coord).r, readDepthLod(coord)).rgb), scene.a);
+}
+
+// ---- the fog ----
+float getSky(vec2 coord, bool interior) {
+    vec4 scene = LINEAR_LOD(t_scene, coord);
+    if (interior) scene = InteriorStoredColor(coord);
+    vec4 color = linearize(scene);
+
+    float dist = 0.5 * cb.reciprocalResolution.x;	// (the HLSL's float distance = 0.5 * TESR_ReciprocalResolution.xy: the x, truncated)
+    dist *= 1.0;
+
+    vec3 coeffs = vec3(vec2(1.0, -1.0) * dist, 0.9961);
+    bool depth = readDepthLod(coord) / farZ >= coeffs.z;
+    bool depth1 = readDepthLod(coord + coeffs.xx) / farZ >= coeffs.z;
+    bool depth2 = readDepthLod(coord + coeffs.xy) / farZ >= coeffs.z;
+    bool depth3 = readDepthLod(coord + coeffs.yx) / farZ >= coeffs.z;
+    bool depth4 = readDepthLod(coord + coeffs.yy) / farZ >= coeffs.z;
+
+    float total = float(depth || depth1 || depth2 || depth3 || depth4) * luma(color);
+    return saturate(total);
+}
+
+vec4 fogColor(vec4 skyColor, vec4 pureFogColor, float fogStrength, float skyColorCoeff, vec4 sunScattering, float saturation) {
+    vec4 c = mix(skyColor, pureFogColor, saturate(pows(fogStrength, skyColorCoeff)));
+    c += sunScattering;
+    c = mix(vec4(luma(c)), c, saturation / (1.0 + fogStrength));
+    return c;
+}
+
+vec4 ScreenCoordToTexCoord(vec4 coord) {
+    coord.xyz /= coord.w;
+    coord.x = coord.x * 0.5 + 0.5;
+    coord.y = coord.y * -0.5 + 0.5;
+    return coord;
+}
+
+float GetFogShadowValue(mat4 lightTransform, vec4 coord, float offsetX, float offsetY, float bias) {
+    vec4 LightSpaceCoord = ScreenCoordToTexCoord(lightTransform * coord);
+    LightSpaceCoord.xy *= 0.5;
+    LightSpaceCoord.x += offsetX;
+    LightSpaceCoord.y += offsetY;
+
+    if (cb.shadowFormatData.x == 3.0) return ShadowPCF2x2(LightSpaceCoord.xy, LightSpaceCoord.z - 0.0002, cb.shadowBlur.x);
+    vec4 moments = LINEAR_LOD(t_atlas, LightSpaceCoord.xy);
+
+    float Mode = cb.shadowFormatData.x;
+    float FormatBits = cb.shadowFormatData.y;
+
+    if (Mode == 0.0)
+        return GetLightAmountValueVSM(moments.xy, LightSpaceCoord.z, bias, 0.2);
+    else if (Mode == 1.0)
+        return GetLightAmountValueEVSM2(moments.xy, LightSpaceCoord.z, bias, 0.2, FormatBits);
+    else
+        return GetLightAmountValueEVSM4(moments, LightSpaceCoord.z, bias, 0.2, FormatBits);
+}
+
+float GetFogShadowVisibility(vec4 positionWS, vec3 normal) {
+    float NdotL = dot(normal, cb.smoothedSunDir.xyz);
+    float offsetScale = saturate(1.0 - NdotL);
+
+    vec4 radii = vec4(cb.shadowNearCenter.w, cb.shadowMiddleCenter.w, cb.shadowFarCenter.w, cb.shadowLodCenter.w);
+    vec4 texelWorld = 4.0 * radii * max(cb.shadowBlur.x, 1.0 / 16384.0);
+    vec4 offsetDistance = offsetScale * 2.5 * texelWorld;
+
+    float bias = (cb.shadowFormatData.x == 0.0 ? 0.00001 : 0.01) * (1.0 + offsetScale);
+    const float blend = 0.9;
+
+    vec4 shadows = vec4(
+        GetFogShadowValue(cb.shadowNear,   vec4(positionWS.xyz + offsetDistance.x * normal, 1.0), 0.0, 0.0, bias),
+        GetFogShadowValue(cb.shadowMiddle, vec4(positionWS.xyz + offsetDistance.y * normal, 1.0), 0.5, 0.0, bias),
+        GetFogShadowValue(cb.shadowFar,    vec4(positionWS.xyz + offsetDistance.z * normal, 1.0), 0.0, 0.5, bias),
+        GetFogShadowValue(cb.shadowLod,    vec4(positionWS.xyz + offsetDistance.w * normal, 1.0), 0.5, 0.5, bias));
+
+    vec4 distances = vec4(
+        length(positionWS.xyz - cb.shadowNearCenter.xyz),
+        length(positionWS.xyz - cb.shadowMiddleCenter.xyz),
+        length(positionWS.xyz - cb.shadowFarCenter.xyz),
+        length(positionWS.xyz - cb.shadowLodCenter.xyz));
+
+    if (distances.x < cb.shadowNearCenter.w) {
+        if (distances.x < cb.shadowNearCenter.w * blend) return shadows.x;
+        return mix(shadows.x, shadows.y, hlslSmoothstep(cb.shadowNearCenter.w * blend, cb.shadowNearCenter.w, distances.x));
     }
-    return bestUV;
+    else if (distances.y < cb.shadowMiddleCenter.w) {
+        if (distances.y < cb.shadowMiddleCenter.w * blend) return shadows.y;
+        return mix(shadows.y, shadows.z, hlslSmoothstep(cb.shadowMiddleCenter.w * blend, cb.shadowMiddleCenter.w, distances.y));
+    }
+    else if (distances.z < cb.shadowFarCenter.w) {
+        if (distances.z < cb.shadowFarCenter.w * blend) return shadows.z;
+        return mix(shadows.z, shadows.w, hlslSmoothstep(cb.shadowFarCenter.w * blend, cb.shadowFarCenter.w, distances.z));
+    }
+    else if (distances.w < cb.shadowLodCenter.w) {
+        if (distances.w < cb.shadowLodCenter.w * blend) return shadows.w;
+        return mix(shadows.w, 1.0, hlslSmoothstep(cb.shadowLodCenter.w * blend, cb.shadowLodCenter.w, distances.w));
+    }
+    return 1.0;
+}
+
+// The legacy fog (custom build)
+float getLegacyHeightFog(float dist, float falloff, vec3 worldPos, float heightOffset) {
+    vec3 eyeVector = worldPos - cb.cameraPosition.xyz;
+    vec3 stepV = eyeVector / float(stepnum);
+    float stepDist = length(stepV);
+
+    float z0 = cb.cameraPosition.z - (FOG_GROUND + heightOffset * 1000.0);
+    float x = falloff * stepV.z;
+    const float n = float(stepnum);
+    float series;
+    if (abs(x) < 0.01) {
+        float a = n * x;
+        float numerator = 1.0 - a / 2.0 + a * a / 6.0 - a * a * a / 24.0 + a * a * a * a / 120.0;
+        float denominator = 1.0 - x / 2.0 + x * x / 6.0 - x * x * x / 24.0 + x * x * x * x / 120.0;
+        series = n * numerator / denominator;
+    }
+    else {
+        series = (1.0 - exp(-n * x)) / (1.0 - exp(-x));
+    }
+    float fog = stepDist * exp(-falloff * (z0 + stepV.z)) * series;
+    return fog * (length(eyeVector) / max(dist, 0.0001));
+}
+
+void LegacyFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nightAmountOut, bool interior) {
+    vec4 pureFogColor = cb.fogColorLin;
+
+    float depth = readDepthLod(coord);
+    float isDayTime = hlslSmoothstep(0.4, 0.8, cb.sunAmount.x);
+    float isDayTimeFog = hlslSmoothstep(0.1, 0.6, cb.sunAmount.x);
+    float SunsetFog = sin(cb.sunAmount.x * PI) * 0.001 * LegacyIsExterior;
+
+    vec3 eyeVector = toWorld(coord);
+    vec3 eyeDirection = normalize(eyeVector);
+    eyeVector *= depth;
+    vec3 worldPos = eyeVector + cb.cameraPosition.xyz;
+    float pointHeight = worldPos.z;
+
+    float normalizedDepth = length(eyeVector) / farZ;
+    float fogPower = mix(1.0, FogPower, saturate(LegacyWeatherImpact)) / mix(LegacyHeightFogRolloff, 1.0 / LegacyFogNight, (1.0 - isDayTimeFog) * LegacyIsExterior);
+    float fogDepth = pows(normalizedDepth, fogPower);
+    fogDepth = fogDepth * farZ / (LegacyHeightFogDist * mix(0.005, 1.0, LegacyIsExterior));
+
+    float strength = pows((saturate(1.0 - farFog / farZ) + saturate(1.0 - nearFog / farZ)) / 2.0, 2.0) / (FogPower + 1.0);
+    strength = LegacyBaseFogStrength + LegacyWeatherImpact * strength + SunsetFog;
+    float heightFade = exp(-pointHeight / (80000.0 * LegacySimpleFogHeight));
+
+    float distantFog = 0.0, distantHeightFade = 0.0;
+    vec4 skyColor = pureFogColor;
+    float inScattering = LegacyInscattering;
+    float extinction = LegacyExtinction;
+    vec4 sun = vec4(0.0, 0.0, 0.0, 1.0);
+
+    if (LegacyIsExterior != 0.0) {
+        vec3 up = vec3(0.0, 0.0, 1.0);
+        float sunHeight = shade(cb.sunPosition.xyz, up);
+        float sunDir = dot(eyeDirection, cb.sunPosition.xyz);
+        float sunInfluence = pows(compress(sunDir), SUNINFLUENCE);
+        vec4 sunColor = vec4(GetSunColor(sunHeight, 1.0, cb.sunAmount.x, cb.sunDiskColorLin.rgb, cb.sunsetColorLin.rgb), 1.0);
+        sunColor *= isDayTime * LegacyIsExterior;
+
+        skyColor.rgb = GetSkyColor(0.5, 1.0, sunHeight, sunInfluence, cb.skyData.z, cb.skyColorLin.rgb, cb.skyLowColorLin.rgb, cb.horizonColorLin.rgb, vec3(0.0)) * cb.sunsetColor.w;
+        if (FOG_PHYSICAL_ON) {
+            if (cb.physSky.x > 0.0) skyColor.rgb = PhysicalFogSky(eyeDirection, skyColor.rgb);
+        }
+
+        float sunStrength = cb.fogData.z / (1.0 + 2.0 * strength);
+        sunStrength = mix(sunStrength, max(sunStrength * 2.0, 10.0), normalizedDepth);
+
+        float sunScattering = pows(compress(sunDir), 2.0 + sunStrength);
+        sunScattering *= pow(1.0 - sunHeight, 2.0) * isDayTimeFog * cb.fogData.z;
+        sun = sunColor * sunScattering * LegacySunPower * 100.0;
+
+        distantFog = pows(hlslSmoothstep(LegacyDistantFogRange, 1.0, normalizedDepth), 0.5);
+        if (LegacyDistantFogHeight == 0.0) distantHeightFade = 1.0 - float(getSky(coord, interior) > 0.0);
+        else distantHeightFade = saturate(exp(-pointHeight / (80000.0 * LegacyDistantFogHeight)));    // UNOFFICIAL 2026-10-30: at most 1, as below
+
+        inScattering += SunsetFog;
+        extinction *= 1.0 - distantFog * isDayTimeFog;
+    }
+
+    vec4 simpleFogColor = fogColor(skyColor, pureFogColor, strength, LegacySimpleFogSkyColor, vec4(0.0, 0.0, 0.0, 1.0), LegacyFogSaturation);
+    float simpleDensity = strength * heightFade;
+    float simpleExt = getFogFlat(fogDepth, vec3(simpleDensity * extinction)).x;
+    float simpleIns = getFogFlat(fogDepth, vec3(simpleDensity * inScattering)).x;
+    float simpleBlend = saturate(LegacySimpleFogBlend);
+    fogMul = vec3(mix(1.0, saturate(1.0 - simpleExt), simpleBlend));
+    fogAdd = simpleFogColor.rgb * saturate(simpleIns) * simpleBlend;
+
+    float distantBlend = distantFog * saturate(LegacyDistantFogBlend) * distantHeightFade * LegacyIsExterior;
+    fogMul *= 1.0 - distantBlend;
+    fogAdd = mix(fogAdd, skyColor.rgb, distantBlend);
+
+    vec4 heightFogColor = fogColor(skyColor, pureFogColor, strength, LegacyHeightFogSkyColor, sun, LegacyHeightFogSaturation);
+    float heightFog = strength * LegacyHeightFogDensity * 0.00001 *
+        getLegacyHeightFog(fogDepth, 1.5 / (fogPower * LegacyHeightFogFalloff) * 0.0001, worldPos, LegacyHeightFogHeight);
+    float heightBlend = saturate(LegacyHeightFogBlend);
+    float heightScale = mix(1.0, saturate(1.0 - heightFog * extinction), heightBlend);
+    fogMul *= heightScale;
+    fogAdd = fogAdd * heightScale + heightFogColor.rgb * saturate(heightFog * LegacyHeightFogInscattering) * heightBlend;
+
+    fogMul = mix(vec3(1.0), fogMul, LegacyFogAmount);
+    fogAdd *= LegacyFogAmount;
+    nightAmountOut = LegacyFogAmount;
+}
+
+void ModernFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nightAmountOut, bool interior, bool classic) {
+    vec4 pureFogColor = cb.fogColorLin;
+
+    float depth = readDepthLod(coord);
+    float isDayTime = hlslSmoothstep(0.4, 0.8, cb.sunAmount.x);
+    float isDayTimeFog = hlslSmoothstep(0.1, 0.6, cb.sunAmount.x);
+    float nightFactor = isExterior * (1.0 - isDayTime);
+
+    vec3 eyeVector = toWorld(coord);
+    vec3 eyeDirection = normalize(eyeVector);
+    eyeVector *= depth;
+    vec3 worldPos = eyeVector + cb.cameraPosition.xyz;
+
+    float normalizedDepth = length(eyeVector) / farZ;
+    float fogPower = mix(1.0, FogPower, saturate(WeatherImpact));
+    float fogDepth = pows(normalizedDepth, fogPower) * farZ;
+
+    float isSky = getSky(coord, interior);
+    float skyMaskFactor = mix(1.0, 1.0 - isSky, WeatherFilterBlend);
+    skyMaskFactor = mix(skyMaskFactor, 1.0, nightFactor * NightDisableSkyMask);
+
+    float isSkyDome = float(depth / farZ >= 0.9961);
+
+    float vanillaStrength = pows((saturate(1.0 - farFog / farZ) + saturate(1.0 - nearFog / farZ)) / 2.0, 2.0) / (FogPower + 1.0);
+
+    float sunsetBump = sin(saturate(cb.sunAmount.x) * PI) * isExterior;
+    float noonTrough = 1.0 - saturate(abs(cb.gameTime.y - 12.0) / 6.0);
+    float timeOfDayScale = mix(1.0, mix(1.0, 1.0 - MorningFogDip, noonTrough), isExterior);
+    float nightDensityScale = mix(1.0, NightDensityScale, nightFactor);
+
+    float nightWindSpeed = WindSpeed * mix(1.0, NightWindSpeedScale, nightFactor);
+    vec3 windOffset = vec3(WindDirection * nightWindSpeed * cb.gameTime.x * 0.002, 0.0);
+    float noiseVal = 0.0;
+    vec4 fogVolume = vec4(0.0);
+    // (ClassicLook: master's noise instead; the HLSL compiles the rest out of the *Classic techniques, here it is skipped.)
+    if (classic) noiseVal = fbm3((worldPos + windOffset) / (1500.0 * NoiseScale));
+#ifdef FOG_TEST_NO_NOISE
+    else if (true) noiseVal = 0.5;   // TEST variant (variants.txt, NvrDxvkTestSuffix): no noise reads
+#endif
+    else {
+        if (pc.gridFlags.x > 0.5 && cb.vlGridData.x > 0.5) {
+            fogVolume = FogGridSum(coord, depth);
+            noiseVal = fogVolume.g > 1.0e-6 ? fogVolume.b / fogVolume.g : 0.5;
+        }
+        else {
+            float noiseReach = min(length(eyeVector), 12000.0);
+            float invNoiseScale = 1.0 / (1500.0 * NoiseScale);   // UNOFFICIAL 2026-10-26: once, not three divisions a step (fxc: rcp + mul)
+            float noiseWeight = 0.0;
+            for (int noiseStep = 0; noiseStep < 4; noiseStep++) {
+                float noiseT = mix(min(300.0, noiseReach), noiseReach, (float(noiseStep) + 0.5) * 0.25);
+                vec3 noisePos = (cb.cameraPosition.xyz + eyeDirection * noiseT + windOffset) * invNoiseScale;
+                // UNOFFICIAL 2026-11-01 HeightLayer (the .fx line for line)
+                float w = cb.fogShape.x < 0.0 ? FogLayerAt(cb.cameraPosition.z + eyeDirection.z * noiseT) : 1.0;
+                noiseVal += w * textureLod(sampler3D(t_noise, NVR_SAMPLER(pc.wrapIndex)), noisePos * 0.25, 0.0).g;
+                noiseWeight += w;
+            }
+            noiseVal = noiseWeight > 0.0 ? noiseVal / noiseWeight : 0.5;
+        }
+        noiseVal = saturate((noiseVal - 0.5) * 1.8 + 0.5);
+    }
+    float nightNoiseStrength = NoiseStrength * mix(1.0, NightNoiseStrengthScale, nightFactor);
+
+    float noiseSkyMask = 1.0 - isSkyDome;
+    float nvrDensity = BaseDensity * timeOfDayScale * nightDensityScale * mix(1.0, noiseVal, nightNoiseStrength * noiseSkyMask);
+    nvrDensity += SunriseSunsetBoost * sunsetBump;
+
+    float strength = max(0.0, nvrDensity + WeatherImpact * vanillaStrength);
+
+    float shadowVisibility = 1.0;
+#ifdef FOG_TEST_NO_SHADOW
+    if (false) {   // TEST variant: no shadow visibility
+#else
+    if (isExterior > 0.5 && ShadowStrength > 0.0 && cb.shadowFade.y > 0.5) {
+#endif
+        if (!classic && fogVolume.g > 1.0e-6) {
+            shadowVisibility = mix(1.0, saturate(fogVolume.a / fogVolume.g), ShadowStrength);
+        }
+        else if (!classic && pc.gridFlags.x > 0.5) {
+            vec2 air = FogGridAir(coord, depth);
+            shadowVisibility = mix(1.0, air.y > 1.0e-6 ? saturate(air.x / air.y) : 1.0, ShadowStrength);
+        }
+        else {
+            vec3 worldNormal = GetWorldNormalLod(coord);
+            shadowVisibility = mix(1.0, GetFogShadowVisibility(vec4(worldPos, 1.0), worldNormal), ShadowStrength);
+        }
+    }
+
+    float distantFog = 0.0, distantHeightFade = 0.0;
+    vec4 skyColor = pureFogColor;
+    vec4 sun = vec4(0.0, 0.0, 0.0, 1.0);
+
+    if (isExterior != 0.0) {
+        vec3 up = vec3(0.0, 0.0, 1.0);
+        float sunHeight = shade(cb.sunPosition.xyz, up);
+        float sunDir = dot(eyeDirection, cb.sunPosition.xyz);
+        float sunInfluence = pows(compress(sunDir), SUNINFLUENCE);
+        vec4 sunColorV = vec4(GetSunColor(sunHeight, 1.0, cb.sunAmount.x, cb.sunDiskColorLin.rgb, cb.sunsetColorLin.rgb), 1.0);
+        sunColorV *= isDayTime * isExterior;
+
+#ifndef FOG_TEST_NO_SKY   // (TEST variant: no sky colour, GetSkyColor and PhysicalFogSky)
+        skyColor.rgb = GetSkyColor(0.5, 1.0, sunHeight, sunInfluence, cb.skyData.z, cb.skyColorLin.rgb, cb.skyLowColorLin.rgb, cb.horizonColorLin.rgb, vec3(0.0)) * cb.sunsetColor.w;
+        if (FOG_PHYSICAL_ON && !classic) {
+            if (cb.physSky.x > 0.0) skyColor.rgb = PhysicalFogSky(eyeDirection, skyColor.rgb);
+        }
+#endif
+
+        float sunStrength = cb.fogData.z / (1.0 + 2.0 * strength);
+        sunStrength = mix(sunStrength, max(sunStrength * 2.0, 10.0), normalizedDepth);
+
+        float sunScattering = pows(compress(sunDir), mix(8.0, 1.0, PhaseAsymmetry) + sunStrength);
+        sunScattering *= pow(1.0 - sunHeight, 2.0) * isDayTimeFog * cb.fogData.z;
+        sun = sunColorV * sunScattering * shadowVisibility * cb.pbrData.z * 100.0 * (classic ? 1.0 : cb.fogSun.x);
+
+        distantFog = pows(hlslSmoothstep(DistantFogRange, 1.0, normalizedDepth), 0.5);
+        // UNOFFICIAL 2026-10-30 (VolumetricFog.fx.hlsl, claude/terrain-flicker 80b1dd4b): at most 1 (below z 0 the exp passed 1 and the sky lerp
+        // ran past the sky colour: white, then inf in the TAA history)
+        distantHeightFade = (DistantFogHeight == 0.0) ? (1.0 - isSky) : saturate(exp(-worldPos.z / (80000.0 * DistantFogHeight)));
+    }
+
+    vec3 ambientColor = SkyAmbientAvailable > 0.5
+        ? (classic ? SkyIrradianceGameLinear(vec3(0.0, 0.0, 1.0)) : SkyIrradianceLinear(vec3(0.0, 0.0, 1.0)))
+        : cb.skyColorLin.rgb;
+    ambientColor *= cb.pbrData.w;
+
+    vec3 nightAmbient = cb.sunAmbientLin.rgb * MoonVisibility * NightAmbientStrength * nightFactor;
+    ambientColor = max(ambientColor, nightAmbient);
+
+    // UNOFFICIAL 2026-10-30 WeatherFogColor (VolumetricFog.fx.hlsl ModernFogTerms): the weather's own fog colour (fogColorLin, the
+    // fog's copy with the sky look in it) on the weather's side of this blend, by fogSun.y (0 = the sky's colour, as before;
+    // not on the sky dome, where the fog over the sky keeps the sky's colour; ClassicLook: 0, as master)
+    vec3 weatherColor = mix(skyColor.rgb, pureFogColor.rgb * cb.sunsetColor.w, classic ? 0.0 : cb.fogSun.y * (1.0 - isSkyDome));
+    vec4 ambientSkyColor = vec4(mix(ambientColor, weatherColor, saturate(WeatherImpact)), 1.0);
+
+    vec4 fogColorFinal = fogColor(ambientSkyColor, pureFogColor, strength, FogSkyColorCoeff, sun, FogSaturation);
+    fogColorFinal.rgb *= mix(vec3(1.0), NightTint, nightFactor);
+
+    float nightExtinction = Extinction * mix(1.0, NightExtinctionScale, nightFactor);
+    float nightInscattering = Inscattering * mix(1.0, NightInscatteringScale, nightFactor);
+    float nightHeightFalloff = HeightFalloff * mix(1.0, NightHeightFalloffScale, nightFactor);
+    float nightMaxHeight = MaxHeight + NightMaxHeightOffset * nightFactor;
+
+    vec3 flatExt, flatIns, heightExt, heightIns;
+    getFlatFogTerms(fogDepth, vec3(nightExtinction), vec3(nightInscattering), strength, flatExt, flatIns);
+    float falloffArg = 1.5 / (fogPower * nightHeightFalloff);
+    // UNOFFICIAL 2026-11-01 HeightLayer (the .fx line for line)
+    if (!classic && cb.fogShape.x < 0.0)
+        getFlatFogTerms(fogDepth, vec3(nightExtinction), vec3(nightInscattering), strength * FogLayerMean(cb.cameraPosition.z, worldPos.z), heightExt, heightIns);
+    else
+        getHeightFogTerms(fogDepth, vec3(nightExtinction), vec3(nightInscattering), strength, falloffArg, worldPos, nightMaxHeight, heightExt, heightIns);
+
+    vec3 blendedExt = mix(flatExt, heightExt, HeightInfluence);
+    vec3 blendedIns = mix(flatIns, heightIns, HeightInfluence);
+
+    vec3 finalExt = max(blendedExt, flatExt * MinDensityFloor);
+    vec3 finalIns = max(blendedIns, flatIns * MinDensityFloor);
+
+    fogMul = mix(vec3(1.0), saturate(1.0 - finalExt), skyMaskFactor);
+    fogAdd = fogColorFinal.rgb * saturate(finalIns) * skyMaskFactor;
+
+    float aerialDayFade = hlslSmoothstep(0.1, AerialDayFadeStart, cb.sunAmount.x);
+    float aerialFactor = hlslSmoothstep(AerialRangeStart, 1.0, normalizedDepth) * (1.0 - isSkyDome) * isExterior;
+    vec3 aerialTint = mix(ambientColor, cb.fogAerialTintLin.rgb, AerialTintBlend);
+
+    vec3 aerialTintClamped = saturate(aerialTint);
+    vec3 aerialScale = mix(vec3(1.0), aerialTintClamped, aerialFactor * AerialStrength * skyMaskFactor * aerialDayFade);
+    fogMul *= aerialScale;
+    fogAdd *= aerialScale;
+
+    float distantBlend = distantFog * saturate(DistantFogBlend) * distantHeightFade * isExterior;
+    fogMul *= 1.0 - distantBlend;
+    fogAdd = mix(fogAdd, skyColor.rgb, distantBlend);
+
+    float edgeBlend = isSky * EdgeAA * isExterior;
+    fogMul *= 1.0 - edgeBlend;
+    fogAdd = mix(fogAdd, skyColor.rgb, edgeBlend);
+
+    float nightAmount = FogAmount * mix(1.0, NightAmountScale, nightFactor);
+    fogMul = mix(vec3(1.0), fogMul, nightAmount);
+    fogAdd *= nightAmount;
+    nightAmountOut = nightAmount;
+
+    // UNOFFICIAL 2026-10-30 GameFogFloor (VolumetricFog.fx.hlsl ModernFogTerms): at least the game's own fog curve for the weather,
+    // times cb.fogSun.z, with the weather's raw near (w); toward NVR's fog colour without the sun's glow; not on the sky dome.
+    if (!classic && cb.fogSun.z > 0.0) {
+        float gameNear = cb.fogSun.w;
+        float gameFog = farFog > gameNear + 1.0 ? pows(saturate((length(eyeVector) - gameNear) / (farFog - gameNear)), FogPower) : 0.0;
+        float want = saturate(cb.fogSun.z * gameFog) * (1.0 - isSkyDome);
+        float kept = luma(fogMul);
+        float topUp = saturate((want - (1.0 - kept)) / max(kept, 0.0001));
+        vec3 haze = fogColor(ambientSkyColor, pureFogColor, strength, FogSkyColorCoeff, vec4(0.0), FogSaturation).rgb * mix(vec3(1.0), NightTint, nightFactor);
+        fogMul *= 1.0 - topUp;
+        fogAdd = mix(fogAdd, haze, topUp);
+    }
+}
+
+void FogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nightAmountOut, bool legacy, bool interior, bool classic) {
+    if (legacy)
+        LegacyFogTerms(coord, fogMul, fogAdd, nightAmountOut, interior);
+    else
+        ModernFogTerms(coord, fogMul, fogAdd, nightAmountOut, interior, classic);
 }
 
 #ifdef FOG_APPLY
-// ==== the composites (the .fx SunShadowComposite, AOComposite, CompositeScene, LightAirComposite) ====
-vec3 SunShadowComposite(vec2 tex, vec3 frame) {
-    if (pc.sunFarFlags.x > 0.5) frame *= POINT_LOD(t_sunFar, tex).rgb;
-    vec2 terms = LINEAR_LOD(t_pointShadow, tex).rg;
-    float sun = mix(terms.r, 1.0, saturate(cb.shadowFade.x));
-    float lit = saturate(sun + terms.g * saturate(cb.shadowFade.z));
-    float f = mix(max(0.0, 1.0 - cb.shadowData.y), 1.0, lit);
-    if (cb.waterSettings.z > 0.5) {
-        float viewZ = readDepthLod(tex);
-        float h = cb.cameraPosition.z + toWorld(tex).z * viewZ;
-        vec3 n = normalize(GetWorldNormalLod(tex));
-        f = (abs(h - cb.waterSettings.x) <= 2.0 && dot(n, vec3(0.0, 0.0, -1.0)) >= 0.999) ? 1.0 : f;
+// FogApply: the depth-aware upsample of the half-resolution coefficients, applied to a gamma-space colour.
+vec3 FogApply(vec3 gammaColor, vec2 coord, bool legacy, bool interior, bool classic) {
+    vec2 texel = pc.fogLayout.zw;
+    vec2 position = coord / texel - 0.5;
+    vec2 fraction = fract(position);
+    vec2 baseUV = (floor(position) + 0.5) * texel;
+    vec2 minUV = texel * 0.5;
+    vec2 maxUV = 1.0 - minUV;
+
+    vec2 uv00 = clamp(baseUV, minUV, maxUV);
+    vec2 uv10 = clamp(baseUV + vec2(texel.x, 0.0), minUV, maxUV);
+    vec2 uv01 = clamp(baseUV + vec2(0.0, texel.y), minUV, maxUV);
+    vec2 uv11 = clamp(baseUV + texel, minUV, maxUV);
+    vec4 s00 = POINT_LOD(t_fogMul, uv00);
+    vec4 s10 = POINT_LOD(t_fogMul, uv10);
+    vec4 s01 = POINT_LOD(t_fogMul, uv01);
+    vec4 s11 = POINT_LOD(t_fogMul, uv11);
+
+    float depth = saturate(readDepthLod(coord) / farZ);
+    float tolerance = max(depth * 0.02, 0.0005);
+    vec4 difference = abs(vec4(s00.a, s10.a, s01.a, s11.a) - depth) / tolerance;
+    vec4 spatial = vec4((1.0 - fraction.x) * (1.0 - fraction.y), fraction.x * (1.0 - fraction.y),
+        (1.0 - fraction.x) * fraction.y, fraction.x * fraction.y);
+    vec4 weights = spatial / (1.0 + difference * difference * 8.0);
+    weights /= max(dot(weights, vec4(1.0)), 0.00001);
+    vec3 fogMul = s00.rgb * weights.x + s10.rgb * weights.y + s01.rgb * weights.z + s11.rgb * weights.w;
+    vec3 fogAdd = POINT_LOD(t_fogAdd, uv00).rgb * weights.x + POINT_LOD(t_fogAdd, uv10).rgb * weights.y +
+        POINT_LOD(t_fogAdd, uv01).rgb * weights.z + POINT_LOD(t_fogAdd, uv11).rgb * weights.w;
+    float bestDifference = min(min(difference.x, difference.y), min(difference.z, difference.w));
+    if (bestDifference > 3.0) {
+        float nightAmount;
+        FogTerms(coord, fogMul, fogAdd, nightAmount, legacy, interior, classic);
     }
-    vec3 linC = pow(max(frame, vec3(0.0)), vec3(2.2));
-    vec3 skyLin = pow(max(cb.skyColor.rgb, vec3(0.0)), vec3(2.2));
-    vec3 shaded = mix(luma(linC) * f * skyLin, linC * f, saturate(f + 0.5));
-    return pow(max(shaded, vec3(0.0)), vec3(1.0 / 2.2));
+
+    vec3 color = linearize(gammaColor);
+    return delinearize(max(color * fogMul + fogAdd, vec3(0.0)));
 }
 
+// ---- the composites' shadow and AO applies ----
+vec3 CompositeSunShadow(vec3 linearColor, vec2 coord) {
+    linearColor *= mix(vec3(1.0), pows(POINT_LOD(t_sunFar, coord).rgb, 2.2), pc.sunFarFlags.x);
+    if (cb.waterSettings.z == 1.0) {
+        float depth = readDepthLod(coord);
+        vec3 worldPos = cb.cameraPosition.xyz + toWorld(coord) * depth;
+        vec3 worldNormal = GetWorldNormalLod(coord);
+        if (worldPos.z < (cb.waterSettings.x + 2.0) && worldPos.z > (cb.waterSettings.x - 2.0) && dot(worldNormal, vec3(0.0, 0.0, -1.0)) > 0.999)
+            return linearColor;
+    }
+
+    float darkness = max(0.0, 1.0 - cb.shadowData.y);
+    vec2 shadow = LINEAR_LOD(t_pointShadow, coord).rg;
+    shadow.r = mix(cb.shadowFade.x, 1.0, shadow.r);
+    float ambient = mix(1.0, luma(cb.sunAmbient), darkness * cb.shadowFade.z);
+    shadow.r = mix(0.0, ambient, shadow.r);
+    shadow.r += shadow.g;
+    shadow.r = saturate(mix(darkness, 1.0, shadow.r));
+
+    vec3 skyColor = pows(cb.skyColor.rgb, 2.2);
+    vec3 colorShadow = luma(linearColor) * shadow.r * skyColor;
+    colorShadow = mix(colorShadow, linearColor * shadow.r, saturate(shadow.r + 0.5));
+    return max(vec3(0.0), colorShadow);
+}
+
+// Includes/SkyTake.hlsl
 vec3 SkyTake(vec3 linearColor, float factor, float visibility, float cap, float noLimit) {
     float take = min(1.0 - factor, ((1.0 - visibility) * cap + noLimit) / max(luma(linearColor), 1.0e-6));
     return linearColor * (1.0 - take);
 }
 
-vec3 AOComposite(vec2 tex, vec3 frame) {
-    float viewZ = readDepthLod(tex);
-    if (viewZ >= 8000.0) return frame;
+vec3 CompositeAO(vec3 linearColor, vec2 coord) {
+    float depth = readDepthLod(coord);
+    if (depth >= CompositeAOEndFade) return linearColor;
+
     vec2 texel = pc.compositeAOTexel.xy;
-    vec2 p = tex / texel - 0.5;
-    vec2 cell = floor(p);
-    vec2 f = p - cell;
-    float drop = max(cb.aoData.z, 0.001);
+    vec2 position = coord / texel - 0.5;
+    vec2 base = floor(position);
+    vec2 fraction = fract(position);
+    float blurDrop = cb.aoData.z;
     float sum = 0.0, weights = 0.0;
     vec2 skySum = vec2(0.0);
-    vec4 w4;
-    vec2 taps[4];
-    for (int i = 0; i < 4; i++) {
-        vec2 o = Quad[i];
-        taps[i] = clamp((cell + o + 0.5) * texel, 0.5 * texel, 1.0 - 0.5 * texel);
-        vec2 ao = LINEAR_LOD(t_ao, taps[i]).rg;
-        float w = (o.x > 0.5 ? f.x : 1.0 - f.x) * (o.y > 0.5 ? f.y : 1.0 - f.y);
-        w /= 1.0 + abs(ao.y - viewZ) / drop;
-        w4[i] = w;
-        sum += ao.x * w;
-        weights += w;
+    bool sky = pc.compositeFlags.z > 0.5;
+    for (int y = 0; y < 2; ++y) {
+        for (int x = 0; x < 2; ++x) {
+            vec2 sampleUV = clamp((base + vec2(x, y) + 0.5) * texel, 0.5 * texel, 1.0 - 0.5 * texel);
+            vec2 aoSample = LINEAR_LOD(t_ao, sampleUV).rg;
+            float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y);
+            weight /= 1.0 + abs(aoSample.y - depth) / max(blurDrop, 0.001);
+            sum += aoSample.x * weight;
+            weights += weight;
+            if (sky) skySum += POINT_LOD(t_skyVis, sampleUV).rb * weight;
+        }
     }
-    float ao = mix(cb.aoAOData.z, 1.0, sum / max(weights, 1e-6));
-    vec3 linC = pows(frame, 2.2);
-    ao = mix(ao, 1.0, saturate((luma(linC) - cb.aoData.y) * 3.0));
-    vec3 result = frame * pow(abs(ao), 1.0 / 2.2);
-    if (pc.compositeFlags.z > 0.5) {
-        for (int j = 0; j < 4; j++) skySum += POINT_LOD(t_skyVis, taps[j]).rb * w4[j];
-        vec2 skyV = saturate(skySum / max(weights, 1e-6));
-        result = pows(SkyTake(pows(result, 2.2), skyV.x, skyV.y, pc.compositeAOTexel.z, pc.compositeAOTexel.w), 1.0 / 2.2);
-    }
-    return result;
-}
-
-// Includes/InteriorShadowApply.hlsl ApplyInteriorShadowDepth (gamma-encoded in and out)
-vec3 InteriorShadow(vec2 tex, vec3 color, float shadowSample) {
-    vec3 c = pows(color, 2.2);
-    float uniformDepth = length(readDepthLod(tex) * toWorld(tex));
-    float shadow = saturate(shadowSample);
-    shadow = mix(shadow, 1.0, saturate((uniformDepth - 300.0) / (cb.shadowFade.w - 300.0)));
-    float darkness = (cb.shadowData.y * 5.0) / (1.0 + cb.shadowData.y * 5.0);
-    darkness = saturate(1.0 - darkness * cb.shadowFade.y);
-    shadow = saturate(mix(darkness, 1.0, shadow));
-    float shadowPower = 1.0 - shadow;
-    vec4 c4 = vec4(c, 1.0);
-    vec4 fin = saturate(shadow * pow(saturate(c4), vec4(1.0 - shadowPower * 0.2)));
-    fin = mix(vec4(luma(fin)), fin, 1.0 + shadowPower * 0.3);
-    fin += max(c4 - 1.0, vec4(0.0));
-    return pows(fin.rgb, 1.0 / 2.2);
-}
-
-vec3 CompositeScene(vec2 tex, vec3 frame, int comp, inout float alpha) {
-    if (comp == COMP_INTERIOR) {
-        float lamps = LINEAR_LOD(t_pointShadow, tex).r;
-        frame = RoundToHalf(InteriorShadow(tex, frame, lamps), pc.compositeFlags.w);
-        alpha = 1.0;
-    }
-    else if (pc.compositeFlags.x > 0.5) { frame = SunShadowComposite(tex, frame); alpha = 1.0; }
-    if (pc.compositeFlags.y > 0.5) { frame = AOComposite(tex, frame); alpha = 1.0; }
-    return frame;
-}
-
-vec3 LightAirComposite(vec2 tex, float dN, vec3 linC) {
-    float march = max(cb.vlData.w, 1.0);
-    float viewZ = dN * farZ;
-    float planar = dN >= 0.996 ? march : min(viewZ, march);
-    vec3 ray = toWorld(tex);
-    float lit = GridSums(tex, planar).r / max(cb.gridData.y, 1e-6);
-    float air = 1.0 - exp(-cb.vlData.z * length(ray) * planar);
-    float g = cb.vlData2.y;
-    float cosT = dot(normalize(ray), cb.smoothedSunDir.xyz);
-    float phase = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosT, 1e-4), 1.5), 8.0);
-    float fade = cb.vlData2.z;
-    return linC * (1.0 - cb.vlData.y * fade * saturate(air - lit)) + LIN_SUN * (cb.vlData.x * fade * phase * lit);
-}
-
-// The .fx UpsampleFog
-void UpsampleFog(vec2 tex, vec2 vpos, float dP, int look, bool inside, out vec3 mulV, out vec3 addV) {
-    vec2 hp = (vpos + 0.5) * pc.fogLayout.xy - 0.5;
-    vec2 h0 = floor(hp);
-    vec2 t = hp - h0;
-    float tol = max(0.02 * dP, 0.0005);
-    vec3 sumMul = vec3(0.0), sumAdd = vec3(0.0);
-    float weights = 0.0;
-    for (int i = 0; i < 4; i++) {
-        vec2 o = Quad[i];
-        vec2 huv = (h0 + o + 0.5) * pc.fogLayout.zw;
-        vec4 m = POINT_LOD(t_fog, huv);
-        vec3 a = POINT_LOD(t_fogAdd, huv).rgb;
-        float w = (o.x > 0.5 ? t.x : 1.0 - t.x) * (o.y > 0.5 ? t.y : 1.0 - t.y) * saturate(2.0 - abs(m.a - dP) / tol);
-        sumMul += w * m.rgb;
-        sumAdd += w * a;
-        weights += w;
-    }
-    mulV = sumMul / max(weights, 1e-6);
-    addV = sumAdd / max(weights, 1e-6);
-    if (weights < 0.25) {
-        vec3 ownMul, ownAdd;
-        FogTerms(tex, dP, look, inside, ownMul, ownAdd);
-        float k = saturate(weights * 4.0);
-        mulV = mix(ownMul, mulV, k);
-        addV = mix(ownAdd, addV, k);
-    }
+    float ao = mix(cb.aoAOData.z, 1.0, sum / max(weights, 1.0e-6));
+    ao = mix(ao, 1.0, saturate((luma(linearColor) - cb.aoData.y) * 3.0));
+    if (sky) { vec2 skyAt = saturate(skySum / max(weights, 1.0e-6)); return SkyTake(linearColor * ao, skyAt.x, skyAt.y, pc.compositeAOTexel.z, pc.compositeAOTexel.w); }
+    return linearColor * ao;
 }
 #endif

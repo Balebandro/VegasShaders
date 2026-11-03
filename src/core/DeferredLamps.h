@@ -22,7 +22,8 @@ namespace DeferredLamps {
 	inline std::unordered_map<const void*, ShaderRecordPixel*> Records;	// NiD3DPixelShaderEx* -> its deferred record (the ExteriorRecords pattern)
 	inline std::unordered_map<IDirect3DPixelShader9*, IDirect3DPixelShader9*> ForwardOf;	// deferred handle -> the forward Interior handle
 	inline ShaderRecordPixel* Pass = nullptr;
-	inline bool PassFailed = false;
+	inline bool PassFailed = false;	// the lamp pass did not compile (for the session)
+	inline FailOnce::Latch CopyFailed{ "DeferredLamps frame copy" };	// UNOFFICIAL 2026-11-02 RetryFailedEffects
 	// UNOFFICIAL 2026-10-31 the shadow passes (DL_SHADOW_PASS): the full filter for lamps 0-15 of each pixel's list, four lamps a pass into one
 	// A8R8G8B8 target each, read by the lighting pass (which has no temp registers left for the full filter next to the specular lighting).
 	inline ShaderRecordPixel* ShadowPass = nullptr;
@@ -77,7 +78,7 @@ namespace DeferredLamps {
 	inline void BeginFrame() {
 		Frame++;
 		if (!WantedAtStartup()) { Live = false; return; }
-		Live = TheSettingManager->GetSettingI(kSection, "Live") != 0 && !PassFailed && !CapturedNormals::Failed && ManyLamps::Active() &&
+		Live = TheSettingManager->GetSettingI(kSection, "Live") != 0 && !PassFailed && !CopyFailed.Blocked() && !CapturedNormals::Failed && ManyLamps::Active() &&
 			CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn() && !TheShaderManager->GameState.isExterior;
 		// UNOFFICIAL 2026-11-01 (user: the lock is black in the lockpick view): the lock is drawn in its own scene, lit by the menu's own light,
 		// which the frame's lamp table and the deferred pass never see. The objects light their own lamps while the lockpick screen is open.
@@ -88,7 +89,7 @@ namespace DeferredLamps {
 		}
 		{	// UNOFFICIAL 2026-11-01 (core/EffectStatus.h): live this frame, or which condition kept it forward
 			static int statusSlot = -1;
-			const char* why = Live ? "live (interior)" : TheShaderManager->GameState.isExterior ? "exterior (forward lamps)" : PassFailed ? "the lamp pass failed to load" :
+			const char* why = Live ? "live (interior)" : TheShaderManager->GameState.isExterior ? "exterior (forward lamps)" : PassFailed ? "the lamp pass failed to load" : CopyFailed.failed ? "the frame copy could not be made" :
 				!TheSettingManager->GetSettingI(kSection, "Live") ? "Live off" : !ManyLamps::Active() ? "ManyLamps not active" : "needs CapturedNormals + buffers / lockpick";
 			EffectStatus::Note(statusSlot, "DeferredLamps", Live ? EffectStatus::Drawn : EffectStatus::Skipped, why);
 		}
@@ -208,8 +209,8 @@ namespace DeferredLamps {
 				if (Copy) { Copy->Release(); Copy = nullptr; }
 				if (CopyTex) { CopyTex->Release(); CopyTex = nullptr; }
 				if (FAILED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, t.Format, D3DPOOL_DEFAULT, &CopyTex, NULL)) || FAILED(CopyTex->GetSurfaceLevel(0, &Copy))) {
-					Logger::Log("[ERROR] UNOFFICIAL DeferredLamps: could not make the frame's copy: forward from now on");
-					PassFailed = true; target->Release(); StatSkipped++; return;
+					CopyFailed.Set("could not make the frame's copy: forward lamps");
+					target->Release(); StatSkipped++; return;
 				}
 				CopyMade = t;
 			}
