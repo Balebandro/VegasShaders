@@ -9,6 +9,6 @@ namespace Branding {
 	constexpr const char* LightingTitle = "Lighting###LightingPanel";
 	constexpr const char* DevToolsTitle = "Dev Tools###DevTools";
 	constexpr const char* AboutTitle = "About Vegas Shaders###About";
-	constexpr const char* Version = "1.0.0";	// keep in step with FILEVERSION / ProductVersion in NewVegasReloaded.rc
+	constexpr const char* Version = "1.0.1";	// keep in step with FILEVERSION / ProductVersion in NewVegasReloaded.rc
 	constexpr const char* VersionLabel = "Vegas Shaders";	// the status bar's version line: "<VersionLabel> <Version>"
 }
