@@ -77,6 +77,8 @@
 //                                       when: always called
 //  35  VolumetricLight                  Volumetric light composite (if the fog did not), or its own buffers + composite
 //                                       when: lightGrid / wouldRender(VolumetricLight)
+//  35b DustMotes                        Dust specks in lit air: half-res pass into its buffer, additive pass into the current image
+//                                       when: DustMotes on for the cell type, a lamp within reach or the sun's grid (ShouldRender)
 //  36  Sandstorm                        Sandstorm (fast path or the original)
 //                                       when: always called (nothing outside a storm)
 //  37  GodRays                          God rays
@@ -1068,6 +1070,19 @@ void ShaderManager::PreStep_VolumetricLight(ChainContext& ctx) {
 	}
 }
 
+void ShaderManager::PreStep_DustMotes(ChainContext& ctx) {
+	static GpuTimer dustMotesTimer("Dust motes");
+	IDirect3DDevice9* Device = ctx.Device;
+	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
+	{
+		// UNOFFICIAL 2026-11-03: dust specks in the lit air (effects/DustMotes), after the fog and the sun shafts so they sit in front
+		// of the lit air, before the exposure and bloom. Half-resolution pass into its own buffer, then added to the current image in
+		// place (no copy). ctx.lightGrid: the shafts' froxel grid was built this frame (the sun's lit air, read when SunShare > 0).
+		GpuProfileScope gpu(dustMotesTimer, Device);
+		Effects.DustMotes->RenderFrame(Device, RenderTarget, ctx.lightGrid);
+	}
+}
+
 void ShaderManager::PreStep_Sandstorm(ChainContext& ctx) {
 	static GpuTimer sandstormTimer("Sandstorm");
 	IDirect3DDevice9* Device = ctx.Device;
@@ -1126,20 +1141,29 @@ void ShaderManager::PreStep_LumaExposureBloom(ChainContext& ctx) {
 			GpuProfileScope gpuLuma(avgLumaTimer, Device);
 			// UNOFFICIAL 2026-10-23 (NVR DXVK): the compute version when AvgLumaCompute is on and the NVR DXVK extension is
 			// present (effects\AvgLuma.cpp); otherwise, and when it fails, the D3D9 pass as before.
+			// UNOFFICIAL GT7 adaptation ([Shaders.Exposure.Main] Mode 1): technique 1 of AvgLuma.fx keeps a different state in the 1x1 texel
+			// (log2 adaptation levels and a colour temperature); it is cleared when the mode changes so neither technique reads the other's.
+			static int lumaMode = -1;
+			const int exposureMode = Effects.Exposure ? Effects.Exposure->Settings.Mode : 0;
+			if (exposureMode != lumaMode) {
+				if (Effects.AvgLuma->Textures.AvgLumaSurface) Device->ColorFill(Effects.AvgLuma->Textures.AvgLumaSurface, NULL, D3DCOLOR_ARGB(0, 0, 0, 0));
+				lumaMode = exposureMode;
+			}
 			const bool computed = Effects.AvgLuma->RenderCompute(Device);
 			if (!computed) {
-				RenderEffectToRT(Effects.AvgLuma->Textures.AvgLumaSurface, Effects.AvgLuma, NULL);
+				RenderEffectToRT(Effects.AvgLuma->Textures.AvgLumaSurface, Effects.AvgLuma, NULL, Effects.Exposure ? Effects.Exposure->Technique() : 0);
 				Device->SetRenderTarget(0, RenderTarget); 	// restore device used for effects
 			}
-			Effects.AvgLuma->CheckCompute(Device, !computed && TheSettingManager->SettingsMain.Main.AvgLumaComputeCheck > 0);	// test tool, off by default
+			Effects.AvgLuma->CheckCompute(Device, !computed && TheSettingManager->SettingsMain.Main.AvgLumaComputeCheck > 0 && exposureMode == 0);	// test tool, off by default
 		}
 		{
 			GpuProfileScope gpuExposure(exposureTimer, Device);
 			// UNOFFICIAL (postchain): with MaxBrightness 0 (the Night default) the pass returns delinearize(linearize(c)), which is c
 			// again at the buffer's precision (c is a half float; the round trip's 1e-6 error rounds back to it): a full-screen
 			// read and write for nothing. Skipped, the image is left where it is (no chain commit).
-			if (!(TheSettingManager->SettingsMain.Main.SkipIdentityExposure && Effects.Exposure->Constants.Data.y == 0.0f))
-				{ Effects.Exposure->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Exposure); }
+			// (UNOFFICIAL GT7 adaptation, Mode 1: its technique 1; skipped only with both its strengths at 0, Exposure::IsIdentity.)
+			if (!(TheSettingManager->SettingsMain.Main.SkipIdentityExposure && Effects.Exposure->IsIdentity()))
+				{ Effects.Exposure->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, Effects.Exposure->Technique(), false, SourceSurface); PixelInspector::AfterFrame(Effects.Exposure); }
 		}
 		{
 			GpuProfileScope gpuBloom(bloomTimer, Device);
@@ -1522,6 +1546,7 @@ static const EffectChain::Step PreTonemapSteps[] = {
 	{ "VolumetricLightGrid", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricLightGrid },
 	{ "VolumetricFog", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricFog },
 	{ "VolumetricLight", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricLight },
+	{ "DustMotes", EffectChain::PreTonemap, &ShaderManager::PreStep_DustMotes },
 	{ "Sandstorm", EffectChain::PreTonemap, &ShaderManager::PreStep_Sandstorm },
 	{ "GodRays", EffectChain::PreTonemap, &ShaderManager::PreStep_GodRays },
 	{ "RayReconstruction", EffectChain::PreTonemap, &ShaderManager::PreStep_RayReconstruction },

@@ -735,6 +735,7 @@ void SettingManager::LoadSettings() {
 		SettingsMain.Main.HDRScreenshot = GetSettingI(sec, "HDRScreenshot");
 		SettingsMain.Main.ReplaceIntro = GetSettingI(sec, "ReplaceIntro");
 		SettingsMain.Main.ForceMSAA = GetSettingI(sec, "ForceMSAA");
+		SettingsMain.Main.BlockGameMSAA = GetSettingI(sec, "BlockGameMSAA");
 		SettingsMain.Main.SkipFog = GetSettingI(sec, "SkipFog");
 		SettingsMain.Main.RenderEffects = GetSettingI(sec, "RenderEffects");
 		SettingsMain.Main.RenderPreTonemapping = GetSettingI(sec, "RenderPreTonemapping");
@@ -802,6 +803,7 @@ void SettingManager::LoadSettings() {
 	SettingsMain.Main.HiddenObjectCulling = boolSetting(performance, "HiddenObjectCulling", false);
 	SettingsMain.Main.PreDecodeCache = boolSetting(performance, "PreDecodeCache", false);	// UNOFFICIAL 2026-10-21 cpulimits
 	SettingsMain.Main.FastCasterHash = boolSetting(performance, "FastCasterHash", false);
+	SettingsMain.Main.SkyOnWorker = boolSetting(performance, "SkyOnWorker", false);	// UNOFFICIAL 2026-11-03 cpu-workers
 	SettingsMain.Main.CasterListCache = boolSetting(performance, "CasterListCache", false);	// UNOFFICIAL 2026-10-30 ROOTPLAN round 7 step 18
 	SettingsMain.Main.TrimLampPasses = boolSetting(performance, "TrimLampPasses", true);
 	{

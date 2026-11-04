@@ -143,6 +143,9 @@ void main() {
         float value = 0.0;
         if (pos.x < int(pc.width) && pos.y < int(pc.height))
             value = luma(linearize(texelFetch(t_color, pos, 0).rgb));
+        // 2026-11-04 (a tester's black screen under one weather): a pixel that is not a number (NaN) or is infinite counts as black,
+        // and a NaN state starts over (AvgLuma.fx.hlsl, the same guard). Nothing changes for finite values.
+        if (isnan(value) || isinf(value)) value = 0.0;
 
         s_sum[gl_LocalInvocationIndex] = value;
         reduceShared();
@@ -164,6 +167,7 @@ void main() {
             float average_ = s_sum[0] / float(pc.width * pc.height);
 
             vec2 oldLuma = prev.rg;
+            if (any(isnan(oldLuma)) || any(isinf(oldLuma))) oldLuma = vec2(0.0);
             float newLuma = (average_ + (7.0 * oldLuma.r)) / 8.0;  // average over 8 frames
 
             float decreaseRate = -pc.exposureData.z;

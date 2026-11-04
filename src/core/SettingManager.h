@@ -10,6 +10,7 @@ struct SettingsMainStruct
 {
 	struct MainStruct {	// [Main.Main.*]
 		bool	RemoveUnderwater, ForceMSAA, ForceReflections;	// [Main.Main.Water] / [Main.Main.Misc]
+		bool	BlockGameMSAA;	// [Main.Main.Misc] UNOFFICIAL 2026-11-04: the INIs' iMultiSample / iWaterMultiSamples read as 0
 		bool	GameShadersInReflections; // [Main.Main.Water] diagnostic: the reflection pass uses the game's own shaders
 		bool	ReflectionClipFix; // [Main.Main.Water] UNOFFICIAL: the water reflection's clip plane rebuilt by NVR at every draw of the reflection pass
 		bool	RemovePrecipitations;	// [Main.Main.Precipitations]
@@ -48,6 +49,7 @@ struct SettingsMainStruct
         bool    HiddenObjectCulling; // [Main.Main.Performance] HiddenObjectCulling (HiddenObjectCulling.h: skip the extra passes of objects hidden a few frames ago), live
         bool    PreDecodeCache; // [Main.Main.Performance] PreDecodeCache (LinearPreDecode.h: powf results kept, decoded copies sent per call; same bits), live
         bool    FastCasterHash; // [Main.Main.Performance] FastCasterHash (ShadowManager.cpp: lamp caster hash over 4-byte words, once per object per frame), live
+        bool    SkyOnWorker; // [Main.Main.Performance] SkyOnWorker (Sky.cpp + FrameWorker.h: the sky light projection on a worker thread, joined before its readers; same values), live
         bool    CasterListCache; // [Main.Main.Performance] CasterListCache (ShadowManager.cpp PointShadowCasterState: each lamp keeps its casters' motion entries, no map lookup per caster per lamp; with FastCasterHash), live
         int     HiddenObjectCullingMaxAge; // [Main.Main.Performance] HiddenObjectCullingMaxAge (oldest visibility answer used, 1-7 frames), live
         bool    ReShadeDepthCompat; // [Main.Main.Performance] ReShadeDepthCompat (keep the game's depth-stencil bound through NVR's passes, for ReShade; also on while ReShade is loaded, ReShadeIntegration::KeepDepthBound), live

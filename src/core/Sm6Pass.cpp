@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <sstream>
 #include "Sm6Pass.h"
+#include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "DxvkCompute.h"
 #include "RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 
@@ -295,6 +296,7 @@ void Sm6Pass::FillConstants() {
 		}
 		// a constant only the SM6 build declares: the registered one (contiguous, as SetCT would upload it), else its literal default
 		auto found = TheShaderManager->ConstantsTable.find(c.Name);
+		if (found != TheShaderManager->ConstantsTable.end() && found->second) SkyProjection::JoinIfSky(found->second);	// UNOFFICIAL 2026-11-03 SkyOnWorker
 		if (found != TheShaderManager->ConstantsTable.end() && found->second) { memcpy(dst, found->second, c.Size); continue; }
 		if (!c.Default.empty()) { memcpy(dst, c.Default.data(), min(c.Size, (UINT)(c.Default.size() * sizeof(float)))); continue; }
 		if (std::find(Missing.begin(), Missing.end(), c.Name) == Missing.end()) {

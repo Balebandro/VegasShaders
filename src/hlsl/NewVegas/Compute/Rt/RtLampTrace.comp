@@ -20,6 +20,7 @@
 // amounts times their traced visibility instead of the cube maps; the rest count unshadowed, as that pass's tracked lamps do.
 // The ranking then uses that amount. glslangValidator -V --target-env vulkan1.2 -DEXTERIOR -o RtLampTraceExterior.spv RtLampTrace.comp
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -41,7 +42,8 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	                    //   (0 the light a lamp brings, 1 the game's own falloff: as the game picks a draw's lamps by distance),
 	                    // w StartOffsetPerUnit (all variants): the start offset grows by this x the view depth
 	vec4 manyUnused[7]; // (RtLampTraceMany's many, reproject[4], many2: the C++ block is shared)
-	vec4 jitter;        // (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray
+	vec4 jitter;        // (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray;
+	                    // z (rtalpha) 1 = alpha-tested casters tested (binding 12, the alpha atlas)
 	                    // through uv + this (the rebuilt point stays on the surface; the lookup's Reproject takes the same jitter off)
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // TESR_DepthBuffer's red: view z / farZ
@@ -50,6 +52,10 @@ layout(set = 0, binding = 4, rg32f) uniform writeonly image2D resultImage;
 // The lamp table, 4 texels a lamp, lamp = cube slot s at x = 4s: (x, y), (z, reach), (intensity, the game's radius), (stop, disc radius)
 // (scene space; reach 0 = no lamp in that slot)
 layout(set = 0, binding = 5, rg32f) uniform readonly image2D lampTable;
+// (2026-11-03 rtalpha) the core's alpha atlas (pass image 8; a 1 x 1 stand-in with jitter.z 0)
+layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
 #ifdef SPLIT
 layout(set = 0, binding = 6, r32f) uniform writeonly image2D vis0Image;
 layout(set = 0, binding = 7, r32f) uniform writeonly image2D vis1Image;
@@ -93,8 +99,16 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	if (!(tMax > tMin)) return false;
 	rayQueryEXT q;
 	bool oneSided = p.flags.x > 0.5;
-	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | gl_RayFlagsOpaqueEXT, mask, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q)) { }
+	// (2026-11-03 rtalpha) jitter.z 1: alpha-tested casters (foliage cards, fences, chain link, wires: non-opaque, mask 0x10) come as
+	// candidates and their diffuse alpha decides (RtAlpha.glsl, as the sun's rays); 0: they are skipped (mask without 0x10), as before
+	const bool testAlpha = p.jitter.z > 0.5;
+	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
+		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q))
+		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
 	// OneSided: the ray runs from the surface toward the lamp, so a caster facing the lamp is hit on its BACK face
 	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);

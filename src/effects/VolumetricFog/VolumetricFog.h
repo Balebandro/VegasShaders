@@ -9,6 +9,7 @@ public:
 		Constants.WeatherFilterAnimator.Initialize(1);
 	};
 
+	static const int LampHazeMax = 16;	// UNOFFICIAL 2026-11-03 LampHaze: LAMP_HAZE_MAX in VolumetricFog.fx.hlsl
 	struct VolumetricFogStruct {
 		// x: BaseDensity, y: WeatherImpact, z: MorningFogDip, w: SunriseSunsetBoost
 		D3DXVECTOR4		Density;
@@ -53,6 +54,9 @@ public:
 		D3DXVECTOR4		LegacyHeight;
 		// x: MinimumBaseFog, y: HeightFogSaturation, z: Amount, w: HeightFogInscattering
 		D3DXVECTOR4		LegacyData;
+		// UNOFFICIAL 2026-11-03 LampHaze ([Shaders.VolumetricFog.Interiors]; SetLampHaze, VolumetricFog.fx.hlsl LampHazeLight):
+		// x: LampHaze (0 = off: outdoors, LampHaze 0 or no lamp), y: lamps listed, z: anisotropy g, w: core share of the reach
+		D3DXVECTOR4		Lamps;
 		Animator		WeatherFilterAnimator;
 	};
 	VolumetricFogStruct	Constants;
@@ -69,6 +73,15 @@ public:
 	float	layerOn = 0.0f, layerBase = 0.0f, layerThickness = 2000.0f; bool layerFollowsCamera = false;	// UNOFFICIAL 2026-11-01 HeightLayer (UpdateSettings)
 	float	shapeFalloff = 50.0f, shapeMaxHeight = 3.0f;	// HeightFalloff / MaxHeight as set (Shape.xy carry the layer while it is on: ApplyLayer)
 	void	ApplyLayer();
+	// UNOFFICIAL 2026-11-03 LampHaze ([Shaders.VolumetricFog.Interiors] LampHaze, LampHazeAnisotropy, LampHazeCore, LampHazeMaxLamps; read
+	// indoors only, 0 outdoors). SetLampHaze fills Constants.Lamps and lampTexture from this frame's lamps (Render, before any draw);
+	// LampHazeOn: the lamps' light is in this frame's fog, so the Vulkan and SM6 passes (which do not have it) are not used.
+	float	lampHaze = 0.0f, lampHazeAnisotropy = 0.3f, lampHazeCore = 0.25f; int lampHazeMaxLamps = 8;
+	// The lamps themselves go in a 16 x 2 float texture on stage 14 (NVR_FogLamps; row 0: position relative to the camera + the game's
+	// reach, row 1: colour linear x dimmer): as constant arrays they put the fog's passes over ps_3_0's 224 constant registers.
+	IDirect3DTexture9* lampTexture = nullptr;
+	void	SetLampHaze(IDirect3DDevice9* Device);
+	bool	LampHazeOn() const { return Constants.Lamps.x > 0.0f && !IsLegacy() && !IsClassic(); }
 
 	// cached from UpdateSettings (Shaders.ShadowsExteriors.Main/NightMinDarkness), consumed by
 	// UpdateConstants to drive the moon-phase night-ambient ceiling

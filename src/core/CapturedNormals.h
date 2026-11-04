@@ -608,6 +608,90 @@ namespace CapturedNormals {
 		Tracked = true;
 	}
 	inline void AfterStateBlock(IDirect3DDevice9* d) { if (InSpan && Tracked) Resync(d); }
+
+	// UNOFFICIAL 2026-11-04 [Main.Main.Performance] DrawStateTracking (live; cpu-workers follow-up, bench\deep-roadmap\cpuworkers\REPORT.md):
+	// the same lean tracking on native D3D9 and stock DXVK, where the device-table hooks above cannot be trusted (the native runtime puts its
+	// own entries back between our reinstalls, and a Set call made meanwhile left a stale record). Here the device's own SetRenderTarget and
+	// SetRenderState BODIES are detoured (the code every table entry ends in, so a restored entry still lands in it), and the pixel shader,
+	// state-block Apply / EndStateBlock and Reset come from ConstantFilter's detours of those bodies (SharedDrawState::PixelShaderSet /
+	// StateLost). A lost state makes the record stale: it is read from the device again at the next draw (never inside those calls: the
+	// native runtime crashed on device calls made there, ConstantFilter 2026-10-27). Every CheckEvery-th draw the record is compared with
+	// the device (DrawStateTrackingCheck, 0 = every 1024th): a difference is logged and the tracking stays off for the session (the per-draw
+	// device queries, as before). Measured before: the queries cost ~5 % of the Ultra-Luxe's main thread on native D3D9 (~1 ms).
+	inline bool BodyTracked = false, BodyFailed = false, BodyWanted = false, BodyDisabled = false;
+	inline SetRTFn OrigBodySetRT = nullptr;
+	inline SetRSFn OrigBodySetRS = nullptr;
+	inline UInt32 BodyChecks = 0, BodyMismatches = 0, BodyDrawCounter = 0, BodyResyncs = 0, BodyCheckEvery = 1024;
+	inline HRESULT STDMETHODCALLTYPE BodySetRT(IDirect3DDevice9* d, DWORD i, IDirect3DSurface9* s) {
+		const HRESULT r = OrigBodySetRT(d, i, s);
+		if (i < 4 && SUCCEEDED(r)) T.rt[i] = s;
+		return r;
+	}
+	inline HRESULT STDMETHODCALLTYPE BodySetRS(IDirect3DDevice9* d, D3DRENDERSTATETYPE st, DWORD v) {
+		switch (st) {
+		case D3DRS_COLORWRITEENABLE: T.colorWrite = v; break;
+		case D3DRS_ALPHABLENDENABLE: T.blend = v; break;
+		case D3DRS_SRCBLEND: T.src = v; break;
+		case D3DRS_DESTBLEND: T.dst = v; break;
+		case D3DRS_COLORWRITEENABLE2: T.colorWrite2 = v; break;
+		case D3DRS_COLORWRITEENABLE3: T.colorWrite3 = v; break;
+		case D3DRS_COLORWRITEENABLE1: T.colorWrite1 = v; break;
+		default: break;
+		}
+		return OrigBodySetRS(d, st, v);
+	}
+	inline void BodyPixelShader(IDirect3DPixelShader9* ps) { T.ps = ps; }
+	inline void BodyStateLost() { if (BodyTracked) { Tracked = false; SharedDrawState::Valid = false; } }
+	inline bool BodyLean() { return BodyTracked && BodyWanted && !BodyDisabled; }
+	// Once, with the device: the bodies the table points at now, only when they are the graphics runtime's own code (d3d9.dll, native or
+	// DXVK's); anything else (a wrapper on top of it) is left alone and the tracking stays off.
+	inline void InstallBodyTracking(IDirect3DDevice9* d) {
+		if (BodyTracked || BodyFailed || !d) return;
+		BodyFailed = true;	// (until it worked)
+		if (!SharedDrawState::ObserversLive) { Logger::Log("DrawStateTracking: ConstantFilter's device detours are not in: off (the per-draw device queries, as before)"); return; }
+		void** table = *(void***)d;
+		HMODULE runtime = GetModuleHandleA("d3d9.dll"), owner37 = nullptr, owner57 = nullptr;
+		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)table[37], &owner37);
+		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)table[57], &owner57);
+		if (!runtime || owner37 != runtime || owner57 != runtime) {
+			Logger::Log("DrawStateTracking: SetRenderTarget / SetRenderState are not d3d9.dll's own here (%p %p, d3d9.dll %p): off (the per-draw device queries, as before)",
+				table[37], table[57], (void*)runtime);
+			return;
+		}
+		OrigBodySetRT = (SetRTFn)table[37];
+		OrigBodySetRS = (SetRSFn)table[57];
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+		DetourAttach(&(PVOID&)OrigBodySetRT, (PVOID)&BodySetRT);
+		DetourAttach(&(PVOID&)OrigBodySetRS, (PVOID)&BodySetRS);
+		const LONG result = DetourTransactionCommit();
+		if (result != NO_ERROR) { Logger::Log("DrawStateTracking: detours failed (%ld): off (the per-draw device queries, as before)", result); return; }
+		SharedDrawState::PixelShaderSet = &BodyPixelShader;
+		SharedDrawState::StateLost = &BodyStateLost;
+		BodyFailed = false;
+		BodyTracked = true;
+		Logger::Log("DrawStateTracking: on (the device's SetRenderTarget / SetRenderState bodies detoured; render targets, pixel shader and blend states kept from them)");
+	}
+	// The record against the device (BeforeDraw, every CheckEvery-th draw while the record is used): false on any difference.
+	inline bool BodyVerify(IDirect3DDevice9* d) {
+		TrackedState now = {};
+		for (DWORD i = 0; i < 4; i++) { IDirect3DSurface9* s = nullptr; if (SUCCEEDED(d->GetRenderTarget(i, &s)) && s) s->Release(); now.rt[i] = s; }
+		IDirect3DPixelShader9* ps = nullptr; d->GetPixelShader(&ps); if (ps) ps->Release(); now.ps = ps;
+		d->GetRenderState(D3DRS_COLORWRITEENABLE, &now.colorWrite); d->GetRenderState(D3DRS_ALPHABLENDENABLE, &now.blend);
+		d->GetRenderState(D3DRS_SRCBLEND, &now.src); d->GetRenderState(D3DRS_DESTBLEND, &now.dst);
+		d->GetRenderState(D3DRS_COLORWRITEENABLE2, &now.colorWrite2); d->GetRenderState(D3DRS_COLORWRITEENABLE3, &now.colorWrite3);
+		d->GetRenderState(D3DRS_COLORWRITEENABLE1, &now.colorWrite1);
+		BodyChecks++;
+		const char* which = nullptr;
+		for (DWORD i = 0; i < 4 && !which; i++) if (now.rt[i] != T.rt[i]) which = "a render target";
+		if (!which && now.ps != T.ps) which = "the pixel shader";
+		if (!which && (now.colorWrite != T.colorWrite || now.colorWrite1 != T.colorWrite1 || now.colorWrite2 != T.colorWrite2 || now.colorWrite3 != T.colorWrite3)) which = "a write mask";
+		if (!which && (now.blend != T.blend || now.src != T.src || now.dst != T.dst)) which = "the blend";
+		if (!which) return true;
+		BodyMismatches++;
+		if (BodyMismatches <= 5) Logger::Log("[WARNING] DrawStateTracking: the kept record differs from the device (%s) after %u checks: off for this session (the per-draw device queries, as before)", which, BodyChecks);
+		return false;
+	}
 	inline void HookTracking(IDirect3DDevice9* d) {
 		if (LeanHooked || !d) return;
 		void** table = *(void***)d;
@@ -623,7 +707,7 @@ namespace CapturedNormals {
 	}
 	// DXVK only: the native runtime puts its own device-table entries back now and then (EnsureHooked), and a Set call that slipped past
 	// the tracking would leave a stale record; there the hook keeps asking the device.
-	inline bool Lean() { return LeanHooked && Tracked && LeanWanted && DxvkCompute::Available(); }
+	inline bool Lean() { return Tracked && ((LeanHooked && LeanWanted && DxvkCompute::Available()) || BodyLean()); }	// (BodyLean: DrawStateTracking, below)
 	inline IDirect3DSurface9* TargetNow(IDirect3DDevice9* d, DWORD i) {
 		if (Lean()) return T.rt[i];
 		IDirect3DSurface9* s = nullptr;
@@ -650,6 +734,13 @@ namespace CapturedNormals {
 
 	inline void BeforeDraw(IDirect3DDevice9* d) {
 		if (!InSpan) return;
+		if (BodyLean()) {	// UNOFFICIAL 2026-11-04 DrawStateTracking: a lost record read again; every CheckEvery-th draw compared
+			if (!Tracked) { Resync(d); BodyResyncs++; SharedDrawState::Valid = true; }
+			else if (++BodyDrawCounter >= BodyCheckEvery) {
+				BodyDrawCounter = 0;
+				if (!BodyVerify(d)) { BodyDisabled = true; Tracked = false; SharedDrawState::Valid = false; }
+			}
+		}
 		// Is it bound now? Read every draw: LinearScene's conversion takes targets 1-3 off and puts them back itself.
 		IDirect3DSurface9* rt3 = TargetNow(d, 3);
 		Bound = rt3 && rt3 == DrawSurface();
@@ -905,6 +996,9 @@ namespace CapturedNormals {
 			if (MaterialCompiled && !ContrastWriters.empty())	// UNOFFICIAL ShadowContrast (the game's passes)
 				Logger::Log("ShadowContrast: per frame %.1f lamp passes gave their shadows' light to MaterialBuffer (%.1f with another added blend, left out), applied %.2f times; strength %.2f; %u lamp-pass shaders",
 					ContrastWrites / (double)Frames, ContrastOtherBlend / (double)Frames, ContrastApplied / (double)Frames, ContrastStrength, (unsigned)ContrastWriters.size());
+			if (BodyTracked)	// UNOFFICIAL 2026-11-04 DrawStateTracking
+				Logger::Log("DrawStateTracking: %s; %u checks against the device so far, %u differed; %u records read again after a state block or reset",
+					BodyDisabled ? "OFF after a difference (the per-draw device queries)" : BodyWanted ? "in use" : "switched off", BodyChecks, BodyMismatches, BodyResyncs);
 			Frames = Writes = Masked = Unbinds = 0;
 			MaterialWrites = MaterialBusy = 0;
 			AlbedoWrites = AlbedoBusy = AlbedoLightOnlyDraws = AlbedoSkinFills = 0;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
@@ -932,7 +1026,11 @@ namespace CapturedNormals {
 		EnsureHooked(d);	// (native D3D9 puts its own table entries back; see EnsureHooked)
 		// UNOFFICIAL 2026-10-29 CapturedNormalsLeanHook: the tracked state from the device, once per span
 		LeanWanted = TheSettingManager->GetSettingI("Main.Main.Quality", "CapturedNormalsLeanHook") != 0;
+		// UNOFFICIAL 2026-11-04 DrawStateTracking: elsewhere (native D3D9, stock DXVK) the detoured bodies keep the record (see BodySetRT)
+		BodyWanted = TheSettingManager->GetSettingI("Main.Main.Performance", "DrawStateTracking") != 0;
+		{ const int every = TheSettingManager->GetSettingI("Main.Main.Performance", "DrawStateTrackingCheck"); BodyCheckEvery = every > 0 ? (UInt32)every : 1024; }
 		if (LeanWanted && DxvkCompute::Available()) { HookTracking(d); Resync(d); }
+		else if (BodyWanted && !DxvkCompute::Available()) { InstallBodyTracking(d); if (BodyLean()) Resync(d); else Tracked = false; }
 		else Tracked = false;
 		SpanTarget = rt0;	// (holds the reference until EndSpan)
 		d->ColorFill(DrawSurface(), NULL, D3DCOLOR_ARGB(0, 0, 0, 0));	// "nothing here": readers keep the depth-rebuilt normal

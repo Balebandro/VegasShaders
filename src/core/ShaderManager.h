@@ -172,6 +172,7 @@ public:
 	void					PreStep_VolumetricLightGrid(ChainContext& ctx);
 	void					PreStep_VolumetricFog(ChainContext& ctx);
 	void					PreStep_VolumetricLight(ChainContext& ctx);
+	void					PreStep_DustMotes(ChainContext& ctx);	// UNOFFICIAL 2026-11-03
 	void					PreStep_Sandstorm(ChainContext& ctx);
 	void					PreStep_GodRays(ChainContext& ctx);
 	void					PreStep_RayReconstruction(ChainContext& ctx);
@@ -249,6 +250,7 @@ public:
 		HeatHazeEffect*			HeatHaze;	// UNOFFICIAL: from Physically-Based-Reloaded
 		SandstormEffect*		Sandstorm;	// UNOFFICIAL: from Physically-Based-Reloaded (Balebandro / Alejandro Martinez), GPL-3.0
 		VolumetricLightEffect*	VolumetricLight;	// UNOFFICIAL: sun shafts from the shadow maps
+		DustMotesEffect*		DustMotes;			// UNOFFICIAL 2026-11-03: dust specks in lit air
 		ReflectionsEffect*		Reflections;		// UNOFFICIAL: screen-space reflections on the ground
 		BodycamEffect*			Bodycam;			// UNOFFICIAL, testbed: police body-camera look
 		SkyDitherEffect*		SkyDither;			// UNOFFICIAL: breaks up the sky's banding before the 8-bit screen

@@ -54,6 +54,8 @@ namespace HdrOutput {
 		int						LastCurrent = -1;	// the display's current mode at the last check (RetryNow on SDR -> HDR only)
 		unsigned				SwapSdrRetries = 0;
 		unsigned				LastAttempt = 0;	// frame of the last SetHdrOutput (a refused mode is asked at most every 30 frames)
+		unsigned				SwitchFrame = 0;	// frame of the last swap chain switch asked of the fork (0: none waiting for its next frame)
+		DWORD					SwitchTime = 0;		// GetTickCount then (UNOFFICIAL 2026-11-03)
 		NVR_EXT_HDR_INFO		Info = {};			// the fork's view (GetHdrInfo)
 		bool					InfoRead = false;
 		int						LastSetting = -1;	// the last Windows setting found for LastMonitor (a failed read keeps it)
@@ -87,22 +89,26 @@ namespace HdrOutput {
 
 	// Every monitor's current mode (IDXGIOutput6::GetDesc1); Monitor null = all of them. HDR ones go into S.SeenHdr. dxgi.dll is
 	// loaded on demand. Hdr / MaxNits: of Monitor (or of any monitor when it is null).
-	inline void ReadMonitors(HMONITOR monitor, int& hdr, float& maxNits) {
+	// UNOFFICIAL 2026-11-03 (tester report "HDR toggle freezes the game"): Windows' own dxgi.dll only (System32), never a dxgi.dll in
+	// the game folder (a full DXVK install's, ReShade's, Special K's: a whole second Vulkan instance or a hooking wrapper on the render
+	// thread at every check), and the loops end on ANY failure (they ended on DXGI_ERROR_NOT_FOUND only: a wrapper answering another
+	// error spun the render thread forever), at most 16 adapters x 16 outputs.
+	inline void ReadMonitors(HMONITOR monitor, int& hdr, float& maxNits, std::vector<HMONITOR>& seenHdr) {
 		typedef HRESULT(WINAPI* CreateFactory)(REFIID, void**);
-		static CreateFactory create = (CreateFactory)GetProcAddress(LoadLibraryA("dxgi.dll"), "CreateDXGIFactory1");
+		static CreateFactory create = (CreateFactory)GetProcAddress(LoadLibraryExA("dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32), "CreateDXGIFactory1");
 		hdr = 0; maxNits = 0.0f;
 		IDXGIFactory1* factory = nullptr;
-		if (create && SUCCEEDED(create(__uuidof(IDXGIFactory1), (void**)&factory))) {
+		if (create && SUCCEEDED(create(__uuidof(IDXGIFactory1), (void**)&factory)) && factory) {
 			IDXGIAdapter1* adapter = nullptr;
-			for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND; a++) {
+			for (UINT a = 0; a < 16 && SUCCEEDED(factory->EnumAdapters1(a, &adapter)) && adapter; a++) {
 				IDXGIOutput* output = nullptr;
-				for (UINT o = 0; adapter->EnumOutputs(o, &output) != DXGI_ERROR_NOT_FOUND; o++) {
+				for (UINT o = 0; o < 16 && SUCCEEDED(adapter->EnumOutputs(o, &output)) && output; o++) {
 					IDXGIOutput6* output6 = nullptr;
 					if (SUCCEEDED(output->QueryInterface(__uuidof(IDXGIOutput6), (void**)&output6))) {
 						DXGI_OUTPUT_DESC1 desc = {};
 						if (SUCCEEDED(output6->GetDesc1(&desc))) {
 							const bool isHdr = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
-							if (isHdr && desc.Monitor && !SeenHdr(desc.Monitor)) S.SeenHdr.push_back(desc.Monitor);
+							if (isHdr && desc.Monitor && std::find(seenHdr.begin(), seenHdr.end(), desc.Monitor) == seenHdr.end()) seenHdr.push_back(desc.Monitor);
 							if (!monitor || desc.Monitor == monitor) {
 								if (isHdr) hdr = 1;
 								if (desc.MaxLuminance > maxNits) maxNits = desc.MaxLuminance;
@@ -284,14 +290,43 @@ namespace HdrOutput {
 	inline void NoteDesktop() {
 		if (!TheSettingManager->GetSettingI("Shaders.HDR.Main", "Enabled")) return;
 		int hdr; float maxNits;
-		ReadMonitors(nullptr, hdr, maxNits);
+		ReadMonitors(nullptr, hdr, maxNits, S.SeenHdr);
 		const WindowsHdr windows = ReadWindowsSetting(nullptr);
 		Logger::Log("UNOFFICIAL HDR output: at load, before the game's window, %u monitor(s) in HDR mode; Windows HDR setting %s (%s), advanced colour %s",
 			(unsigned)S.SeenHdr.size(), OnOff(windows.Setting), windows.From, OnOff(windows.Active));
 	}
 
-	// Windows' HDR switch for the monitor showing the game window.
-	inline void CheckDisplay(IDirect3DDevice9* Device) {
+	// UNOFFICIAL 2026-11-03 (tester log: a 49 s frame 13 s after HDR came on, RTX 4070 Ti SUPER with two virtual display adapters
+	// and Sunshine streaming; nothing else HDR output does runs on a timer): the display check's Windows calls (DXGI outputs,
+	// DisplayConfig, the registry) go through every display driver, virtual ones included, and ran on the render thread every 600
+	// frames: a driver that does not answer froze the game for as long. They now run on a worker thread (one at a time); the render
+	// thread starts it (StartCheck) and takes its answer on a later frame (FinishCheck). Until the first answer HDR stays off; a later
+	// slow check keeps the last answer (logged when it takes over 50 ms, and once while it is still running after 2 s).
+	struct DisplayReading {
+		HMONITOR				Monitor = nullptr;
+		HWND					Window = nullptr;
+		int						Current = 0;
+		float					MaxNits = 0.0f;
+		WindowsHdr				Windows;
+		std::vector<HMONITOR>	Seen;
+		DWORD					Started = 0, Took = 0;
+	};
+	inline DisplayReading	Reading;			// owned by the worker while CheckState is 1
+	inline volatile LONG	CheckState = 0;		// 0 idle, 1 the worker is reading, 2 its answer waits for FinishCheck
+	inline bool				CheckSlowLogged = false;
+
+	inline DWORD WINAPI CheckWorker(void*) {
+		Reading.Seen.clear();
+		ReadMonitors(Reading.Monitor, Reading.Current, Reading.MaxNits, Reading.Seen);
+		Reading.Windows = Reading.Monitor ? ReadWindowsSetting(Reading.Monitor) : WindowsHdr();
+		Reading.Took = GetTickCount() - Reading.Started;
+		InterlockedExchange(&CheckState, 2);
+		return 0;
+	}
+
+	// Render thread: the game window's monitor (cheap), then the worker reads the rest.
+	inline void StartCheck(IDirect3DDevice9* Device) {
+		if (InterlockedCompareExchange(&CheckState, 0, 0) != 0) return;	// one at a time
 		D3DDEVICE_CREATION_PARAMETERS cp = {};
 		HMONITOR monitor = nullptr;
 		if (SUCCEEDED(Device->GetCreationParameters(&cp))) {
@@ -299,15 +334,37 @@ namespace HdrOutput {
 			IDirect3D9* d3d = nullptr;
 			if (!monitor && SUCCEEDED(Device->GetDirect3D(&d3d)) && d3d) { monitor = d3d->GetAdapterMonitor(cp.AdapterOrdinal); d3d->Release(); }
 		}
-		int current; float maxNits;
-		ReadMonitors(monitor, current, maxNits);
-		WindowsHdr windows = monitor ? ReadWindowsSetting(monitor) : WindowsHdr();
+		Reading.Monitor = monitor;
+		Reading.Window = cp.hFocusWindow;
+		Reading.Started = GetTickCount();
+		CheckSlowLogged = false;
+		InterlockedExchange(&CheckState, 1);
+		HANDLE thread = CreateThread(nullptr, 0, CheckWorker, nullptr, 0, nullptr);
+		if (thread) CloseHandle(thread);
+		else InterlockedExchange(&CheckState, 0);
+	}
+
+	// Windows' HDR switch for the monitor showing the game window: the worker's answer, applied on the render thread. False: none yet.
+	inline bool FinishCheck() {
+		const LONG state = InterlockedCompareExchange(&CheckState, 0, 0);
+		if (state == 1 && !CheckSlowLogged && GetTickCount() - Reading.Started > 2000) {
+			CheckSlowLogged = true;
+			Logger::Log("UNOFFICIAL HDR output: the display check has been waiting on Windows for over 2 s (a display driver is not answering); the game goes on with the last answer");
+		}
+		if (state != 2) return false;
+		if (Reading.Took > 50) Logger::Log("UNOFFICIAL HDR output: the display check took %lu ms (on its own thread)", Reading.Took);
+		for (HMONITOR seenMonitor : Reading.Seen) if (!SeenHdr(seenMonitor)) S.SeenHdr.push_back(seenMonitor);
+		const HMONITOR monitor = Reading.Monitor;
+		const int current = Reading.Current;
+		float maxNits = Reading.MaxNits;
+		WindowsHdr windows = Reading.Windows;
+		InterlockedExchange(&CheckState, 0);
 		if (monitor != S.LastMonitor) { S.LastMonitor = monitor; S.LastSetting = -1; S.SupportedSeen = false; }
 		if (windows.Setting >= 0) S.LastSetting = windows.Setting;
 		else if (S.LastSetting >= 0) { windows.Setting = S.LastSetting; windows.From = "last reading"; }	// a failed read keeps the last answer
 		if (windows.Supported > 0) S.SupportedSeen = true;
 		// The game not in front: the desktop's own mode is what DXGI reads, so an SDR reading then releases the latch
-		const bool background = cp.hFocusWindow && GetForegroundWindow() != cp.hFocusWindow;
+		const bool background = Reading.Window && GetForegroundWindow() != Reading.Window;
 		if (background && !current && monitor && SeenHdr(monitor)) S.SeenHdr.erase(std::find(S.SeenHdr.begin(), S.SeenHdr.end(), monitor));
 		const bool seen = monitor && SeenHdr(monitor);
 		const bool now = current || windows.Mode > 0;
@@ -335,15 +392,36 @@ namespace HdrOutput {
 		if (strcmp(text, S.LastCheck)) { strcpy_s(S.LastCheck, text); Logger::Log("UNOFFICIAL HDR output: %s", text); }
 		S.DisplayHdr = hdr;
 		S.DisplayMaxNits = maxNits;
+		return true;
 	}
 
 	inline bool Setting(const char* key) { return TheSettingManager->GetSettingI("Shaders.HDR.Main", key) != 0; }
 	inline float SettingF(const char* key) { return TheSettingManager->GetSettingF("Shaders.HDR.Main", key); }
 
+	inline const char* ModeName(UINT mode) { return mode == NVR_EXT_HDR_SCRGB ? "scRGB" : mode == NVR_EXT_HDR_HDR10 ? "HDR10" : "SDR"; }
+
+	// UNOFFICIAL 2026-11-03 (tester report "HDR toggle freezes the game", not reproduced here: windowed, Windows HDR off, with and
+	// without FSR): every fork call that rebuilds the swap chain (a mode change, or Rebuild: the same mode asked again) is logged
+	// before and after, and the next frame's arrival with the time it took (BeginFrame). The log is flushed line by line, so after a
+	// freeze its last HDR line says where it stopped: "asking ..." = inside the fork's SetHdrOutput; "answered" with no "next frame"
+	// = at the next present (the fork's swap chain rebuild, FalloutNV_d3d9.log then shows how far it got).
+	inline HRESULT Send(const NVR_EXT_HDR_OUTPUT& out, bool rebuild) {
+		const bool switching = rebuild || out.Mode != S.ForkMode;
+		if (switching) Logger::Log("UNOFFICIAL HDR output: asking the fork for %s (was %s%s): its swap chain is rebuilt at the next present", ModeName(out.Mode), ModeName(S.ForkMode), rebuild ? ", asked again" : "");
+		const DWORD start = GetTickCount();
+		const HRESULT hr = S.Hdr->SetHdrOutput(&out);
+		if (switching) {
+			Logger::Log("UNOFFICIAL HDR output: the fork answered %08lX in %lu ms", (unsigned long)hr, GetTickCount() - start);
+			S.SwitchFrame = S.Frame;
+			S.SwitchTime = GetTickCount();
+		}
+		return hr;
+	}
+
 	inline void SetOff() {
 		if (S.Hdr && (S.Active || S.ForkMode != NVR_EXT_HDR_OFF)) {
 			NVR_EXT_HDR_OUTPUT off = {};
-			S.Hdr->SetHdrOutput(&off);
+			Send(off, false);
 		}
 		S.ForkMode = NVR_EXT_HDR_OFF;
 		S.Active = false;
@@ -357,10 +435,15 @@ namespace HdrOutput {
 		S.Scene = Scene;
 		S.GainReady = false;
 		S.Frame++;
+		if (S.SwitchFrame && S.Frame > S.SwitchFrame) {	// the switch frame's own present (the rebuild) came back
+			Logger::Log("UNOFFICIAL HDR output: the frame after the switch arrived, %lu ms after it was asked", GetTickCount() - S.SwitchTime);
+			S.SwitchFrame = 0;
+		}
 		const bool enabled = Setting("Enabled");
 		if (!enabled) {
 			if (S.Active || S.ForkMode != NVR_EXT_HDR_OFF) { SetOff(); Reason("off"); }
 			S.Refused = false; S.RefusedRetries = 0; S.RetryNow = false; S.Applied = {}; S.DisplayHdr = -1;	// UNOFFICIAL 2026-10-29
+			InterlockedCompareExchange(&CheckState, 0, 2);	// UNOFFICIAL 2026-11-03: an answer that came in while off is dropped
 			return;
 		}
 		if (!S.Queried) {
@@ -375,8 +458,9 @@ namespace HdrOutput {
 			S.Hdr->GetHdrInfo(&S.Info);
 			Logger::Log("UNOFFICIAL HDR output: the fork's surface offers HDR10 %s, scRGB %s; EDID peak %.0f nits", S.Info.SupportsHdr10 ? "yes" : "no", S.Info.SupportsScRgb ? "yes" : "no", S.Info.DisplayMaxNits);
 		}
-		const bool check = S.DisplayHdr < 0 || S.Frame % 600 == 0;
-		if (check) CheckDisplay(Device);
+		if (S.DisplayHdr < 0 || S.Frame % 600 == 0) StartCheck(Device);	// UNOFFICIAL 2026-11-03: on its own thread
+		const bool check = FinishCheck();	// a new answer this frame (what the old every-600-frames check did, a few frames later)
+		if (S.DisplayHdr < 0 && !Setting("IgnoreDisplayCheck")) { Reason("Enabled: checking the display"); return; }
 		if (!S.DisplayHdr && !Setting("IgnoreDisplayCheck")) {
 			if (S.Active || S.ForkMode != NVR_EXT_HDR_OFF) SetOff();
 			Reason("Enabled, but Windows HDR is off for this display: SDR as before (turn HDR on in Windows' display settings)");
@@ -399,7 +483,7 @@ namespace HdrOutput {
 			S.RetryNow = false;
 			S.SwapSdr = false;
 			S.LastAttempt = S.Frame;
-			S.Hdr->SetHdrOutput(&S.Applied);
+			Send(S.Applied, true);
 			char text[160];
 			sprintf_s(text, "asked the fork again for %s (its swap chain was SDR), attempt %u", S.Applied.Mode == NVR_EXT_HDR_SCRGB ? "scRGB" : "HDR10", S.SwapSdrRetries);
 			Reason(text);
@@ -433,14 +517,14 @@ namespace HdrOutput {
 			S.LastAttempt = S.Frame;
 			S.Applied = out;
 			const bool wasForkOn = S.ForkMode != NVR_EXT_HDR_OFF;
-			const HRESULT hr = S.Hdr->SetHdrOutput(&out);
+			const HRESULT hr = Send(out, false);
 			S.Refused = FAILED(hr);
 			S.Active = SUCCEEDED(hr);
 			if (S.Active) S.ForkMode = out.Mode;
 			else if (wasForkOn) {
 				// A refused change while on leaves the fork in its old mode: off, so NVR and the fork agree (the fork never refuses OFF)
 				NVR_EXT_HDR_OUTPUT off = {};
-				S.Hdr->SetHdrOutput(&off);
+				Send(off, false);
 				S.ForkMode = NVR_EXT_HDR_OFF;
 				S.SwapSdr = false;
 				S.SwapSdrRetries = 0;

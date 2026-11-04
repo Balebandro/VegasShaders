@@ -1,4 +1,7 @@
 #include "Sky.h"
+#include "../../core/FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
+#include "../../core/TestTools.h"	// NVR_TEST_TOOLS (SkyOnWorkerCheck)
+#include <cstddef>
 
 
 // UNOFFICIAL 2026-10-25: a setting that may be missing from an older defaults file (GetSettingF would read 0: a black sky)
@@ -33,7 +36,14 @@ void SkyShaders::RegisterConstants() {
 		{ "TESR_FogWeatherColor", &Constants.FogWeatherColor },				// UNOFFICIAL 2026-10-30 (UpdateFogSky)
 	};
 	for (const Binding& binding : bindings) TheShaderManager->RegisterConstant(binding.name, binding.value);
+	// UNOFFICIAL 2026-11-03 SkyOnWorker: what the worker's projection writes, Irradiance up to IrradianceObjects (PhysSky between them)
+	static_assert(offsetof(SkyStruct, PhysSky) > offsetof(SkyStruct, Irradiance) && offsetof(SkyStruct, IrradianceObjects) > offsetof(SkyStruct, PhysSky) &&
+		offsetof(SkyStruct, SkyTint) == offsetof(SkyStruct, IrradianceObjects) + sizeof(SkyStruct::IrradianceObjects), "SkyOnWorker: the results' range");
+	SkyProjection::Begin = (const char*)&Constants.Irradiance[0];
+	SkyProjection::End = (const char*)&Constants.SkyTint;
 }
+
+void SkyProjection::JoinNow() { if (TheShaderManager && TheShaderManager->Shaders.Sky) TheShaderManager->Shaders.Sky->JoinProjection(); }
 
 // UNOFFICIAL 2026-10-14 physical sky: Effects/Includes/Atmosphere.hlsl AtmSky, line for line (see there). Kept in step by
 // hand, like EvalSky above: change one and change the other.
@@ -284,6 +294,7 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 		lastProjection = inputs;
 		lastProjectionValid = true;
 	}
+	JoinProjection();	// UNOFFICIAL 2026-11-03 SkyOnWorker: a job still running reads the tables, and its job struct is reused below
 
 	const D3DXVECTOR4& sunPos = TheShaderManager->ShaderConst.SunPosition;
 	D3DXVECTOR3 skyC = Linearize(TheShaderManager->ShaderConst.skyColor);
@@ -300,15 +311,6 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 	float sunSet = std::clamp(powf(1.0f - sunHeight, 8.0f), 0.0f, 1.0f) * dayTime;
 	D3DXVECTOR3 sunColor = (1.0f + sunHeight) * sunDisk + sunsetC * (sunSet * Constants.SkyData.x);
 
-	// Upper hemisphere only; the lower half contributes nothing, so it is skipped rather than
-	// evaluated. Order-2 SH is smooth enough that this stratification is ample.
-	const int STEPS_T = 16, STEPS_P = 32;
-	const float dTheta = (D3DX_PI * 0.5f) / STEPS_T;
-	const float dPhi = (2.0f * D3DX_PI) / STEPS_P;
-
-	D3DXVECTOR3 sh[9], shGame[9];	// (shGame: UNOFFICIAL ClassicLook, filled only while the physical sky blends in)
-	for (int i = 0; i < 9; i++) sh[i] = shGame[i] = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
-
 	// UNOFFICIAL physical sky ([Shaders.Sky.Physical]): its share fades in from just below the horizon to just above it,
 	// so the game's own twilight and night stay; outdoors only. Its brightness is matched to the weather's sky: the
 	// average luminance over the dome, both measured on the same samples as the projection below, which then projects
@@ -323,10 +325,6 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 		Constants.PhysSkySun = D3DXVECTOR4(realSun.x, realSun.y, realSun.z, physMs ? PhysicalSettings.GroundAlbedo : 0.0f);	// w: the ground's albedo for SkyView.fx.hlsl's SkyMS table
 	}
 	const bool physical = Constants.PhysSky.x > 0.0f;
-	// The air is worked out on a grid half as fine each way (one sample per 2 x 2 of the projection's: 128 rays of 12 steps,
-	// about a quarter of a millisecond, redone only when the sun has moved or a setting changed); plenty for the brightness
-	// match and the smooth sky light.
-	static D3DXVECTOR3 physSamples[(16 / 2) * (32 / 2)];
 	if (physical && physExact && !physTables.Matches(PhysicalSettings.Haze, PhysicalSettings.GroundAlbedo, physMs)) {
 		// fixes-a #50: the rebuild takes 65-73 ms on the render thread and a menu drag changes Haze or GroundAlbedo every frame, so
 		// when the old tables can stand in (built, and with the MS part if MS is wanted) it waits until the wanted values have held
@@ -344,6 +342,95 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 		else
 			lastProjectionValid = false;
 	}
+	// UNOFFICIAL 2026-11-03 [Main.Main.Performance] SkyOnWorker (cpu-workers, core/FrameWorker.h): the projection below is plain arithmetic
+	// on values copied here, so it can run on the worker thread while the main thread goes on with the frame (shadow maps, the world's
+	// draws); the results reach Constants at JoinProjection, before anything reads them (SkyProjection::Join: the shader and effect
+	// constant uploads, the effect chains, the end of the frame). Off: the same function, here, at once (as before).
+	ProjectionJob& job = projectionJob;
+	job.sunPos = sunPos; job.skyC = skyC; job.skyLowC = skyLowC; job.horizonC = horizonC; job.sunColor = sunColor;
+	job.sunHeight = sunHeight; job.isDayTime = isDayTime;
+	job.physical = physical; job.physExact = physExact; job.physMs = physMs; job.tables = &physTables;
+	job.settings = { PhysicalSettings.Haze, PhysicalSettings.Brightness, PhysicalSettings.LightsObjects };
+	PBRShaders* pbr = TheShaderManager->Shaders.PBR;
+	job.saturation = pbr ? (pbr->SkylightSaturation > 0.0f ? pbr->SkylightSaturation : 0.0f) : 1.0f;	// (the max of the Windows macro)
+	ProjectionJob::Values& values = job.values;
+	values.SkyData = Constants.SkyData; values.PhysSky = Constants.PhysSky; values.PhysSkySun = Constants.PhysSkySun;
+	values.SkyTint = Constants.SkyTint; values.SkyTintHorizon = Constants.SkyTintHorizon; values.SkyLook = Constants.SkyLook;
+	if (TheSettingManager->SettingsMain.Main.SkyOnWorker) {
+		FrameWorker::Start(&SkyShaders::RunProjectionParallel, &job);
+		projectionPending = SkyProjection::Pending = true;
+	}
+	else {
+		RunProjection(&job);
+		CopyProjection();
+	}
+}
+
+// The convolution of the two projections into the job's results (both RunProjection and RunProjectionParallel end here).
+static void ConvolveProjection(SkyShaders::ProjectionJob& j, const D3DXVECTOR3 (&sh)[9], const D3DXVECTOR3 (&shGame)[9]) {
+	const bool physical = j.physical;
+	const float saturation = j.saturation;
+	const SkyShaders::ProjectionJob::Settings& PhysicalSettings = j.settings;
+	SkyShaders::ProjectionJob::Values& Constants = j.values;
+	// Convolve, and fold in each basis function's constant plus the 1/pi that converts
+	// irradiance back to an average radiance -- the units the ambient path already works in, so
+	// the existing scales keep their meaning. A0/pi = 1, A1/pi = 2/3, A2/pi = 1/4.
+	const float A0 = 1.0f, A1 = 2.0f / 3.0f, A2 = 0.25f;
+	const float bandWeight[9] = { A0, A1, A1, A1, A2, A2, A2, A2, A2 };
+	const float basisNorm[9] = { 0.282095f, 0.488603f, 0.488603f, 0.488603f,
+		1.092548f, 1.092548f, 0.315392f, 1.092548f, 0.546274f };
+
+	// UNOFFICIAL [Shaders.PBR.*] SkylightingSaturation: saturation is linear in the colour (a blend with its own
+	// luminance), so applying it to each coefficient equals applying it to the reconstructed irradiance, at no GPU
+	// cost. 1 leaves the coefficients untouched.
+	// (the sky tint, horizon tint and saturation are already in the samples: SkyLook above)
+	for (int k = 0; k < 9; k++) {
+		const float scale = bandWeight[k] * basisNorm[k];
+		D3DXVECTOR3 coefficient = sh[k] * scale;
+		// UNOFFICIAL 2026-10-18 ClassicLook: the original NVR's coefficients (the game's sky, unsaturated); without the physical sky
+		// blending in, the same projection as below.
+		const D3DXVECTOR3 gameCoefficient = physical ? shGame[k] * scale : coefficient;
+		Constants.IrradianceGame[k] = D3DXVECTOR4(gameCoefficient.x, gameCoefficient.y, gameCoefficient.z, 0.0f);
+		if (saturation != 1.0f) {
+			const float luma = 0.2126f * coefficient.x + 0.7152f * coefficient.y + 0.0722f * coefficient.z;
+			const D3DXVECTOR3 gray(luma, luma, luma);
+			coefficient = gray + (coefficient - gray) * saturation;
+		}
+		Constants.Irradiance[k] = D3DXVECTOR4(coefficient.x, coefficient.y, coefficient.z, 0.0f);
+		// UNOFFICIAL 2026-10-25 LightsObjects off (the physical sky's light on surfaces double-dips with the terrain / PBR sky
+		// settings): the lighting shaders take the game's own sky, saturated as before; the physical sky stays in the sky, fog and clouds.
+		D3DXVECTOR3 objectCoefficient = gameCoefficient;
+		if (!PhysicalSettings.LightsObjects && physical && saturation != 1.0f) {
+			const float luma = 0.2126f * objectCoefficient.x + 0.7152f * objectCoefficient.y + 0.0722f * objectCoefficient.z;
+			const D3DXVECTOR3 gray(luma, luma, luma);
+			objectCoefficient = gray + (objectCoefficient - gray) * saturation;
+		}
+		Constants.IrradianceObjects[k] = PhysicalSettings.LightsObjects || !physical ? Constants.Irradiance[k]
+			: D3DXVECTOR4(objectCoefficient.x, objectCoefficient.y, objectCoefficient.z, 0.0f);
+	}
+}
+
+// The projection itself (UpdateConstants above hands it its inputs in the job): on the worker thread with SkyOnWorker on, so it touches
+// nothing but the job (the tables are read only; UpdateConstants joins before it rebuilds them).
+void SkyShaders::RunProjection(void* arg) {
+	ProjectionJob& j = *static_cast<ProjectionJob*>(arg);
+	// (the names the code below was written with, on the main thread)
+	const D3DXVECTOR4& sunPos = j.sunPos;
+	const D3DXVECTOR3 &skyC = j.skyC, &skyLowC = j.skyLowC, &horizonC = j.horizonC, &sunColor = j.sunColor;
+	const float sunHeight = j.sunHeight, isDayTime = j.isDayTime, saturation = j.saturation;
+	const bool physical = j.physical, physExact = j.physExact, physMs = j.physMs;
+	const PhysSky::Tables& physTables = *j.tables;
+	const ProjectionJob::Settings& PhysicalSettings = j.settings;
+	ProjectionJob::Values& Constants = j.values;
+	D3DXVECTOR3* const physSamples = j.physSamples;
+	// Upper hemisphere only; the lower half contributes nothing, so it is skipped rather than
+	// evaluated. Order-2 SH is smooth enough that this stratification is ample.
+	const int STEPS_T = 16, STEPS_P = 32;
+	const float dTheta = (D3DX_PI * 0.5f) / STEPS_T;
+	const float dPhi = (2.0f * D3DX_PI) / STEPS_P;
+
+	D3DXVECTOR3 sh[9], shGame[9];	// (shGame: UNOFFICIAL ClassicLook, filled only while the physical sky blends in)
+	for (int i = 0; i < 9; i++) sh[i] = shGame[i] = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
 	if (physical) {
 		const D3DXVECTOR3 realSun(Constants.PhysSkySun.x, Constants.PhysSkySun.y, Constants.PhysSkySun.z);
 		for (int i = 0; i < STEPS_T / 2; i++) {
@@ -400,44 +487,111 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 		}
 	}
 
-	// Convolve, and fold in each basis function's constant plus the 1/pi that converts
-	// irradiance back to an average radiance -- the units the ambient path already works in, so
-	// the existing scales keep their meaning. A0/pi = 1, A1/pi = 2/3, A2/pi = 1/4.
-	const float A0 = 1.0f, A1 = 2.0f / 3.0f, A2 = 0.25f;
-	const float bandWeight[9] = { A0, A1, A1, A1, A2, A2, A2, A2, A2 };
-	const float basisNorm[9] = { 0.282095f, 0.488603f, 0.488603f, 0.488603f,
-		1.092548f, 1.092548f, 0.315392f, 1.092548f, 0.546274f };
+	ConvolveProjection(j, sh, shGame);
+}
 
-	// UNOFFICIAL [Shaders.PBR.*] SkylightingSaturation: saturation is linear in the colour (a blend with its own
-	// luminance), so applying it to each coefficient equals applying it to the reconstructed irradiance, at no GPU
-	// cost. 1 leaves the coefficients untouched.
-	PBRShaders* pbr = TheShaderManager->Shaders.PBR;
-	const float saturation = pbr ? (pbr->SkylightSaturation > 0.0f ? pbr->SkylightSaturation : 0.0f) : 1.0f;	// (the max of the Windows macro)
-	// (the sky tint, horizon tint and saturation are already in the samples: SkyLook above)
-	for (int k = 0; k < 9; k++) {
-		const float scale = bandWeight[k] * basisNorm[k];
-		D3DXVECTOR3 coefficient = sh[k] * scale;
-		// UNOFFICIAL 2026-10-18 ClassicLook: the original NVR's coefficients (the game's sky, unsaturated); without the physical sky
-		// blending in, the same projection as below.
-		const D3DXVECTOR3 gameCoefficient = physical ? shGame[k] * scale : coefficient;
-		Constants.IrradianceGame[k] = D3DXVECTOR4(gameCoefficient.x, gameCoefficient.y, gameCoefficient.z, 0.0f);
-		if (saturation != 1.0f) {
-			const float luma = 0.2126f * coefficient.x + 0.7152f * coefficient.y + 0.0722f * coefficient.z;
-			const D3DXVECTOR3 gray(luma, luma, luma);
-			coefficient = gray + (coefficient - gray) * saturation;
+// UNOFFICIAL 2026-11-03 SkyOnWorker, the job as it runs on the worker: the same samples and sums as RunProjection, but the samples that
+// do not depend on each other -- the physical sky's 128 rays and the game sky's colour in each of the 512 cells -- are worked out on the
+// worker and its helpers (FrameWorker::ParallelFor), each into its own slot; everything summed is then summed here, in RunProjection's
+// order, from those slots. The expressions are RunProjection's own, so the results are its results bit for bit (SkyOnWorkerCheck).
+static const int kSkySteps = 16, kSkyCells = 16 * 32, kSkyRays = (16 / 2) * (32 / 2);
+static void ProjectionItem(void* arg, int item) {
+	SkyShaders::ProjectionJob& j = *static_cast<SkyShaders::ProjectionJob*>(arg);
+	const int STEPS_P = 32;
+	const float dTheta = (D3DX_PI * 0.5f) / kSkySteps, dPhi = (2.0f * D3DX_PI) / STEPS_P;
+	if (item < kSkyRays) {
+		if (!j.physical) return;
+		const int i = item / (STEPS_P / 2), k = item % (STEPS_P / 2);
+		const D3DXVECTOR3 realSun(j.values.PhysSkySun.x, j.values.PhysSkySun.y, j.values.PhysSkySun.z);
+		const float theta = (2 * i + 1) * dTheta, st = sinf(theta), ct = cosf(theta);
+		const float phi = (2 * k + 1) * dPhi;
+		D3DXVECTOR3 physDir(st * cosf(phi), st * sinf(phi), (std::max)(ct, 0.002f));
+		D3DXVec3Normalize(&physDir, &physDir);
+		if (j.physExact) {
+			const PhysSky::V3 v = j.tables->Radiance(PhysSky::V3(physDir.x, physDir.y, physDir.z), PhysSky::V3(realSun.x, realSun.y, realSun.z), 300.0f, j.settings.Haze, j.physMs);
+			j.physSamples[item] = D3DXVECTOR3(v.x, v.y, v.z);
 		}
-		Constants.Irradiance[k] = D3DXVECTOR4(coefficient.x, coefficient.y, coefficient.z, 0.0f);
-		// UNOFFICIAL 2026-10-25 LightsObjects off (the physical sky's light on surfaces double-dips with the terrain / PBR sky
-		// settings): the lighting shaders take the game's own sky, saturated as before; the physical sky stays in the sky, fog and clouds.
-		D3DXVECTOR3 objectCoefficient = gameCoefficient;
-		if (!PhysicalSettings.LightsObjects && physical && saturation != 1.0f) {
-			const float luma = 0.2126f * objectCoefficient.x + 0.7152f * objectCoefficient.y + 0.0722f * objectCoefficient.z;
-			const D3DXVECTOR3 gray(luma, luma, luma);
-			objectCoefficient = gray + (objectCoefficient - gray) * saturation;
-		}
-		Constants.IrradianceObjects[k] = PhysicalSettings.LightsObjects || !physical ? Constants.Irradiance[k]
-			: D3DXVECTOR4(objectCoefficient.x, objectCoefficient.y, objectCoefficient.z, 0.0f);
+		else j.physSamples[item] = PhysAtmosphere::Radiance(physDir, realSun, 300.0f, j.settings.Haze);
+		return;
 	}
+	const int cell = item - kSkyRays, row = cell / STEPS_P, col = cell % STEPS_P;
+	const float theta = (row + 0.5f) * dTheta;
+	const float sinTheta = sinf(theta), cosTheta = cosf(theta);
+	const float phi = (col + 0.5f) * dPhi;
+	const D3DXVECTOR3 d(sinTheta * cosf(phi), sinTheta * sinf(phi), cosTheta);
+	j.cellDir[cell] = d;
+	j.cellRadiance[cell] = EvalSky(d, j.sunPos, j.values.SkyData, j.skyC, j.skyLowC, j.horizonC, j.sunColor, j.sunHeight, j.isDayTime);
+}
+
+void SkyShaders::RunProjectionParallel(void* arg) {
+	ProjectionJob& j = *static_cast<ProjectionJob*>(arg);
+	FrameWorker::ParallelFor(kSkyRays + kSkyCells, &ProjectionItem, &j);
+	const bool physical = j.physical;
+	const ProjectionJob::Settings& PhysicalSettings = j.settings;
+	ProjectionJob::Values& Constants = j.values;
+	const D3DXVECTOR3* const physSamples = j.physSamples;
+	const int STEPS_T = kSkySteps, STEPS_P = 32;
+	const float dTheta = (D3DX_PI * 0.5f) / STEPS_T;
+	const float dPhi = (2.0f * D3DX_PI) / STEPS_P;
+
+	D3DXVECTOR3 sh[9], shGame[9];
+	for (int i = 0; i < 9; i++) sh[i] = shGame[i] = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
+	if (physical) {	// the brightness match, summed in RunProjection's order
+		float gameSum = 0.0f, physSum = 0.0f;
+		for (int i = 0; i < STEPS_T; i++) {
+			const float theta = (i + 0.5f) * dTheta, st = sinf(theta), dOmega = st * dTheta * dPhi;
+			for (int k = 0; k < STEPS_P; k++) {
+				physSum += PhysAtmosphere::Luma(physSamples[(i / 2) * (STEPS_P / 2) + k / 2]) * dOmega;
+				gameSum += PhysAtmosphere::Luma(j.cellRadiance[i * STEPS_P + k]) * dOmega;
+			}
+		}
+		Constants.PhysSky.y = physSum > 1e-12f ? PhysicalSettings.Brightness * gameSum / physSum : 0.0f;
+	}
+	for (int row = 0; row < STEPS_T; row++) {	// the projection, in RunProjection's order
+		const float theta = (row + 0.5f) * dTheta;
+		const float sinTheta = sinf(theta);
+		const float cellSolidAngle = sinTheta * dTheta * dPhi;
+		for (int col = 0; col < STEPS_P; col++) {
+			const D3DXVECTOR3& d = j.cellDir[row * STEPS_P + col];
+			D3DXVECTOR3 radiance = j.cellRadiance[row * STEPS_P + col];
+			if (physical) {
+				const D3DXVECTOR3 gameSample = SkyLook(radiance, d.z, Constants.SkyTint, Constants.SkyTintHorizon, Constants.SkyLook) * cellSolidAngle;
+				ProjectSkySample(shGame, gameSample, d);
+				const D3DXVECTOR3 physicalSample = physSamples[(row / 2) * (STEPS_P / 2) + col / 2] * Constants.PhysSky.y;
+				radiance = PhysAtmosphere::Blend(radiance, physicalSample, Constants.PhysSky);
+			}
+			radiance = SkyLook(radiance, d.z, Constants.SkyTint, Constants.SkyTintHorizon, Constants.SkyLook) * cellSolidAngle;
+			ProjectSkySample(sh, radiance, d);
+		}
+	}
+	ConvolveProjection(j, sh, shGame);
+}
+
+// The job's results into Constants (main thread). PhysSky.y is the job's only when the physical sky blends in (else the 1 UpdateConstants set).
+void SkyShaders::CopyProjection() {
+	const ProjectionJob::Values& values = projectionJob.values;
+	if (projectionJob.physical) Constants.PhysSky.y = values.PhysSky.y;
+	memcpy(Constants.Irradiance, values.Irradiance, sizeof(Constants.Irradiance));
+	memcpy(Constants.IrradianceGame, values.IrradianceGame, sizeof(Constants.IrradianceGame));
+	memcpy(Constants.IrradianceObjects, values.IrradianceObjects, sizeof(Constants.IrradianceObjects));
+}
+
+void SkyShaders::JoinProjection() {
+	if (!projectionPending) return;
+	FrameWorker::Wait();
+	projectionPending = SkyProjection::Pending = false;
+	CopyProjection();
+#if NVR_TEST_TOOLS
+	// SkyOnWorkerCheck (test only): the job run again here, on the main thread, and its results compared bit for bit
+	if (TheSettingManager->GetSettingI("Main.Main.Performance", "SkyOnWorkerCheck")) {
+		static unsigned same = 0, differ = 0;
+		static ProjectionJob again;	// (static: ~16 KB)
+		again = projectionJob;
+		RunProjection(&again);	// the old serial function, here
+		if (!memcmp(&again.values, &projectionJob.values, sizeof(again.values))) same++; else differ++;
+		if (same + differ >= 120) { Logger::Log("SKY ON WORKER CHECK: %u projections identical, %u differ", same, differ); same = differ = 0; }
+	}
+#endif
 }
 
 void SkyShaders::UpdateSettings() {

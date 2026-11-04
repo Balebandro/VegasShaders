@@ -397,6 +397,9 @@
     <ClInclude Include="..\src\effects\FlashlightBeam\FlashlightBeam.h">
       <Filter>Effects</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\effects\DustMotes\DustMotes.h">
+      <Filter>Effects</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\effects\PBR\PBR.h">
       <Filter>Effects</Filter>
     </ClInclude>
@@ -724,6 +727,9 @@
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\FlashlightBeam\FlashlightBeam.cpp">
+      <Filter>Effects</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\effects\DustMotes\DustMotes.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\PBR\PBR.cpp">

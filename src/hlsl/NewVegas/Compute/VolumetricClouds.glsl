@@ -43,6 +43,8 @@ layout(push_constant) uniform Push {
     uint physicalSky;              // 20: 1 = the effect was compiled with PHYSICAL_SKY_ON
     uint towers;                   // 24: 1 = the *Towers techniques (MarchPS / ShadowMapPS(towers), 2026-10-25)
     uint prefilter;                // 28: 1 = technique ShadowMapPrefilter (ShadowPrefilter, 2026-10-27; the shadow map pass only)
+    uint physicalMoonlight;        // 32: UNOFFICIAL [Shaders.VolumetricClouds.Main] PhysicalMoonlight (TESR_CloudsPhysical.x on D3D9)
+    uint physicalSkyLight;         // 36: UNOFFICIAL PhysicalSkyLight (TESR_CloudsPhysical.y; used only with physicalSky)
 } pc;
 
 layout(location = 0) in vec2 uv;

@@ -445,6 +445,72 @@ float FogLayerMean(float zc, float zp) {
 float FogLayerAt(float z) { return exp(-max(z - TESR_VolumetricFogShape.y, 0.0) * (-TESR_VolumetricFogShape.x)); }
 
 
+// UNOFFICIAL 2026-11-03 LampHaze ([Shaders.VolumetricFog.Interiors] LampHaze, LampHazeAnisotropy, LampHazeCore, LampHazeMaxLamps; VolumetricFog.cpp
+// SetLampHaze): indoors the fog's air was lit by the ambient only, so a room's lamps lit the walls but not the haze in front of them. Now the
+// fog takes in each listed lamp's light along the view: a soft glow in the air round a lamp, the light falling through the haze toward it.
+// The lamps are the frame's shadow-slot and tracked lamps (ShaderManager::GetNearbyLights, as AmbientLight's grid and the path tracer take
+// them), nearest first, relative to the camera, their reach the game's own (Spec.r), colour linear x dimmer, in a 16 x 2 float texture on
+// stage 14 (NVR_FogLamps, bound by hand: TESR_ samplers bind by their order in the file): constant arrays put the estimate and the composite
+// passes over ps_3_0's 224 constant registers (X4507; the effect compiler's preshader already takes them to about c190-c222), the texture
+// costs one register (TESR_VolumetricFogLamps) and two point reads a lamp. Each lamp's light in the air:
+//     f(d) = (e^2 / (d^2 + e^2) - e^2 / (r^2 + e^2)) / (1 - e^2 / (r^2 + e^2)),   e = LampHazeCore x r
+// inverse-square with a bright core of e (as [Shaders.PBR.LampFalloff] Falloff, 0.25 there too), 1 at the lamp, 0 at its reach r. Along the
+// view, clipped to the lamp's sphere and to the visible distance, its integral is closed form (s along the view from the point nearest the
+// lamp, h that point's distance to it, h' = sqrt(h^2 + e^2), phi = atan(s / h')):  e^2 / h' (phi_b - phi_a) - e^2 / (r^2 + e^2) (s_b - s_a).
+// In phi the remaining factors are smooth, so the phase (Henyey-Greenstein, LampHazeAnisotropy, x 4 pi: 1 = even, capped at 8 as the
+// volumetric light's) and the fog's transmittance to the camera are taken at two Gauss-Legendre points of [phi_a, phi_b]: no march, no
+// banding however near the view passes to a lamp. The result is in core lengths (about 2.3 through a lamp's centre at the default core,
+// whatever its size) times the fog's in-scattering density there (BaseDensity with its noise x Inscattering) x LampHaze, added to the
+// fog's add term before Amount.
+// No shadows: a lamp's sphere that reaches through a wall glows on this side too (see the README). Compiled in only where lamps is true
+// (ModernFogTerms); at run time the whole term sits in one dynamic branch on TESR_VolumetricFogLamps.x, 0 outdoors, with LampHaze 0 or
+// no lamp: the fog is then exactly as before.
+#define LAMP_HAZE_MAX 16
+float4 TESR_VolumetricFogLamps;   // x: LampHaze (0 = off), y: lamps listed, z: anisotropy g, w: LampHazeCore
+// Texel (i, row 0): lamp i relative to the camera (xyz), its reach (w, the game's radius); (i, row 1): its colour (linear) x dimmer.
+sampler2D NVR_FogLamps : register(s14) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+
+float2 LampHazePhase(float2 cosTheta, float g) {
+	float2 k = max(1.0 + g * g - 2.0 * g * cosTheta, 1.0e-4);
+	return min((1.0 - g * g) * rsqrt(k * k * k), 8.0);
+}
+
+// The lamps' light scattered toward the camera along the unit view dir, out to dist (game units), through fog with extinction sigmaT per unit.
+float3 LampHazeLight(float3 dir, float dist, float sigmaT) {
+	float3 sum = 0.0;
+	const float g = TESR_VolumetricFogLamps.z;
+	const float core = TESR_VolumetricFogLamps.w;
+	[loop] for (int i = 0; i < LAMP_HAZE_MAX; i++) {
+		[branch] if ((float)i >= TESR_VolumetricFogLamps.y) break;
+		const float u = ((float)i + 0.5) * (1.0 / LAMP_HAZE_MAX);
+		const float4 lamp = tex2Dlod(NVR_FogLamps, float4(u, 0.25, 0.0, 0.0));
+		const float t0 = dot(lamp.xyz, dir);                   // along the view to the point nearest the lamp
+		const float h2 = max(dot(lamp.xyz, lamp.xyz) - t0 * t0, 0.0);
+		const float r2 = lamp.w * lamp.w;
+		[branch] if (h2 < r2) {
+			const float chord = sqrt(r2 - h2);
+			const float sa = max(t0 - chord, 0.0) - t0;         // the view inside the sphere, in front of the camera and the surface
+			const float sb = min(t0 + chord, dist) - t0;
+			[branch] if (sb > sa) {
+				const float e2 = core * core * r2;
+				const float hp = sqrt(h2 + e2);
+				const float pa = atan(sa / hp), pb = atan(sb / hp);
+				const float w = e2 / (r2 + e2);
+				const float along = max(e2 / hp * (pb - pa) - w * (sb - sa), 0.0) / ((1.0 - w) * sqrt(e2));
+				// phase and transmittance at the two Gauss-Legendre points of [pa, pb]
+				const float pm = 0.5 * (pa + pb), pd = 0.28867513 * (pb - pa);
+				float2 sn, cs;
+				sincos(float2(pm - pd, pm + pd), sn, cs);
+				const float2 s = hp * sn / cs;
+				const float2 cosTheta = -s * rsqrt(h2 + s * s + 1.0e-4);	// light's direction at the point vs. toward the camera
+				const float2 phaseT = LampHazePhase(cosTheta, g) * exp(-sigmaT * max(t0 + s, 0.0));
+				sum += tex2Dlod(NVR_FogLamps, float4(u, 0.75, 0.0, 0.0)).rgb * (along * 0.5 * (phaseT.x + phaseT.y));
+			}
+		}
+	}
+	return sum;
+}
+
 // UNOFFICIAL 2026-10-18 InteriorShadowFold: in the interior composite the scene here is the one before the darkening; the sky test
 // below reads its luma (where a pixel lies at the far plane), so there it takes the darkened colour the separate pass would have
 // stored at that pixel instead (InteriorStoredColor, below). interior is a compile-time constant (false: as before).
@@ -726,7 +792,7 @@ void LegacyFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 // colour and sky ambient (the game's own sky, not the physical sky) and its glow round the sun (SunGlow 1). Everything else is
 // master's maths as it was; the speed work stays (half-resolution coefficients with the full-resolution apply, the shadow and
 // AO applies folded in, the closed-form height fog).
-void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float nightAmountOut, bool interior = false, bool classic = false, bool gameFloor = true)
+void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float nightAmountOut, bool interior = false, bool classic = false, bool gameFloor = true, bool lamps = true)
 {
 	VSOUT IN = (VSOUT)0;
 	IN.UVCoord = uvV;
@@ -967,6 +1033,15 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	// color * mul + add form of: fogged = color * (1 - ext) + fogColor * ins; lerp(color, fogged, skyMaskFactor)
 	fogMul = lerp(1.0, saturate(1 - fiExt), skyMaskF);
 	fogAdd = fogFinal.rgb * saturate(fiIns) * skyMaskF;
+	// UNOFFICIAL 2026-11-03 LampHaze (LampHazeLight above; indoors only: TESR_VolumetricFogLamps.x is 0 outdoors, with LampHaze 0 or no lamp):
+	// the lamps' light in the air, by the fog's in-scattering density here (Inscattering x the density with its noise; Inscattering is
+	// stored x 0.1, so x 10 is the setting) and its extinction per unit (as getFogFlat's), on the same sky mask; Amount below scales it as
+	// the rest. (ClassicLook: never, the original fog had no lamp light.)
+	if (lamps && !classic) {
+		[branch] if (TESR_VolumetricFogLamps.x > 0.0) {
+			fogAdd += LampHazeLight(eyeDirV, length(eyeVec), strV * nExt * 0.0001) * (TESR_VolumetricFogLamps.x * strV * nIns * 10.0 * skyMaskF);
+		}
+	}
 
 	// ---- aerial perspective: mid-to-far distance tint on non-sky terrain ----
 	// Own day-fade curve, wider than isDayTimeFog's: aerial haze is a daylight-scattering
@@ -1034,12 +1109,13 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 
 // Legacy fog (custom build) or the current fog: legacy is a compile-time constant, one per technique. So is classic
 // (UNOFFICIAL 2026-10-18 ClassicLook, the *Classic techniques; see ModernFogTerms).
-void FogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float nightAmountOut, bool legacy, bool interior = false, bool classic = false, bool gameFloor = true)
+// (UNOFFICIAL 2026-11-03 LampHaze: lamps, a compile-time constant too, compiles the lamps' light in; the legacy fog never has it.)
+void FogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float nightAmountOut, bool legacy, bool interior = false, bool classic = false, bool gameFloor = true, bool lamps = true)
 {
 	if (legacy)
 		LegacyFogTerms(uvV, fogMul, fogAdd, nightAmountOut, interior);
 	else
-		ModernFogTerms(uvV, fogMul, fogAdd, nightAmountOut, interior, classic, gameFloor);
+		ModernFogTerms(uvV, fogMul, fogAdd, nightAmountOut, interior, classic, gameFloor, lamps);
 }
 
 float4 VolumetricFog(VSOUT IN, uniform bool legacy, uniform bool classic = false) : COLOR0
@@ -1047,7 +1123,7 @@ float4 VolumetricFog(VSOUT IN, uniform bool legacy, uniform bool classic = false
 	float4 colV = linearize(tex2D(TESR_SourceBuffer, IN.UVCoord));
 	float3 fogMul, fogAdd;
 	float nAmt;
-	FogTerms(IN.UVCoord, fogMul, fogAdd, nAmt, legacy, false, classic);
+	FogTerms(IN.UVCoord, fogMul, fogAdd, nAmt, legacy, false, classic, true, true);	// (UNOFFICIAL 2026-11-03 LampHaze: lamps on)
 	float4 finCol = max(float4(colV.rgb * fogMul + fogAdd, lerp(colV.a, 1.0, nAmt)), 0.0f);
 	return delinearize(finCol);
 }
@@ -1155,7 +1231,7 @@ FogTermsOut DedicatedFogEstimate(VSOUT IN, uniform bool legacy, uniform bool int
 	}
 	float3 fogMul, fogAdd;
 	float nAmt;
-	FogTerms(best, fogMul, fogAdd, nAmt, legacy, interior, classic);
+	FogTerms(best, fogMul, fogAdd, nAmt, legacy, interior, classic, true, true);	// (UNOFFICIAL 2026-11-03 LampHaze: lamps on)
 	outV.mulDepth = float4(fogMul, saturate(bestDepth / farZ));
 	outV.add = float4(fogAdd, 1);
 	return outV;
@@ -1171,7 +1247,7 @@ VSOUT HalfVS(VSIN IN)
 }
 
 // Depth-aware upsample of the half-resolution fog coefficients, applied to a gamma-space colour.
-float3 FogApply(float3 gammaColor, float2 uvV, bool legacy, bool interior = false, bool classic = false, bool gameFloor = true)
+float3 FogApply(float3 gammaColor, float2 uvV, bool legacy, bool interior = false, bool classic = false, bool gameFloor = true, bool lamps = false)
 {
 	float2 texel = NVR_FogLayout.zw;
 	float2 position = uvV / texel - 0.5;
@@ -1206,7 +1282,7 @@ float3 FogApply(float3 gammaColor, float2 uvV, bool legacy, bool interior = fals
 	float bestDifference = min(min(difference.x, difference.y), min(difference.z, difference.w));
 	[branch] if (bestDifference > 3.0) {
 		float nAmt;
-		FogTerms(uvV, fogMul, fogAdd, nAmt, legacy, interior, classic, gameFloor);
+		FogTerms(uvV, fogMul, fogAdd, nAmt, legacy, interior, classic, gameFloor, lamps);
 	}
 
 	float3 colV = linearize(gammaColor);
@@ -1215,7 +1291,7 @@ float3 FogApply(float3 gammaColor, float2 uvV, bool legacy, bool interior = fals
 
 float4 DedicatedFogCombine(VSOUT IN, uniform bool legacy, uniform bool classic = false) : COLOR0
 {
-	float3 colV = FogApply(tex2D(TESR_SourceBuffer, IN.UVCoord).rgb, IN.UVCoord, legacy, false, classic);
+	float3 colV = FogApply(tex2D(TESR_SourceBuffer, IN.UVCoord).rgb, IN.UVCoord, legacy, false, classic, true, true);	// (UNOFFICIAL 2026-11-03 LampHaze: lamps on)
 	[branch] if (NVR_FogGridFlags.y > 0.5) colV = FogGridLight(colV, IN.UVCoord);	// UNOFFICIAL froxel grid
 	return float4(colV, 1);
 }
@@ -1313,6 +1389,8 @@ float4 DedicatedFogComposite(VSOUT IN, uniform bool legacy, uniform bool classic
 	[branch] if (NVR_CompositeFlags.y > 0.5) colV = CompositeAO(colV, IN.UVCoord);
 	colV = pows(colV, 1.0 / 2.2);
 	// (UNOFFICIAL 2026-10-30 GameFogFloor: not in this pass's per-pixel fallback with the physical sky: ModernFogTerms says why)
+	// (UNOFFICIAL 2026-11-03 LampHaze: nor the lamps' light, with or without the physical sky: either way it put this pass over the 224
+	// constant registers. Those rare pixels keep the fog without the lamps' light; see the README.)
 	colV = FogApply(colV, IN.UVCoord, legacy, false, classic, !PHYSICAL_SKY_ON);
 	[branch] if (NVR_FogGridFlags.y > 0.5) colV = FogGridLight(colV, IN.UVCoord);	// UNOFFICIAL froxel grid
 	return float4(colV, 1);
@@ -1487,6 +1565,8 @@ float4 DedicatedFogCompositeInterior(VSOUT IN, uniform bool legacy, uniform bool
 	colV = pows(colV, 2.2);
 	[branch] if (NVR_CompositeFlags.y > 0.5) colV = CompositeAO(colV, IN.UVCoord);
 	colV = pows(colV, 1.0 / 2.2);
+	// (UNOFFICIAL 2026-11-03 LampHaze: not in this pass's per-pixel fallback: with it the pass went over ps_3_0's 224 constant registers. The
+	// rare pixels that take it (edges matching none of the four half-size estimates) keep the fog without the lamps' light; see the README.)
 	colV = FogApply(colV, IN.UVCoord, legacy, true, classic);
 	[branch] if (NVR_FogGridFlags.y > 0.5) colV = FogGridLight(colV, IN.UVCoord);	// UNOFFICIAL froxel grid
 	return float4(colV, 1);

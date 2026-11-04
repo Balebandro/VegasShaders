@@ -33,8 +33,9 @@ namespace RtLampShadows {
 
 	// Instance mask bits the RT core gives the scene (FORK-RT-CORE.md: 0x01 land, 0x02 objects); ours for the lamps' own parts,
 	// through the core's mask hook (InstanceMask below): 0x04 lamp glass and glow meshes, 0x08 the rest of a lamp model. The core puts
-	// alpha-tested casters under 0x10, non-opaque (agreed scheme 2026-10-29); the lamp rays do not test alpha yet, so they leave 0x10
-	// out and those casters let lamp light through (the cube maps still draw them alpha-tested: a known difference).
+	// alpha-tested casters under 0x10, non-opaque (agreed scheme 2026-10-29). (2026-11-03 rtalpha) With the core's AlphaTested on the lamp
+	// rays test them too (RtAlpha.glsl, the alpha atlas at binding 12 / 13: a tester, "RT exterior shadows don't have alpha textures");
+	// without it they are not in the scene's tested set and let lamp light through, as before.
 	inline constexpr UINT MaskGlass = 0x04, MaskLampModel = 0x08, MaskAlphaTested = 0x10;
 
 	// ActorsFromCubeMaps applies only while the traced scene has no people: with the RT core's posed actors in it (RtCore::Actors(),
@@ -101,6 +102,14 @@ namespace RtLampShadows {
 	inline bool UploadedValid = false;
 
 	inline int imageDepth = -1, imageNormals = -1, imageResult = -1, imageTable = -1, shader = -1;
+	inline int imageAlphaStandIn = -1;	// (2026-11-03 rtalpha) 1 x 1 R16F: the alpha atlas binding when the core has no atlas (jitter.z 0)
+	// the alpha atlas when the core tests alpha (RtCore::AlphaTested), else the stand-in; Record sets jitter.z to match
+	inline int AlphaImage() {
+		const int atlas = RtCore::AlphaAtlasImage();
+		if (RtCore::AlphaTested() && atlas >= 0) return atlas;
+		return imageAlphaStandIn >= 0 ? imageAlphaStandIn : imageDepth;	// (no stand-in: any image; jitter.z 0, never read)
+	}
+	inline bool AlphaOn() { const int atlas = RtCore::AlphaAtlasImage(); return RtCore::AlphaTested() && atlas >= 0; }
 	inline int imageRaw = -1, filterShader = -1;	// Filter: the trace writes imageRaw, RtLampFilter.comp imageResult
 	// UNOFFICIAL 2026-10-29 Denoise: RtLampTraceSplit.spv also writes ranks 0 and 1 apart (visibility, cube slot) for the shared
 	// RtDenoise (run per rank with the slot as its id); RtLampRepack.frag writes the result again with them (RepackTexture -> s15)
@@ -166,7 +175,16 @@ namespace RtLampShadows {
 	inline UInt32 ManyTraces = 0, ManyLogCell = 0, ManyCellTraces = 0;	// the collected-lamps log (Record)
 	inline bool ManyNoting = false;			// this frame's draws note their lamps (Submit: ManyLights on, indoors)
 	inline bool ManyReady() { return CompiledIn && manyShader >= 0 && imageHistory[0] >= 0 && imageHistory[1] >= 0; }
-	inline bool ManyOn() { return ManyReady() && TheSettingManager->GetSettingI(kSection, "ManyLights") != 0 && !TheShaderManager->GameState.isExterior; }
+	// UNOFFICIAL 2026-11-03 (rtext) ExteriorManyLights: outdoors with ExteriorForward the same packing (2 exact lamps a pixel + R, the traced
+	// share of all the others): a lamp that is not one of a pixel's 2 strongest takes R instead of staying lit (Novac: the walkway lamps were
+	// never a pixel's 2 strongest, rtlamp-31..35). ExteriorSubmit: SubmitExterior's Submit is running.
+	inline bool ExteriorSubmit = false;
+	inline bool ExteriorManyOn() { return TheSettingManager->GetSettingI(kSection, "ExteriorManyLights") != 0; }
+	inline bool ManyOn() {
+		if (!ManyReady()) return false;
+		if (TheShaderManager->GameState.isExterior) return ExteriorSubmit && ExteriorManyOn();
+		return TheSettingManager->GetSettingI(kSection, "ManyLights") != 0;
+	}
 	// c217.w: 1 / the packing unit of the result the draws read
 	inline float PackingInverse() { return TracedMany ? 1.0f / 4096.0f : 1.0f / 1024.0f; }
 	// SetForPass, ManyLights: the newest result's id for this light (-1 none) and its reach
@@ -413,9 +431,11 @@ namespace RtLampShadows {
 				const float intensity = (0.2126f * light->Diff.r + 0.7152f * light->Diff.g + 0.0722f * light->Diff.b) * light->Dimmer;
 				if (!(reach > 1.0f)) continue;
 				list[n++] = { i, D3DXVECTOR3(light->m_worldTransform.pos.x, light->m_worldTransform.pos.y, light->m_worldTransform.pos.z),
-					reach, 1.0f, stop, (std::max)(intensity, 0.001f), light->Spec.r };
+					reach, 1.0f, stop, (std::max)(intensity, 0.001f), light->Spec.r, shadowLights[i] };	// (rtext: the light, ManyLights' id map)
 			}
+			ExteriorSubmit = true;
 			Submit(list, n);	// keeps the reprojection and Mode: the lamp shaders read the trace as indoors
+			ExteriorSubmit = false;
 			ExteriorForwardFrame = ExteriorFrame = LampsThisFrame && LampCount > 0;
 			ExteriorLive = false;
 			return;
@@ -436,6 +456,7 @@ namespace RtLampShadows {
 		imageNormals = RtCore::AddImage("NVR RT lamps normals", w, h, NVR_EXT_SHARED_RGBA16F);
 		imageResult = RtCore::AddImage("NVR RT lamps", w, h, NVR_EXT_SHARED_RG32F);
 		imageTable = RtCore::AddImage("NVR RT lamp table", TableWidth, 1, NVR_EXT_SHARED_RG32F);
+		imageAlphaStandIn = RtCore::AddImage("NVR RT lamps alpha stand-in", 1, 1, NVR_EXT_SHARED_R16F);	// (2026-11-03 rtalpha)
 		// optional images only when asked for at the helper's start (the core holds 32 shared images for every RT effect)
 		imageRaw = TheSettingManager->GetSettingI(kSection, "Filter") ? RtCore::AddImage("NVR RT lamps unfiltered", w, h, NVR_EXT_SHARED_RG32F) : -1;
 		static const char* splitNames[4] = { "NVR RT lamps vis 0", "NVR RT lamps vis 1", "NVR RT lamps id 0", "NVR RT lamps id 1" };
@@ -443,7 +464,9 @@ namespace RtLampShadows {
 		for (int i = 0; i < 4; i++) imageSplit[i] = denoise ? RtCore::AddImage(splitNames[i], w, h, NVR_EXT_SHARED_R32F) : -1;
 		imageMask = TheSettingManager->GetSettingI(kSection, "Exteriors") ? RtCore::AddImage("NVR RT lamps mask", w, h, NVR_EXT_SHARED_R32F) : -1;
 		imageFlash = TheSettingManager->GetSettingI(kSection, "Flashlight") ? RtCore::AddImage("NVR RT flashlight", w, h, NVR_EXT_SHARED_R32F) : -1;
-		const bool many = TheSettingManager->GetSettingI(kSection, "ManyLights") != 0;
+		// (2026-11-03 rtext) also for ExteriorManyLights (outdoors with ExteriorForward)
+		const bool many = TheSettingManager->GetSettingI(kSection, "ManyLights") != 0 ||
+			(TheSettingManager->GetSettingI(kSection, "ExteriorForward") != 0 && TheSettingManager->GetSettingI(kSection, "ExteriorManyLights") != 0);
 		imageHistory[0] = many ? RtCore::AddImage("NVR RT lamps rest history 0", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
 		imageHistory[1] = many ? RtCore::AddImage("NVR RT lamps rest history 1", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
 		const bool oneRay = many && TheSettingManager->GetSettingI(kSection, "ManyLightsOneRay") != 0;
@@ -549,6 +572,7 @@ namespace RtLampShadows {
 		D3DXVECTOR2 jitter(0.0f, 0.0f);	// (2026-11-03) the depth's jitter, for the trace and (Traced) the lookup
 		if (TAAEffect* taa = TheShaderManager->Effects.TAA) jitter = taa->DepthJitterUV();
 		c.jitter[0] = jitter.x; c.jitter[1] = jitter.y;
+		c.jitter[2] = AlphaOn() && TheSettingManager->GetSettingI(kSection, "AlphaTest") != 0 ? 1.0f : 0.0f;	// (2026-11-03 rtalpha) test alpha-tested casters (the shaders add 0x10 to the masks)
 		c.forward[0] = view._13; c.forward[1] = view._23; c.forward[2] = view._33; c.forward[3] = cameraData->y;
 		c.right[0] = view._11 / proj._11; c.right[1] = view._21 / proj._11; c.right[2] = view._31 / proj._11;
 		c.up[0] = view._12 / proj._22; c.up[1] = view._22 / proj._22; c.up[2] = view._32 / proj._22;
@@ -567,7 +591,7 @@ namespace RtLampShadows {
 		// Lamp models skip their own light over the last LampModelDistance of each ray, as LampModelShadows false does for the cube maps
 		const bool skipModels = TheSettingManager->GetSettingI(kSection, "SkipLampModels") != 0;
 		c.params2[0] = skipModels ? (std::max)(TheSettingManager->GetSettingF("Shaders.ShadowsInteriors.Forward", "LampModelDistance"), 0.0f) : 0.0f;
-		UINT farMask = 0xFF & ~MaskAlphaTested;	// 0xEF: non-opaque alpha-tested casters are not tested here, skipped
+		UINT farMask = 0xFF & ~MaskAlphaTested;	// 0xEF: the alpha-tested casters (0x10) only with jitter.z (the shaders add it), else skipped
 		if (TheSettingManager->GetSettingI(kSection, "SkipLampGlass")) farMask &= ~MaskGlass;
 		c.params2[1] = (float)farMask;
 		c.params2[2] = (float)(skipModels ? (farMask & ~MaskLampModel) : farMask);
@@ -602,8 +626,9 @@ namespace RtLampShadows {
 			const D3DXVECTOR4& pointNear = TheShaderManager->Effects.ShadowsExteriors->Constants.PointShadowNear;
 			c.mask[0] = pointNear.y; c.mask[1] = pointNear.z;
 			c.mask[2] = (float)TheSettingManager->GetSettingI(kSection, "ExteriorDebug");	// diagnostic: 1 = mask 0, 2 = mask 1
-			const int exteriorImages[5] = { imageDepth, imageNormals, imageResult, imageTable, imageMask };
-			if (!RtCore::AddPass(exteriorShader, exteriorImages, 5, 0x14, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+			// [8]: binding 12, the alpha atlas (rtalpha); [5]-[7] unused by this variant
+			const int exteriorImages[9] = { imageDepth, imageNormals, imageResult, imageTable, imageMask, imageDepth, imageDepth, imageDepth, AlphaImage() };
+			if (!RtCore::AddPass(exteriorShader, exteriorImages, 9, 0x14, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 			MaskThisFrame = RtCore::CopyOut(imageMask, MaskSurface);
 			return;
 		}
@@ -628,12 +653,13 @@ namespace RtLampShadows {
 				const bool moved = motion && motionData && motionData->x > 0.0f && RtCore::CopyIn(imageMotion, motion);
 				c.many2[3] = moved ? 1.0f : 0.0f;
 				if (moved) MotionFrames++;
-				const int images[9] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity],
-					imageHistoryIds[HistoryParity], imageHistoryIds[1 - HistoryParity], moved ? imageMotion : imageNormals };
-				if (!RtCore::AddPass(restirShader, images, 9, 0xA4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+				const int images[10] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity],
+					imageHistoryIds[HistoryParity], imageHistoryIds[1 - HistoryParity], moved ? imageMotion : imageNormals, AlphaImage() };	// [9]: binding 13 (rtalpha)
+				if (!RtCore::AddPass(restirShader, images, 10, 0xA4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 			} else {
-				const int manyImages[6] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity] };
-				if (!RtCore::AddPass(manyShader, manyImages, 6, 0x24, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+				// [8]: binding 12, the alpha atlas (rtalpha); [6], [7] unused
+				const int manyImages[9] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity], imageDepth, imageDepth, AlphaImage() };
+				if (!RtCore::AddPass(manyShader, manyImages, 9, 0x24, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 			}
 			TracedOneRay = oneRay;
 			HistoryParity = 1 - HistoryParity;
@@ -642,6 +668,9 @@ namespace RtLampShadows {
 			Traced = { view, D3DXVECTOR3(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z), proj._11, proj._22, cameraData->y, true, (float)tw / (float)w, (float)th / (float)h, jitter.x, jitter.y };
 			memcpy(TracedMap, PendingMap, sizeof(TracedMap));
 			memset(TracedLampWorld, 0, sizeof(TracedLampWorld));
+			for (int i = 0; i < LampCount; i++)	// (2026-11-03 rtext) the land's slots 0-19 by position (BindTerrain), as the other variants
+				if (Lamps[i].slot >= 0 && Lamps[i].slot < TableSlots)
+					TracedLampWorld[Lamps[i].slot] = D3DXVECTOR4(Lamps[i].position.x, Lamps[i].position.y, Lamps[i].position.z, 1.0f);
 			TracedIds.swap(PendingIds);
 			TracedMany = true;
 			// The collected lamps: on the 3rd ManyLights trace in each cell (the draws have noted their lamps by then) and every
@@ -684,8 +713,10 @@ namespace RtLampShadows {
 			}
 			split = SplitSurface[i] != nullptr;
 		}
-		const int images[8] = { imageDepth, imageNormals, filter ? imageRaw : imageResult, imageTable, imageSplit[0], imageSplit[1], imageSplit[2], imageSplit[3] };
-		if (!RtCore::AddPass(split ? splitShader : shader, images, split ? 8 : 4, split ? 0xF4 : 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+		// [8]: binding 12, the alpha atlas (rtalpha); [4]-[7] the split targets (unused without Denoise)
+		const int images[9] = { imageDepth, imageNormals, filter ? imageRaw : imageResult, imageTable, split ? imageSplit[0] : imageDepth, split ? imageSplit[1] : imageDepth,
+			split ? imageSplit[2] : imageDepth, split ? imageSplit[3] : imageDepth, AlphaImage() };
+		if (!RtCore::AddPass(split ? splitShader : shader, images, 9, split ? 0xF4 : 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 		for (int i = 0; split && i < 4; i++) split = RtCore::CopyOut(imageSplit[i], SplitSurface[i]);
 		SplitThisFrame = split;
 		if (filter) {

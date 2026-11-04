@@ -13,6 +13,7 @@
 //     (V0's lamp may have been V1's last frame), a running mean over up to ManyLightsHistory (max 31) frames.
 // Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampTraceRestir.spv RtLampTraceRestir.comp
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -42,6 +43,10 @@ layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D historyOut;
 layout(set = 0, binding = 8, rgba16f) uniform readonly image2D historyIdsIn;  // id0, id1 (255 none), n0 + 32 n1, nR (frames averaged)
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D historyIdsOut;
 layout(set = 0, binding = 12, rgba16f) uniform readonly image2D motionImage;  // ObjectMotion: xyz the world move since last frame
+// (2026-11-03 rtalpha) the core's alpha atlas (pass image 9; a 1 x 1 stand-in with jitter.z 0)
+layout(set = 0, binding = 13, r16f) uniform readonly image2D alphaAtlas;
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
 
 const int MaxLamps = 255;
 shared vec4 lampA[MaxLamps];    // x y z (scene space), reach
@@ -66,8 +71,16 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	if (!(tMax > tMin)) return false;
 	rayQueryEXT q;
 	bool oneSided = p.flags.x > 0.5;
-	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | gl_RayFlagsOpaqueEXT, mask, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q)) { }
+	// (2026-11-03 rtalpha) jitter.z 1: alpha-tested casters (foliage cards, fences, chain link, wires: non-opaque, mask 0x10) come as
+	// candidates and their diffuse alpha decides (RtAlpha.glsl, as the sun's rays); 0: they are skipped (mask without 0x10), as before
+	const bool testAlpha = p.jitter.z > 0.5;
+	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
+		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q))
+		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
 	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
 }

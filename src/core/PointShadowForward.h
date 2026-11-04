@@ -842,6 +842,9 @@ namespace PointShadowForward {
 		const bool on = RtLampShadows::Mode > 0.5f && RtLampShadows::Mode < 1.5f;	// traced (not the debug views)
 		r[4][0] = on ? 1.0f : 0.0f; r[4][1] = RtLampShadows::RtConstant[1]; r[4][2] = RtLampShadows::RtConstant[2]; r[4][3] = Params[0];
 		TheRenderManager->device->SetPixelShaderConstantF(168, &r[0][0], 5);
+		// c173 (2026-11-03 rtext): x the result's packing unit (1024, or 4096 in the ManyLights packing), y 1 = ManyLights (entry 2 = R)
+		const float packing[4] = { 1.0f / RtLampShadows::PackingInverse(), RtLampShadows::TracedMany ? 1.0f : 0.0f, 0.0f, 0.0f };
+		TheRenderManager->device->SetPixelShaderConstantF(173, packing, 1);
 		IDirect3DBaseTexture9* traced = RtLampShadows::Stage15Texture();
 		Bind(15, traced, true, true);
 	}

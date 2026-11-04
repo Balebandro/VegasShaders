@@ -204,6 +204,8 @@ float PointLightCount : register(c88);	// lamps in use
 float4 NVR_TerrainLampSlot[20] : register(c146);            // the trace's slots 0-19: xyz camera-relative position, w 1 = traced
 row_major float4x4 NVR_TerrainLampReproject : register(c168); // camera-relative position (this frame) -> the traced frame's clip
 float4 NVR_TerrainLampRT : register(c172);                  // x 1 = on, y depth tolerance, z log2(farZ) / 4095, w strength
+float4 NVR_TerrainLampPack : register(c173);                // (2026-11-03 rtext) x the packing unit U (1024; 4096 ManyLights), y 1 = ManyLights:
+                                                            // entry 2 is R, the traced share of every lamp not among the 2 exact ones
 sampler2D NVR_TerrainLampVis : register(s15);               // the traced result (point sampled, set by the DLL)
 
 // The pixel's three traced entries: their visibility and their lamps' positions (once a pixel; the slot table read in a loop, the
@@ -216,14 +218,17 @@ void TerrainLampEntries(float3 worldPos, out float3 vis, out float3 p0, out floa
     float2 uv = clip.xy / clip.w * float2(0.5f, -0.5f) + 0.5f;
     [branch] if (any(abs(uv - 0.5f) > 0.5f)) return;
     float2 traced = tex2Dlod(NVR_TerrainLampVis, float4(uv, 0.0f, 0.0f)).xy;
-    float code = floor(traced.y / 1024.0f);
+    const float U = NVR_TerrainLampPack.x > 0.5f ? NVR_TerrainLampPack.x : 1024.0f;   // an entry: visibility x U / 16 + slot
+    float code = floor(traced.y / U);
     float err = abs(exp2(code * NVR_TerrainLampRT.z) - clip.w) / clip.w;
     [branch] if (!(err <= NVR_TerrainLampRT.y)) return;
-    float hi = floor(traced.x / 1024.0f);
-    float3 e = float3(traced.x - 1024.0f * hi, hi, traced.y - 1024.0f * code);
-    float3 v = floor(e / 64.0f);
-    float3 s = e - 64.0f * v;
+    float hi = floor(traced.x / U);
+    float3 e = float3(traced.x - U * hi, hi, traced.y - U * code);
+    float3 v = floor(e / (U / 16.0f));
+    float3 s = e - (U / 16.0f) * v;
     vis = v / 15.0f;
+    // ManyLights packing: entry 2 is R (0..4095), no slot of its own; ok.z stays 0 (TerrainLampShadow takes vis.z for the other lamps)
+    [flatten] if (NVR_TerrainLampPack.y > 0.5f) { vis.z = saturate(e.z / 4095.0f); s.z = -100.0f; }
     [loop] for (int j = 0; j < 20; j++) {
         float4 L = NVR_TerrainLampSlot[j];
         [flatten] if (abs(s.x - j) < 0.5f) { p0 = L.xyz; ok.x = L.w; }
@@ -235,7 +240,9 @@ void TerrainLampEntries(float3 worldPos, out float3 vis, out float3 p0, out floa
 float TerrainLampShadow(float3 lampPos, float3 vis, float3 p0, float3 p1, float3 p2, float3 ok) {
     float3 m = ok * float3(length(p0 - lampPos) < 8.0f, length(p1 - lampPos) < 8.0f, length(p2 - lampPos) < 8.0f);
     float c = dot(m, 1.0f);
-    return c > 0.5f ? lerp(1.0f, dot(m, vis) / c, NVR_TerrainLampRT.w) : 1.0f;
+    // (2026-11-03 rtext) not one of the exact entries: lit, or with the ManyLights packing R (where the traced frame saw this point)
+    const float rest = NVR_TerrainLampPack.y > 0.5f ? vis.z : 1.0f;   // (vis stays 1 where nothing was traced: lit)
+    return lerp(1.0f, c > 0.5f ? dot(m, vis) / c : rest, NVR_TerrainLampRT.w);
 }
 #endif
 

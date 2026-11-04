@@ -243,7 +243,12 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 	if (gOverlay.open) {
 		if (msg == WM_SYSKEYDOWN && wParam == VK_MENU) return TRUE;	// Alt must not open the window's system menu
-		if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam)) return TRUE;
+		// UNOFFICIAL 2026-11-04 (tester: "double inputs", every letter typed twice in the search box and setting fields): keys and
+		// the characters they type reach ImGui only through FeedKeyboard (GetAsyncKeyState + ToUnicode, every frame), because under
+		// DXVK these messages usually never arrive. Where they DO arrive (native D3D9, or another plugin translating the game's
+		// key messages), the Win32 backend added each WM_CHAR a second time; it no longer sees keyboard messages at all.
+		const bool keyboardMessage = (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || msg == WM_UNICHAR;
+		if (!keyboardMessage && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam)) return TRUE;
 		if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) return 0;	// the wheel scrolls the menu, not the game
 	}
 	return CallWindowProc(gOverlay.gameWndProc, hwnd, msg, wParam, lParam);
@@ -865,6 +870,33 @@ static bool IsOnOffInteger(const SettingManager::Configuration::ConfigNode& node
 	return node.Description.compare(0, 5, "[0-1]") == 0;
 }
 
+// 2026-11-04 (user: "remove unofficial from all the different tooltips since we are no longer just a regular unofficial fork"):
+// the text a description shows in the menu, without its "UNOFFICIAL" tags (and the date right after one). The settings files and
+// the descriptions keep them: the New-in-patch list reads those dates.
+static std::string ShownDescription(const std::string& text) {
+	static const char kTag[] = "UNOFFICIAL";
+	const size_t tagLength = sizeof(kTag) - 1;
+	std::string out;
+	out.reserve(text.size());
+	size_t i = 0;
+	while (i < text.size()) {
+		if (text.compare(i, tagLength, kTag) != 0) { out += text[i++]; continue; }
+		i += tagLength;
+		size_t j = i;
+		while (j < text.size() && text[j] == ' ') j++;
+		if (text.compare(j, 3, "(20") == 0) {	// its date: " (2026-10-31)"
+			const size_t close = text.find(')', j);
+			if (close != std::string::npos && close - j <= 24) i = close + 1;
+		}
+		while (i < text.size() && (text[i] == ',' || text[i] == ':' || text[i] == ' ')) i++;
+		size_t end = out.size();
+		while (end > 0 && out[end - 1] == ' ') end--;
+		const bool sentenceStart = end == 0 || strchr(".!?\n]", out[end - 1]) != nullptr;
+		if (sentenceStart && i < text.size()) out += (char)toupper((unsigned char)text[i++]);
+	}
+	return out;
+}
+
 // A setting's hover note: why it is greyed (if it is), then its description from the settings file. When the row's name was
 // cut short, the full name comes first. normalText is the style's text colour (the row itself may be drawn red or grey).
 static void SettingTooltip(const SettingManager::Configuration::ConfigNode& node, const char* why, const ImVec4& normalText, bool nameCut) {
@@ -876,7 +908,7 @@ static void SettingTooltip(const SettingManager::Configuration::ConfigNode& node
 	if (nameCut) ImGui::TextDisabled("%s", node.Key);
 	if (why) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s", why);
 	if (why && described) ImGui::Separator();
-	if (described) ImGui::TextUnformatted(node.Description.c_str());
+	if (described) ImGui::TextUnformatted(ShownDescription(node.Description).c_str());
 	ImGui::PopTextWrapPos();
 	ImGui::PopStyleColor();
 	ImGui::EndTooltip();
@@ -1096,7 +1128,7 @@ static void RenderColorTriple(SettingManager::Configuration::ConfigNode& nodeR, 
 		for (int c = 0; c < 3; c++) TheSettingManager->SetSetting(rgb[c]->Section, rgb[c]->Key, wheel.hue[c] * wheel.intensity);
 		TheSettingManager->LoadSettings();
 	}
-	if (titleHovered && !nodeR.Description.empty()) WrappedTooltip(nodeR.Description.c_str());
+	if (titleHovered && !nodeR.Description.empty()) WrappedTooltip(ShownDescription(nodeR.Description).c_str());
 	ImGui::PopID();
 }
 
@@ -1120,10 +1152,12 @@ static const char* const kToneMappers[] = {
 	"8 - Uchimura (GT)",
 	"9 - AGX",
 	"10 - DICE",
+	"11 - Perceptual (Polyphony)",
 };
 static const char* const kWhenShown[] = { "0 - Always", "1 - Not during dialog", "2 - Only during dialog", "3 - Disabled" };
 // SleepingMode Mode (no comment in the settings file): the cases of ShowSleepWaitMenuHook (src/core/Hooks/SleepingCommon.cpp)
 static const char* const kRestModes[] = { "0 - Always (Wait, Sit, Sleep)", "1 - Sleeping only", "2 - Sitting only", "3 - Sitting & Sleeping" };
+static const char* const kExposureModes[] = { "0 - Classic (screen average)", "1 - Eye adaptation (whole view, white balance)" };	// UNOFFICIAL [Shaders.Exposure.Main] Mode
 static const char* const kShadowQualities[] = { "0 - Low", "1 - Medium", "2 - High", "3 - Full", "4 - Custom" };
 static const char* const kShadowFormats[] = { "0 - 16 bit", "1 - 32 bit" };
 static const char* const kCascadeSizes[] = { "0 - 1024", "1 - 1536", "2 - 2048", "3 - 2560", "4 - 3072", "5 - 3584", "6 - 4096" };
@@ -1142,6 +1176,7 @@ static const Choices* ChoicesFor(const char* section, const char* key) {
 	static const std::unordered_map<std::string, Choices> kBySetting = {
 		{ "Shaders.Tonemapping.Main.TonemappingMode", NAMES(kToneMappers) },
 		{ "Shaders.Tonemapping.Interiors.TonemappingMode", NAMES(kToneMappers) },
+		{ "Shaders.Exposure.Main.Mode", NAMES(kExposureModes) },
 		{ "Shaders.Cinema.Main.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.FirstPersonView.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.ThirdPersonView.Mode", NAMES(kWhenShown) },
@@ -1671,7 +1706,7 @@ static void NewShaderSwitchRow(const NewEntry& e) {
 		TheSettingManager->LoadSettings();
 	}
 	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered()) {
-		std::string note = e.Node.Description;
+		std::string note = ShownDescription(e.Node.Description);
 		if (!note.empty()) note += "\n\n";
 		note += "The same switch as the one next to " + e.ShaderName + " in the sidebar.";
 		WrappedTooltip(note.c_str());
@@ -1994,6 +2029,36 @@ static void DxvkStatus() {
 		ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "The DXVK fork is not loaded (native D3D9 or stock DXVK): these settings do nothing here.");
 }
 
+// 2026-11-04: a group's own on/off switch at the top of it (lamp haze, the GT7 modes), like a fog type's.
+struct GroupSwitch {
+	const char* Label;
+	const char* Tip;
+	bool (*Get)();
+	void (*Set)(bool on);
+};
+
+static bool LampHazeGet() { return TheSettingManager->GetSettingI("Shaders.VolumetricFog.Interiors", "LampHazeEnabled") != 0; }
+static void LampHazeSet(bool on) { TheSettingManager->SetSetting("Shaders.VolumetricFog.Interiors", "LampHazeEnabled", on); }
+static const GroupSwitch kLampHazeSwitch = { "Lamp haze",
+	"A soft glow of the room's lamps in the indoor fog's air (the settings below). Needs the current fog.", LampHazeGet, LampHazeSet };
+
+static bool GT7ExposureGet() { return TheSettingManager->GetSettingI("Shaders.Exposure.Main", "Mode") == 1; }
+static void GT7ExposureSet(bool on) { TheSettingManager->SetSetting("Shaders.Exposure.Main", "Mode", on ? 1 : 0); }
+static const GroupSwitch kGT7ExposureSwitch = { "Use eye adaptation",
+	"Exposure Mode 1: auto-exposure and white balance as the eye adapts, in place of the classic exposure (Mode 0). The same switch "
+	"on the Main, Night and Interiors pages. Made to go with the Perceptual tone mapper (Tonemapping: TonemappingMode 11). After "
+	"Polyphony Digital's SIGGRAPH 2025 paper for Gran Turismo 7.", GT7ExposureGet, GT7ExposureSet };
+
+static void DrawGroupSwitch(const GroupSwitch& sw) {
+	bool on = sw.Get();
+	MenuWidgets::RowBegin(sw.Label, MenuWidgets::ResetSlotWidth());
+	if (MenuWidgets::Toggle("##groupswitch", &on)) {
+		sw.Set(on);
+		TheSettingManager->LoadSettings();
+	}
+	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered()) ImGui::SetTooltip("%s", sw.Tip);
+}
+
 struct MenuGroup {
 	const char* Section;
 	const char* Header;
@@ -2002,6 +2067,7 @@ struct MenuGroup {
 	bool        Open;	// open the first time the page is shown (a fog type's group also opens while it is the one on)
 	const char* Note;	// a line under the header, or nullptr
 	void      (*Status)();	// a live status line under the note, or nullptr
+	const GroupSwitch* Switch = nullptr;	// 2026-11-04: the group's own on/off switch at its top, or nullptr
 };
 
 static const MenuGroup kMenuGroups[] = {
@@ -2036,6 +2102,16 @@ static const MenuGroup kMenuGroups[] = {
 		"MinimumBaseFog, HeightFogDensity, HeightFogFalloff, HeightFogDist, HeightFogHeight, HeightFogBlend, HeightFogRolloff, HeightFogSaturation, "
 		"HeightFogInscattering, SimpleFogHeight, SimpleFogBlend",
 		FogType::Legacy, false, "Indoors, for the legacy fog (it also uses the shared settings above).", nullptr },
+	{ "Shaders.VolumetricFog.Interiors", "Lamp haze", "LampHaze, LampHazeAnisotropy, LampHazeCore, LampHazeMaxLamps",
+		FogType::None, false, "The room's lamps light the indoor fog's air: a soft glow round each lamp. Off by default.", nullptr, &kLampHazeSwitch },
+
+	{ "Shaders.Exposure.Main", "Eye adaptation", "AdaptExposure, AdaptWhiteBalance, AdaptWeatherLight",
+		FogType::None, false, "Auto-exposure and white balance that adapt as the eye does, metering the whole view. While it is on, MinBrightness, "
+		"MaxBrightness and the adapt speeds above do nothing. Off by default.", nullptr, &kGT7ExposureSwitch },
+	{ "Shaders.Exposure.Night", "Eye adaptation", "AdaptExposure, AdaptWhiteBalance, AdaptWeatherLight",
+		FogType::None, false, "At night, with eye adaptation on.", nullptr, &kGT7ExposureSwitch },
+	{ "Shaders.Exposure.Interiors", "Eye adaptation", "AdaptExposure, AdaptWhiteBalance, AdaptWeatherLight",
+		FogType::None, false, "Indoors, with eye adaptation on.", nullptr, &kGT7ExposureSwitch },
 
 	{ "Main.Main.Performance", "DXVK (Vulkan fork)",
 		"NvrDxvkPasses, NvrDxvkVariants, NvrDxvkStencil, NvrDxvkAmbientLight, NvrDxvkClouds, NvrDxvkKeepD3D9, NvrDxvkTestSuffix, NvrDxvkMixCheck, "
@@ -2397,7 +2473,9 @@ static const MenuGroup* FindMenuGroup(const std::string& section, const char* ke
 
 // A key its group's switch draws instead (LegacyFog: the legacy fog's switch).
 static bool IsGroupSwitchKey(const std::string& section, const char* key) {
-	return section == kFogMain && strcmp(key, "LegacyFog") == 0;
+	return (section == kFogMain && strcmp(key, "LegacyFog") == 0) ||
+		(section == "Shaders.VolumetricFog.Interiors" && strcmp(key, "LampHazeEnabled") == 0) ||	// 2026-11-04: the Lamp haze group's switch
+		(section == "Shaders.Exposure.Main" && strcmp(key, "Mode") == 0);	// 2026-11-04: the Eye adaptation group's switch
 }
 
 // What a page is for, in plain words, under its title.
@@ -2648,7 +2726,7 @@ static void RenderSettingsList(SettingManager::Configuration::SettingList& setti
 	for (const MenuGroup& g : kMenuGroups) {
 		if (gMenu.page != g.Section) continue;
 		// A group with nothing to show (all its keys developer-only) is left out, unless it carries a fog switch.
-		bool any = g.Fog != FogType::None;
+		bool any = g.Fog != FogType::None || g.Switch;
 		for (size_t i = 0; i < settings.size(); i++)
 			if (!any && facts[i].group == &g && !facts[i].hidden && (devShown || !facts[i].test)) any = true;
 		if (!any) {
@@ -2656,7 +2734,7 @@ static void RenderSettingsList(SettingManager::Configuration::SettingList& setti
 				if (facts[i].group == &g && !facts[i].hidden) testHidden++;
 			continue;
 		}
-		const bool active = g.Fog != FogType::None && ActiveFog() == g.Fog;
+		const bool active = (g.Fog != FogType::None && ActiveFog() == g.Fog) || (g.Switch && g.Switch->Get());
 		const std::string header = std::string(g.Header) + (active ? "   (on)" : "") + "###group" + g.Header;
 		if (!MenuWidgets::SubHeader(header.c_str(), g.Open || active)) {
 			for (size_t i = 0; i < settings.size(); i++)
@@ -2665,6 +2743,7 @@ static void RenderSettingsList(SettingManager::Configuration::SettingList& setti
 		}
 		ImGui::PushID(g.Header);
 		if (g.Fog != FogType::None) FogSwitch(g.Fog);
+		if (g.Switch) DrawGroupSwitch(*g.Switch);
 		ImGui::PushTextWrapPos(0.0f);	// the note and the status line wrap at the page's edge
 		if (g.Note) ImGui::TextDisabled("%s", g.Note);
 		if (g.Status) g.Status();
@@ -2688,6 +2767,7 @@ struct MenuMove { const char* name; const char* under; const char* label; };
 static const MenuMove kMenuMoves[] = {
 	{ "CloudShadows", "ShadowsExteriors", "Cloud Shadows (flat clouds)" },
 	{ "Foliage", "Plants", "Foliage glow" },
+	{ "DustMotes", "VolumetricFog", "Dust motes" },	// 2026-11-04 (user: "make motes live under vol fog")
 };
 // Test shots (gMenu.revealPage): whether this node leads to the page shown, so the shot's sidebar shows it.
 static bool LeadsToSelected(const std::string& path) {

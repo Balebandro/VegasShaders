@@ -488,8 +488,20 @@ void ReflectionsEffect::BindMaterial() {
 bool ReflectionsEffect::ShouldRender() {
 	if (cubeOnly || materialOnly) return true;	// RenderCubeOnly's / CaptureMaterial's own passes
 	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
-	return !TheShaderManager->GameState.isUnderwater && normals && normals->Enabled &&
-		(Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f)) &&
+	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f);
+	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
+	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
+	// the weapon rays can run (RtTrace's weaponFrame: the helper up, not a rect frame). Weapon 0 or RT off: as before.
+	const bool weapon = Settings.RtWeapon > 0.0f && RtWanted() && RtCoreClient::Ready() && !RenderRect::Active();
+	if (!surfaces && Settings.RtEnabled) {
+		static bool told = false;
+		if (!told) {
+			told = true;
+			Logger::Log("UNOFFICIAL Reflections: RT reflections are on but nothing on screen reflects here (GroundSheen / InteriorFloors 0, "
+				"dry, no material reflections)%s", weapon ? "; the pass runs for the weapon's RT reflection (RT Weapon)" : ": the pass is skipped");
+		}
+	}
+	return !TheShaderManager->GameState.isUnderwater && normals && normals->Enabled && (surfaces || weapon) &&
 		Textures.TraceSurface && Textures.BufferSurface && Textures.TempSurface && Textures.HistorySurface;
 }
 

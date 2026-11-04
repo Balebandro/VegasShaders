@@ -1,4 +1,5 @@
 #include "ShaderRecord.h"	// (also reached through Framework.h; kept for the IDE)
+#include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker (SetCT joins the sky's projection)
 #include "LinearSceneShaders.h"	// UNOFFICIAL 2026-10-28 LinearScene
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals
 #include "DisplaceHeight.h"	// UNOFFICIAL 2026-11-01 SameHeight
@@ -871,6 +872,7 @@ void ShaderRecord::SetCT() {
 			continue;
 		}
 
+		SkyProjection::JoinIfSky(constant.Value);	// UNOFFICIAL 2026-11-03 SkyOnWorker: the sky's results first, when this is one of them
 		SetShaderConstantF(constant.RegisterIndex, constant.Value, constant.RegisterCount); // TODO: for matrices, rows and columns are inverted because of the way this works.
 	}
 }

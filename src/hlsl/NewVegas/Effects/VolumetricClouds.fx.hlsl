@@ -55,6 +55,7 @@ float4 TESR_WaterSettings;     // x: height of the water in view (game units)
 float4 TESR_CloudsTower;       // UNOFFICIAL 2026-10-25 Towering: x: the ordinary clouds' share of the (taller) layer (1 = off),
                                // y: towering 0..1, z: (2026-10-25) anvil 0..1
 float4 TESR_CloudsHistoryScale; // UNOFFICIAL 2026-10-27 RenderScale v2: xy: the part of the history its frame drew (1 = all; the reflection's lookup); 2026-10-28 zw: the composite's jitter offset in screen uv (FSR / DLSS LowResEffects frames, else 0)
+float4 TESR_CloudsPhysical;    // UNOFFICIAL x: 1 = PhysicalMoonlight, y: 1 = PhysicalSkyLight (with PHYSICAL_SKY_ON)
 
 // Declared in register order: the effect binds TESR_ samplers by declaration order (a mismatch silently swaps them).
 sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
@@ -285,7 +286,9 @@ float4 MarchRay(float3 dir, float jitter, float stepScale, bool fixedExit = fals
 	float3 light = normalize(TESR_SunDirection.xyz);
 	float day = saturate(TESR_SunAmount.x);
 	float cosT = dot(dir, light);
-	float3 sun = linearize(TESR_SunColor.rgb) * SunStrength * lerp(0.15, 1.0, day) * (1.0 - 0.6 * RainDark);
+	// UNOFFICIAL PhysicalMoonlight (TESR_CloudsPhysical.x): the moon lights the clouds with all the light the weather gives at night,
+	// as the sun does by day; off, it is cut to 15% at night as before (lerp(0.15, 1.0, day)).
+	float3 sun = linearize(TESR_SunColor.rgb) * SunStrength * (TESR_CloudsPhysical.x > 0.5 ? 1.0 : lerp(0.15, 1.0, day)) * (1.0 - 0.6 * RainDark);
 	float3 skyTop = linearize(TESR_SkyColor.rgb);
 	float3 skyLow = linearize(TESR_HorizonColor.rgb);
 	float3 ambientTop = skyTop * AmbientStrength * (1.0 - 0.4 * RainDark);
@@ -300,16 +303,44 @@ float4 MarchRay(float3 dir, float jitter, float stepScale, bool fixedExit = fals
 		float3 through = exp(-AtmSunDepth(AtmGround + Base + 0.5 * Thickness, TESR_PhysSkySun.z, TESR_PhysSky.w));
 		float3 physSun = luma(sun) * through / max(luma(through), 1e-4);
 		sun = lerp(sun, lerp(physSun, sun, tint), share);
-		float3 zenith = tex2Dlod(TESR_SkyViewLUT, float4(0.5, 1.0, 0.0, 0.0)).rgb * tableScale;
-		float3 low = (tex2Dlod(TESR_SkyViewLUT, float4(0.0, 0.35, 0.0, 0.0)).rgb + tex2Dlod(TESR_SkyViewLUT, float4(0.5, 0.35, 0.0, 0.0)).rgb +
-			tex2Dlod(TESR_SkyViewLUT, float4(1.0, 0.35, 0.0, 0.0)).rgb) * (tableScale / 3.0);
-		// The colours only: each at the weather's own brightness for that part of the sky, so the clouds are as bright as before.
-		zenith *= luma(skyTop) / max(luma(zenith), 1e-6);
-		low *= luma(skyLow) / max(luma(low), 1e-6);
-		float3 physTop = lerp(zenith, skyTop, tint);
-		float3 physLow = lerp(low, skyLow, tint);
-		ambientTop = lerp(ambientTop, physTop * AmbientStrength * (1.0 - 0.4 * RainDark), share);
-		ambientBottom = lerp(ambientBottom, lerp(physLow, physTop, 0.5) * AmbientStrength * 0.5 * (1.0 - 0.6 * RainDark), share);
+		// UNOFFICIAL PhysicalSkyLight (TESR_CloudsPhysical.y): the sky light at the physical sky's own brightness (below); off, as before.
+		[branch] if (TESR_CloudsPhysical.y > 0.5) {
+			// Physical sky light: NVR's sky-view table holds the physical sky radiance per unit of sunlight above the air
+			// (x1000). The clouds' sun term is the sunlight at the cloud times an un-normalised phase (4 pi x the true one),
+			// so the matching sky term is that same sunlight above the air times the sky radiance integrated over the
+			// hemisphere each part of the cloud faces: the open sky above for the tops, the lit ground below for the bottoms.
+			// The weather's sky colours no longer set the brightness; AmbientStrength becomes a multiplier (1 = physical).
+			float sunTOA = luma(sun) / max(luma(through), 1e-4);
+			float3 up = 0.0;
+			[unroll] for (int ub = 0; ub < 3; ub++) {
+				const float bandV = ub == 0 ? 0.35 : (ub == 1 ? 0.632 : 0.882);      // sun-relative table rows at 11, 36, 70 deg
+				const float bandW = ub == 2 ? 0.234 : 0.383;                          // solid-angle shares of 0-22.5, 22.5-50, 50-90 deg
+				up += (tex2Dlod(TESR_SkyViewLUT, float4(0.0, bandV, 0.0, 0.0)).rgb + tex2Dlod(TESR_SkyViewLUT, float4(0.5, bandV, 0.0, 0.0)).rgb
+					+ tex2Dlod(TESR_SkyViewLUT, float4(1.0, bandV, 0.0, 0.0)).rgb) * (bandW / 3.0);
+			}
+			up *= 0.001;                                                               // mean sky radiance per unit sunlight
+			float groundAlbedo = TESR_PhysSkySun.w > 0.0 ? TESR_PhysSkySun.w : 0.3 /* ground reflectance when the physical sky sets none (desert soil) */;
+			float3 sunAtGround = exp(-AtmSunDepth(AtmGround, TESR_PhysSkySun.z, TESR_PhysSky.w)) * max(TESR_PhysSkySun.z, 0.0);
+			float3 groundRad = groundAlbedo / 3.14159265 * (sunAtGround + 3.14159265 * up);
+			float3 physTopAbs = up * (sunTOA * 6.2831853);
+			float3 physLowAbs = groundRad * (sunTOA * 6.2831853);
+			float3 physTop = lerp(physTopAbs, luma(physTopAbs) * skyTop / max(luma(skyTop), 1e-6), tint);
+			float3 physLow = lerp(physLowAbs, luma(physLowAbs) * skyLow / max(luma(skyLow), 1e-6), tint);
+			ambientTop = lerp(ambientTop, physTop * AmbientStrength * (1.0 - 0.4 * RainDark), share);
+			ambientBottom = lerp(ambientBottom, physLow * AmbientStrength * (1.0 - 0.6 * RainDark), share);
+		}
+		else {
+			float3 zenith = tex2Dlod(TESR_SkyViewLUT, float4(0.5, 1.0, 0.0, 0.0)).rgb * tableScale;
+			float3 low = (tex2Dlod(TESR_SkyViewLUT, float4(0.0, 0.35, 0.0, 0.0)).rgb + tex2Dlod(TESR_SkyViewLUT, float4(0.5, 0.35, 0.0, 0.0)).rgb +
+				tex2Dlod(TESR_SkyViewLUT, float4(1.0, 0.35, 0.0, 0.0)).rgb) * (tableScale / 3.0);
+			// The colours only: each at the weather's own brightness for that part of the sky, so the clouds are as bright as before.
+			zenith *= luma(skyTop) / max(luma(zenith), 1e-6);
+			low *= luma(skyLow) / max(luma(low), 1e-6);
+			float3 physTop = lerp(zenith, skyTop, tint);
+			float3 physLow = lerp(low, skyLow, tint);
+			ambientTop = lerp(ambientTop, physTop * AmbientStrength * (1.0 - 0.4 * RainDark), share);
+			ambientBottom = lerp(ambientBottom, lerp(physLow, physTop, 0.5) * AmbientStrength * 0.5 * (1.0 - 0.6 * RainDark), share);
+		}
 	}
 #endif
 	float lightStep = (towers ? BaseThickness : Thickness) / 12.0;   // (Towering: the ordinary clouds keep their light march)

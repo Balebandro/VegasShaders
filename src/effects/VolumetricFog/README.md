@@ -76,6 +76,7 @@ level-0 read (tex2Dlod / tex3Dlod) so it is legal inside dynamic branches.
 | s11 | NVR_FogGrid | The volumetric light's froxel grid (8 x 8 atlas of 64 slices), bound only in RenderDedicated | LINEAR, CLAMP | estimate (FogVolume), reconstruct (VL composite) |
 | s12 | NVR_SkyVis | Skylighting v2: R sky factor, B sky visibility (AO target size) | POINT, CLAMP | AO composite sky take |
 | s13 | NVR_SunFar | SunFar's land / cloud shadow factor (rgb) | POINT, CLAMP | sun composite |
+| s14 | NVR_FogLamps | LampHaze's lamp table, 16 x 2 A32B32G32R32F (row 0: lamp relative to the camera + reach, row 1: colour linear x dimmer), bound only while LampHaze is on this frame | POINT, CLAMP | estimate, full and combine passes (LampHazeLight) |
 
 ### 3b. Constants
 
@@ -94,6 +95,7 @@ level-0 read (tex2Dlod / tex3Dlod) so it is legal inside dynamic branches.
 | TESR_VolumetricFogNight | x DensityScale, y AmountScale, z HeightFalloffScale, w MaxHeightOffset |
 | TESR_VolumetricFogNightScatter | x NoiseStrengthScale, y WindSpeedScale, z ExtinctionScale, w InscatteringScale |
 | TESR_VolumetricFogNightTint | xyz night tint, w NightAmbientStrength |
+| TESR_VolumetricFogLamps | x LampHaze (0 = off: outdoors, LampHaze 0, LampHazeMaxLamps 0, ClassicLook, LegacyFog, no lamp listed), y lamps in NVR_FogLamps, z LampHazeAnisotropy, w LampHazeCore |
 | TESR_VolumetricFogSun | x SunGlow (0-2; 0 indoors), y WeatherFogColor (0 indoors), z GameFogFloor this frame (its Night scale faded in; 0 off / indoors), w the weather's raw fog near |
 | TESR_VolumetricFogLow / High / Simple / Blend / Height / Data | Legacy keys (filled only while LegacyFog is on): Low x FogSaturation y WeatherImpact z DistantFogRange w SunPower; High x HeightFogDensity y HeightFogFalloff z HeightFogDist w HeightFogSkyColor; Simple x Extinction y Inscattering z FogNight (1 indoors) w SimpleFogSkyColor; Blend x DistantFogBlend y HeightFogBlend z HeightFogRolloff w SimpleFogBlend; Height x DistantFogHeight y HeightFogHeight z SimpleFogHeight w isExterior; Data x MinimumBaseFog y HeightFogSaturation z Amount w HeightFogInscattering |
 
@@ -163,7 +165,15 @@ moon floor on the ambient), DisableSkyMask (the sky dome takes fog at night).
 
 ### 4c. `[Shaders.VolumetricFog.Interiors]`
 
-The Int keys with indoor values, and the legacy keys. The Ext keys are forced to 0 (C++).
+The Int keys with indoor values, and the legacy keys. The Ext keys are forced to 0 (C++). Indoor-only keys (UNOFFICIAL 2026-11-03 LampHaze,
+read by UpdateSettings, live; a missing key takes the default):
+
+| Key | Range | Default | What it does in this shader |
+|---|---|---|---|
+| LampHaze | 0-4 | 0.5 | Strength of the lamps' light in the fog's air (6, LampHaze). 0 = the term is skipped by a uniform branch: the fog exactly as before. |
+| LampHazeAnisotropy | 0-0.9 | 0.3 | Henyey-Greenstein g of the lamps' light in the haze (x 4 pi, capped at 8): brighter looking toward a lamp. |
+| LampHazeCore | 0.05-1 | 0.25 | The glow's bright core e as a share of the lamp's reach (as [Shaders.PBR.LampFalloff] Falloff). |
+| LampHazeMaxLamps | 0-16 | 8 | At most this many lamps, nearest sphere first. 0 = off. |
 
 ### 4d. Other keys
 
@@ -264,6 +274,28 @@ rounded to 16-bit float as NVR_CompositeFlags.w says (RoundToHalf: nearest even,
 AmbientOcclusion's dedicated combine: 2 x 2 AO taps, bilinear / (1 + |depth diff| / BlurDrop), lerp(floor, 1, AO), lighter where
 luma > LumThreshold, frame x AO^(1/2.2); with flags.z the sky take (SkyTake with the same weights over NVR_SkyVis rb); nothing past 8000.
 
+**LampHaze (UNOFFICIAL 2026-11-03, indoors).** Before, indoors the fog's air was lit by the ambient (and the cell's fog colour) only. Now
+ModernFogTerms adds the light of the room's lamps scattered toward the camera to the add term, after the sky mask and before Amount:
+add += LampHaze x S x Inscattering x skyMask x sum over lamps of colour x J x P, S the density with its noise (as the rest of the fog).
+Lamps (C++ SetLampHaze, each frame in Render): the shadow-slot lamps (all slots, BatchLightPosition) and the tracked unshadowed ones
+(LightPosition) that ShaderManager::GetNearbyLights listed this frame (the list AmbientLight's grid and the path tracer use), each once,
+spheres wholly behind the camera left out, nearest sphere first, at most LampHazeMaxLamps; reach = the list's radius / [Shaders.
+ShadowsInteriors.Main] LightRadiusMult (the game's Spec.r, where the lamp's light on the walls ends); colour = (game colour)^2.2 x dimmer.
+Light in the air: f(d) = (e^2 / (d^2 + e^2) - e^2 / (r^2 + e^2)) / (1 - e^2 / (r^2 + e^2)), e = LampHazeCore x r: inverse square with a core,
+1 at the lamp, 0 at its reach. J = the integral of f along the visible view inside the sphere (clipped to the camera and the surface), in
+core lengths (about 2.3 through a lamp's centre at the default core, whatever its size), closed form: with s along the view from the point nearest the lamp, h that point's distance to it, h' = sqrt(h^2 + e^2),
+phi = atan(s / h'): (e^2 / h' (phi_b - phi_a) - e^2 / (r^2 + e^2) (s_b - s_a)) / ((1 - e^2 / (r^2 + e^2)) e).
+P = the mean of HG(g) (x 4 pi, capped at 8) x exp(-extinction x distance) at the two Gauss-Legendre points of
+[phi_a, phi_b] (the remaining factors are smooth in phi: no march, no banding however close the view passes to a lamp). Rough size with the
+defaults (S 0.3, Inscattering 0.35, Amount 0.25): a view through a lamp's centre gains about 0.03 x its linear colour, half its reach off
+the centre about a fifth of that. Passes: the estimates (DedicatedFog, CompositeFog, CompositeFogInterior), the full-resolution and packed
+techniques, and DedicatedFogCombine's per-pixel fallback. NOT in the per-pixel fallback of the CompositeFog and CompositeFogInterior
+reconstructs (both went over the 224 constant registers with it): those rare edge pixels keep the fog without the lamps' light (a lamp's
+own silhouette may show a one-pixel rim with less glow). ClassicLook and LegacyFog never have it (their techniques compile to exactly the
+same bytecode as before). No shadows: a lamp's sphere that reaches through a wall glows on the other side too; the lamp cube maps would need
+a per-point cube read per lamp (two free samplers, s15 left) and are a follow-up. Big invisible fill lights (FillLightRadius) glow like any
+lamp. Not taken: TESR_ExtraLights (no colour), ManyLamps' game lamp table, spot lights (the flashlight).
+
 **PackedFog.** Pass 1 at half size into the target's top-left quarter: (add, luma(mul)). Pass 2: the four half texels' coefficients, their
 depths found again (nearest of their 2 x 2), the same weights and own-fog fallback; the multiply is grey in this path.
 
@@ -292,6 +324,11 @@ test suffixes n / s / k / f).
   ExtShadowAO (mode 3), ExtRender (mode 4, full-resolution techniques). PackedFog and HalfStoreProbe stay D3D9.
 - Set 1 bindings: 0 scene, 1 depth, 2 atlas, 3 normals, 4 point shadow, 5 noise (3D), 6 sky table, 7 grid; Apply also 8 fog multiply, 9
   fog add, 10 AO, 11 sky visibility, 12 SunFar. Stand-ins (the depth buffer) are never read while their flags are 0.
+- UNOFFICIAL 2026-11-03 LampHaze: not ported. While its term is on this frame (TESR_VolumetricFogLamps.x > 0: indoors, lamps listed), the
+  Vulkan passes (ExtDedicated, ExtRender for the modern full-resolution technique) and the SM6 passes are not used and the D3D9 technique
+  draws (logged once: "UNOFFICIAL LampHaze: ..."); outdoors, with LampHaze 0, ClassicLook or LegacyFog they run as before. Porting means
+  the lamp table as a set 1 binding (13), TESR_VolumetricFogLamps in FogExtConstants, LampHazeLight in VolumetricFog.glsl and the .spv
+  rebuilt with tools/nvr-dxvk/compile-compute.sh.
 - Set 2 binding 0: FogExtConstants (6 matrices, 54 vectors in FogExtVectorNames order, 9 + 9 SH, 9 colours linearized on the CPU).
 - Push (112 bytes): sampler heap indices (point, linear, wrap), mode, legacy, classic, interior, physicalSky, then NVR_FogLayout,
   NVR_CompositeFlags, NVR_CompositeAOTexel, NVR_FogGridFlags, NVR_SunFarFlags.
@@ -306,7 +343,18 @@ night. Cost: the half-size estimate (four depth reads, up to four noise reads or
 height terms; branches skip what is off) and the full-size reconstruct (four half texels x 2, the composites when folded, the own-fog
 fallback only on edge pixels, two grid reads for the folded volumetric light).
 
+LampHaze (indoors, lamps listed): estimate +165-175 static slots (DedicatedFog estimate 1132 -> 1301, CompositeFogInterior estimate 1254 ->
+1423, full 1124 -> 1293, with the physical sky; highest constant c184 -> c195), DedicatedFog reconstruct 1309 -> 1478 (fallback only). Per
+half-size pixel a loop of up to LampHazeMaxLamps lamps: about 12 instructions and one point read for a lamp whose sphere the view misses,
+about 120 and two reads for one it passes through (two atan, two sincos, two exp, the phase). Not measured in game.
+
 ## 9. Open questions
+
+- LampHaze (2026-11-03): not seen in game. Its scale (the 0.03 x lamp colour through a lamp with the defaults), the core size, fill lights
+  glowing, glow through walls (no shadows), the rim on edge pixels in the composite passes, and the cost with 8 lamps are all to check.
+  Follow-ups: lamp shadows in the air for the strongest 1-2 shadowed lamps (TESR_ShadowCubeMapBuffer, s15); the interior's directional
+  light (the cell's or its lighting template's directional colour, read by AmbientLight.cpp ~940; it has no position or window, so it would
+  be an even tint, not light through windows, and was left out); the Vulkan port.
 
 - Not checked in game: every magnitude (the glow x 2 scale, the 35 % sun share of the fog colour, the noise contrast, the legacy fog's
   look, the physical-sky blend in the fog colour).

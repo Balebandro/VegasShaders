@@ -138,7 +138,24 @@ namespace ClothWind {
 	};
 	inline std::unordered_map<const void*, Motion> Motions;
 	inline UInt32 FrameId = 0;
-	inline std::unordered_set<const void*> SeenNow, SeenLast, VanillaNow, VanillaLast;	// objects drawn / with a vanilla vertex shader
+	// Which objects were drawn this frame and last frame, and which of them with a vertex shader that lacks the cloth code (SAFETY below).
+	// UNOFFICIAL 2026-11-04 (cpu-workers trims): kept as frame stamps in one entry per object instead of four sets emptied and refilled
+	// every frame (a hash node allocated and freed per object per frame: operator new/delete were ~2 % of the Ultra-Luxe's main thread).
+	// "Now" = stamped with BookFrame, "Last" = stamped with BookFrame - 1: the same answers as the sets gave.
+	struct BookEntry { UInt32 seen = 0, vanilla = 0, tentative = 0; bool capable = false; };
+	inline std::unordered_map<const void*, BookEntry> Book;
+	inline std::vector<const void*> TentativeList;	// the objects given a tentative answer this frame (BeginFrame settles them)
+	inline UInt32 BookFrame = 2;					// (0 = never: never mistaken for "last frame")
+	inline bool SeenLast(const void* g) { auto e = Book.find(g); return e != Book.end() && e->second.seen == BookFrame - 1; }
+	inline bool VanillaLast(const void* g) { auto e = Book.find(g); return e != Book.end() && e->second.vanilla == BookFrame - 1; }
+	inline void NoteSeen(const void* g) { Book[g].seen = BookFrame; }
+	inline void NoteVanilla(const void* g) { Book[g].vanilla = BookFrame; }
+	// Every lit pass of the object this frame drawn with the vertex shader bound then: does each carry the cloth code?
+	inline void NoteTentative(const void* g, bool capable) {
+		BookEntry& e = Book[g];
+		if (e.tentative != BookFrame) { e.tentative = BookFrame; e.capable = capable; TentativeList.push_back(g); }
+		else e.capable = e.capable && capable;
+	}
 	// The vertex shaders that carry the cloth code: NVR's ObjectTemplate ones (PBR.h's table), by name, built once.
 	inline std::unordered_set<std::string> CapableNames;
 	inline bool CapableBuilt = false;
@@ -156,7 +173,7 @@ namespace ClothWind {
 	// next object with cloth code would move although it is no cloth. Mark the register as 'to be zeroed' (the next non-cloth draw does it).
 	inline bool CurrentVSCapable = false;	// 2026-10-19: the vertex shader the last SetShaders bound carries the cloth code
 	inline const char* CurrentVSName = nullptr;	// 2026-10-21 diagnostic (DiagStillDraw): its name
-	inline std::unordered_map<const void*, bool> TentativeNow;	// 2026-10-19: per object this frame, did the BOUND vertex shader carry it at each lit pass
+	// (2026-10-19 TentativeNow: per object this frame, did the BOUND vertex shader carry it at each lit pass: Book's tentative stamp above)
 	// 2026-10-19 (test on the user's flicker save NVRAutoTest13, run 20261019-204305: with the cloth code compiled in but cloth switched
 	// OFF, 8.4 % of the picture changed -- houses and the road white, rocks and poles bent -- vs 0.02 % frame-to-frame noise): the grass
 	// mark was set only while cloth was ON, so with it off nothing ever cleared the grass matrices out of c248, and every NVR object
@@ -191,9 +208,9 @@ namespace ClothWind {
 	inline std::unordered_map<const void*, PassCounts> ClothPassCounts;	// 2026-10-19 diagnostic (LogMatches): which vertex shader
 	inline void NoteShaders(const void* geometry, bool nvrVertexShader, const char* vertexShaderName = nullptr) {
 		if (!(S.On || PlantsOn) || !geometry) return;
-		SeenNow.insert(geometry);
+		NoteSeen(geometry);
 		if (!nvrVertexShader) {
-			VanillaNow.insert(geometry);
+			NoteVanilla(geometry);
 			if (S.LogMatches) VanillaVSNow[geometry] = vertexShaderName ? vertexShaderName : "(none)";
 		}
 	}
@@ -996,7 +1013,7 @@ namespace ClothWind {
 		IDirect3DSurface9* rt = nullptr; device->GetRenderTarget(0, &rt);
 		Logger::Log("Cloth wind: still draw (frame %u) '%s): geometry %p, chosen %d, in a pass hook %d, c248 %.2f %.2f, z %u func %u write %u, colour write %X, blend %u, alpha test %u, VS %p %s (carries cloth %d), target %p | seen last frame %d, vanilla VS last frame %d",
 			FrameId, it->second.name.c_str(), geometry, active == &it->second, PassGeometry == geometry, c[0], c[1], zenable, zfunc, zwrite, colorwrite, alphablend, alphatest, vs, CurrentVSName ? CurrentVSName : "?", CurrentVSCapable, rt,
-			(int)SeenLast.count(geometry), (int)VanillaLast.count(geometry));
+			(int)SeenLast(geometry), (int)VanillaLast(geometry));
 		if (vs) vs->Release();
 		if (rt) rt->Release();
 	}
@@ -1160,10 +1177,14 @@ namespace ClothWind {
 		IndoorWind = Interior && TheSettingManager->GetSettingI("Shaders.Cloth.Interiors", "Enabled") != 0;
 		Exterior = exterior || IndoorWind;	// (named Exterior: 'cloth may move here')
 		// 2026-10-19: objects whose passes the game drew without setting shaders (not noted by SetShadersHook) count by the shader bound then
-		for (const auto& [g, capable] : TentativeNow)
-			if (!SeenNow.count(g)) { SeenNow.insert(g); if (!capable) VanillaNow.insert(g); }
-		TentativeNow.clear();
-		SeenLast.swap(SeenNow); SeenNow.clear(); VanillaLast.swap(VanillaNow); VanillaNow.clear();
+		for (const void* g : TentativeList) {
+			BookEntry& e = Book[g];
+			if (e.seen != BookFrame) { e.seen = BookFrame; if (!e.capable) e.vanilla = BookFrame; }
+		}
+		TentativeList.clear();
+		BookFrame++;	// this frame's stamps are "last frame's" from here on
+		if ((BookFrame & 1023) == 0)	// objects not drawn for two frames answer "not seen" either way: forgotten now and then
+			for (auto it = Book.begin(); it != Book.end();) it = BookFrame - it->second.seen > 2 && BookFrame - it->second.tentative > 2 ? Book.erase(it) : std::next(it);
 		VanillaVSLast.swap(VanillaVSNow); VanillaVSNow.clear();
 		// The shaders were compiled with Enabled as it was at startup (CLOTH_WIND_ON, ShaderRecord::BuildDefines): read once.
 		if (!CompiledInRead) { CompiledInRead = true; S.CompiledIn = TheSettingManager->GetSettingI("Shaders.Cloth.Main", "Enabled") != 0; }
@@ -1432,25 +1453,23 @@ namespace ClothWind {
 		// that one, and note it so the rule below holds for it from the next frame on (a vanilla one still keeps the object still).
 		bool boundAnswer = false;
 		if (!shadowPass) {
-			auto t = TentativeNow.find(geometry);
-			if (t == TentativeNow.end()) TentativeNow.emplace(geometry, CurrentVSCapable);
-			else t->second = t->second && CurrentVSCapable;	// every pass of the object this frame
+			NoteTentative(geometry, CurrentVSCapable);	// every pass of the object this frame
 			// 2026-10-21 (indoor cloth test, Gomorrah: a curtain broke apart with any wind at all, even 0.02 units): an object whose
 			// other passes SetShaders noted as carrying the cloth code, but with a pass drawn with a vertex shader that does not (the
 			// game set no shaders for it: the lamp passes of a batch share theirs), counted as all-NVR -- the tentative answer above is
 			// only used for objects never noted -- so its passes no longer met. Any lit pass drawn without the cloth code keeps the
 			// object still from the next frame on.
-			if (!CurrentVSCapable) VanillaNow.insert(geometry);
-			boundAnswer = !SeenLast.count(geometry) && CurrentVSCapable && !VanillaLast.count(geometry);
+			if (!CurrentVSCapable) NoteVanilla(geometry);
+			boundAnswer = !SeenLast(geometry) && CurrentVSCapable && !VanillaLast(geometry);
 		}
-		if (!shadowPass && !boundAnswer && (!SeenLast.count(geometry) || VanillaLast.count(geometry))) {	// see SAFETY above
+		if (!shadowPass && !boundAnswer && (!SeenLast(geometry) || VanillaLast(geometry))) {	// see SAFETY above
 			if (S.LogMatches) {	// 2026-10-19 diagnostic: how often the safety rule skips a known worn cloth mesh, and why
 				auto c = ClothPassCounts.find(geometry);
-				if (c != ClothPassCounts.end()) { if (!SeenLast.count(geometry)) c->second.notSeen++; else c->second.vanilla++; }
+				if (c != ClothPassCounts.end()) { if (!SeenLast(geometry)) c->second.notSeen++; else c->second.vanilla++; }
 			}
 			ZeroFor(device, shadowPass); return;
 		}
-		if (shadowPass && VanillaLast.count(geometry)) { ZeroFor(device, shadowPass); return; }
+		if (shadowPass && VanillaLast(geometry)) { ZeroFor(device, shadowPass); return; }
 		BSShaderProperty* property = (BSShaderProperty*)geometry->GetProperty(NiProperty::PropertyType::kType_Shade);
 		const UInt32 vtable = property ? *(UInt32*)property : 0;
 		if (vtable != 0x10AE0D0 && vtable != 0x10B9910) { ZeroFor(device, shadowPass); return; }	// BSShaderPPLightingProperty, Lighting30ShaderProperty

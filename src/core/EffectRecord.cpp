@@ -1,5 +1,6 @@
 #include <regex>
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
+#include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "Sm6Pass.h"	// UNOFFICIAL 2026-10-26 (deep/fork-sm6)
 #include "RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "GpuDebug.h"	// UNOFFICIAL 2026-10-26: GpuDebugLabels (each effect is a named group in a capture)
@@ -346,6 +347,7 @@ void EffectRecord::CreateCT(ID3DXBuffer* ShaderSource, ID3DXConstantTable* Const
 */
 void EffectRecord::SetCT() {
 	if (!Enabled || !Effect) return;	// nothing to feed
+	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: the sky's results in its constants first
 	MixCheck::SetPass(Name);	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck: the D3D9 pass the next binds and draws belong to
 
 	for (UInt32 i = 0; i < TextureShaderValuesCount; i++) {

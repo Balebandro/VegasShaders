@@ -292,6 +292,214 @@ float3 tmDice(float3 c, float contrast, float brightness, float hdrMax, float sh
 }
 
 
+// -----------------------------------------------------------------------------------------------
+// GT7 Tone Mapping (Gran Turismo 7), TonemappingMode 11.
+// From Polyphony Digital's sample implementation for "Driving Toward Reality: Physically Based
+// Tone Mapping and Perceptual Fidelity in Gran Turismo 7" (SIGGRAPH 2025):
+// https://blog.selfshadow.com/publications/s2025-shading-course/pdi/supplemental/gt7_tone_mapping.cpp
+//
+// MIT License
+// Copyright (c) 2025 Polyphony Digital Inc.
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+// associated documentation files (the "Software"), to deal in the Software without restriction,
+// including without limitation the rights to use, copy, modify, merge, publish, distribute,
+// sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions: The above copyright notice and this
+// permission notice shall be included in all copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+// BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// How it is wired in (TonemappingMode = 11; mode 8 stays Uchimura's GT Sport curve):
+//  - the scene's linear (sRGB / Rec.709 primaries) colour is converted to Rec.2020, which is what the
+//    operator expects, and back to Rec.709 afterwards.
+//  - The SDR path of the reference is used: 1.0 in the operator = 100 nits, SDR paper white =
+//    250 nits, output in [0, 1] ready for the gamma that follows.
+//  - Calibration as in Polyphony's code: a scene value of 1.0 (after Exposure) is sRGB white = 100 nits
+//    (GT7_INPUT_SCALE 1.0). The curve is straight up to 111 nits and rolls off to 250-nit paper white,
+//    so about 1.9 stops above white are kept for sunlit surfaces, sky and highlights before anything
+//    clips. Brightness is set with Exposure, as GT7 sets it with its camera exposure.
+//  - HighlightSaturation (Shaders > Tonemapping, per day/night/interior) scales where colour fades
+//    to white in the highlights: 1.0 = GT7 reference, higher = bright colours stay saturated longer.
+//  - Everything after the tonemapper (HueSafeClip, sky dither, gamma, fades) runs as before.
+// -----------------------------------------------------------------------------------------------
+
+#ifndef GT7_INPUT_SCALE
+#define GT7_INPUT_SCALE 1.0      // operator units per scene unit: 1.0 = reference (1.0 = 100 nits). Higher = brighter, less highlight headroom (same as raising Exposure)
+#endif
+#ifndef GT7_PAPER_WHITE
+#define GT7_PAPER_WHITE 250.0    // cd/m^2, SDR reference white the curve is built around (reference: 250)
+#endif
+#ifndef GT7_BLEND_RATIO
+#define GT7_BLEND_RATIO 0.6      // 0 = per-channel curve only (hue skews to yellow/white), 1 = chroma-preserving only (reference: 0.6)
+#endif
+#ifndef GT7_FADE_START
+#define GT7_FADE_START 0.98      // chroma fade start, relative to peak luminance (reference: 0.98)
+#endif
+#ifndef GT7_FADE_END
+#define GT7_FADE_END 1.16        // chroma fade end (reference: 1.16)
+#endif
+#ifndef GT7_UCS_JZAZBZ
+#define GT7_UCS_JZAZBZ 0         // 0 = ICtCp (reference default), 1 = Jzazbz
+#endif
+
+static const float GT7_REFERENCE_LUMINANCE = 100.0;                               // cd/m^2 <-> 1.0
+static const float GT7_PEAK = GT7_PAPER_WHITE / GT7_REFERENCE_LUMINANCE;          // frame-buffer peak (2.5)
+
+// "GT Tone Mapping" curve with convergent shoulder (GT7 parameters).
+static const float GT7_ALPHA = 0.25;
+static const float GT7_MID = 0.538;
+static const float GT7_LINEAR = 0.444;
+static const float GT7_TOE = 1.280;
+static const float GT7_K = (GT7_LINEAR - 1.0) / (GT7_ALPHA - 1.0);
+static const float GT7_KA = GT7_PEAK * GT7_LINEAR + GT7_PEAK * GT7_K;
+static const float GT7_KB = -GT7_PEAK * GT7_K * exp(GT7_LINEAR / GT7_K);
+static const float GT7_KC = -1.0 / (GT7_K * GT7_PEAK);
+
+float3 GT7Curve(float3 x)
+{
+    x = max(x, 0.0);
+    const float3 weightLinear = smoothstep(0.0, GT7_MID, x);
+    const float3 toe = GT7_MID * pow(x / GT7_MID, GT7_TOE);
+    const float3 linearPart = lerp(toe, x, weightLinear);
+    const float3 shoulder = GT7_KA + GT7_KB * exp(x * GT7_KC);
+    return (x < GT7_LINEAR * GT7_PEAK) ? linearPart : shoulder;
+}
+
+// SMPTE ST 2084 (PQ), on frame-buffer values (1.0 = 100 nits). exponentScale is 1 for ICtCp.
+static const float GT7_PQ_M1 = 0.1593017578125;
+static const float GT7_PQ_M2 = 78.84375;
+static const float GT7_PQ_C1 = 0.8359375;
+static const float GT7_PQ_C2 = 18.8515625;
+static const float GT7_PQ_C3 = 18.6875;
+
+float3 GT7InverseEotfPQ(float3 v, float exponentScale)
+{
+    const float3 ym = pow(max(v * (GT7_REFERENCE_LUMINANCE / 10000.0), 0.0), GT7_PQ_M1);
+    return pow((GT7_PQ_C1 + GT7_PQ_C2 * ym) / (1.0 + GT7_PQ_C3 * ym), GT7_PQ_M2 * exponentScale);
+}
+
+float3 GT7EotfPQ(float3 n, float exponentScale)
+{
+    const float3 np = pow(saturate(n), 1.0 / (GT7_PQ_M2 * exponentScale));
+    const float3 l = max(np - GT7_PQ_C1, 0.0) / (GT7_PQ_C2 - GT7_PQ_C3 * np);
+    return pow(l, 1.0 / GT7_PQ_M1) * (10000.0 / GT7_REFERENCE_LUMINANCE);
+}
+
+// Rec.709 <-> Rec.2020 (linear, D65)
+static const float3x3 GT7_Rec709ToRec2020 =
+{
+    { 0.6274040, 0.3292820, 0.0433136 },
+    { 0.0690970, 0.9195400, 0.0113612 },
+    { 0.0163916, 0.0880132, 0.8955952 }
+};
+static const float3x3 GT7_Rec2020ToRec709 =
+{
+    {  1.6604910, -0.5876411, -0.0728499 },
+    { -0.1245505,  1.1328999, -0.0083494 },
+    { -0.0181508, -0.1005789,  1.1187297 }
+};
+
+#if GT7_UCS_JZAZBZ
+// Jzazbz (Safdar et al. 2017), coefficients adjusted for linear Rec.2020 as in the reference.
+static const float GT7_JZ_EXPONENT = 1.7;
+static const float GT7_JZ_D0 = 1.6295499532821566e-11;
+static const float3x3 GT7_RGBToLMS =
+{
+    { 0.530004, 0.355704, 0.086090 },
+    { 0.289388, 0.525395, 0.157481 },
+    { 0.091098, 0.147588, 0.734234 }
+};
+static const float3x3 GT7_LMSToRGB =
+{
+    {  2.990669, -2.049742,  0.088977 },
+    { -1.634525,  3.145627, -0.483037 },
+    { -0.042505, -0.377983,  1.448019 }
+};
+
+float3 GT7RGBToUCS(float3 rgb) // linear Rec.2020 frame-buffer values -> (Jz, az, bz)
+{
+    const float3 lms = GT7InverseEotfPQ(mul(GT7_RGBToLMS, rgb), GT7_JZ_EXPONENT);
+    const float iz = 0.5 * lms.x + 0.5 * lms.y;
+    return float3((0.44 * iz) / (1.0 - 0.56 * iz) - GT7_JZ_D0,
+                  3.524000 * lms.x - 4.066708 * lms.y + 0.542708 * lms.z,
+                  0.199076 * lms.x + 1.096799 * lms.y - 1.295875 * lms.z);
+}
+
+float3 GT7UCSToRGB(float3 jab)
+{
+    const float jz = jab.x + GT7_JZ_D0;
+    const float iz = jz / (0.44 + 0.56 * jz);
+    const float3 lms = float3(iz + 0.1386050432715393 * jab.y + 0.05804731615611869 * jab.z,
+                              iz - 0.1386050432715393 * jab.y - 0.05804731615611869 * jab.z,
+                              iz - 0.09601924202631895 * jab.y - 0.8118918960560390 * jab.z);
+    return max(mul(GT7_LMSToRGB, GT7EotfPQ(lms, GT7_JZ_EXPONENT)), 0.0);
+}
+#else
+// ICtCp (ITU-T T.302)
+static const float3x3 GT7_RGBToLMS =
+{
+    { 1688.0 / 4096.0, 2146.0 / 4096.0,  262.0 / 4096.0 },
+    {  683.0 / 4096.0, 2951.0 / 4096.0,  462.0 / 4096.0 },
+    {   99.0 / 4096.0,  309.0 / 4096.0, 3688.0 / 4096.0 }
+};
+static const float3x3 GT7_LMSToICtCp =
+{
+    {  2048.0 / 4096.0,   2048.0 / 4096.0,     0.0 },
+    {  6610.0 / 4096.0, -13613.0 / 4096.0,  7003.0 / 4096.0 },
+    { 17933.0 / 4096.0, -17390.0 / 4096.0,  -543.0 / 4096.0 }
+};
+static const float3x3 GT7_ICtCpToLMS =
+{
+    { 1.0,  0.00860904,  0.11103 },
+    { 1.0, -0.00860904, -0.11103 },
+    { 1.0,  0.560031,   -0.320627 }
+};
+static const float3x3 GT7_LMSToRGB =
+{
+    {  3.43661,   -2.50645,    0.0698454 },
+    { -0.79133,    1.9836,    -0.192271 },
+    { -0.0259499, -0.0989137,  1.12486 }
+};
+
+float3 GT7RGBToUCS(float3 rgb) // linear Rec.2020 frame-buffer values -> (I, Ct, Cp)
+{
+    return mul(GT7_LMSToICtCp, GT7InverseEotfPQ(mul(GT7_RGBToLMS, rgb), 1.0));
+}
+
+float3 GT7UCSToRGB(float3 ictcp)
+{
+    return max(mul(GT7_LMSToRGB, GT7EotfPQ(mul(GT7_ICtCpToLMS, ictcp), 1.0)), 0.0);
+}
+#endif
+
+// Luminance (I or Jz) of the peak, the reference for the chroma fade. Constant, folded by the compiler.
+static const float GT7_PEAK_UCS = GT7RGBToUCS(GT7_PEAK.xxx).x;
+
+// Input: linear Rec.709 (the scene colour after Exposure). Output: linear Rec.709 in [0, 1].
+// highlightSaturation: 1 = reference chroma fade; scales the fade start/end.
+float3 GT7ToneMap(float3 color, float highlightSaturation)
+{
+    const float3 rgb = mul(GT7_Rec709ToRec2020, max(color, 0.0) * GT7_INPUT_SCALE);
+
+    // Per-channel curve ("skewed" colour) and the original colour, both in the UCS.
+    const float3 ucs = GT7RGBToUCS(rgb);
+    const float3 skewedRgb = GT7Curve(rgb);
+    const float3 skewedUcs = GT7RGBToUCS(skewedRgb);
+
+    // Keep the curve's luminance, take the chroma from the original, fading it out near peak.
+    const float fadeScale = max(highlightSaturation, 0.05);
+    const float chromaScale = 1.0 - smoothstep(GT7_FADE_START * fadeScale, GT7_FADE_END * fadeScale, ucs.x / GT7_PEAK_UCS);
+    const float3 scaledRgb = GT7UCSToRGB(float3(skewedUcs.x, ucs.yz * chromaScale));
+
+    const float3 blended = lerp(skewedRgb, scaledRgb, GT7_BLEND_RATIO);
+    const float3 sdr = min(blended, GT7_PEAK) * (1.0 / GT7_PEAK); // SDR correction: peak -> 1.0
+    return max(mul(GT7_Rec2020ToRec709, sdr), 0.0);
+}
+// -----------------------------------------------------------------------------------------------
+
 float3 tonemap(float3 hdr)
 {
     float mode = TESR_HDRData.x;
@@ -326,6 +534,8 @@ float3 tonemap(float3 hdr)
         return agx(hdr);
     else if (mode == 10)
         return tmDice(min(CMAX, hdr), TESR_LotteData.x, TESR_LotteData.y, TESR_HDRBloomData.w, TESR_LotteData.w);
+    else if (mode == 11)
+        return GT7ToneMap(min(CMAX, hdr), TESR_ToneMapping.x);	// GT7 (Polyphony Digital); TESR_ToneMapping.x: HighlightSaturation
     else
         return hdr;
 }

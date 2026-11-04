@@ -65,6 +65,29 @@ public:
 	ProjectionInputs lastProjection = {};
 	bool lastProjectionValid = false;
 
+	// UNOFFICIAL 2026-11-03 [Main.Main.Performance] SkyOnWorker (cpu-workers): the projection's own copy of everything it reads, and its
+	// results (Values: the constants it reads and writes, under their Constants names), so it can run on FrameWorker's thread.
+	struct ProjectionJob {
+		struct Settings { float Haze, Brightness; bool LightsObjects; };
+		struct Values { D3DXVECTOR4 SkyData, PhysSky, PhysSkySun, SkyTint, SkyTintHorizon, SkyLook, Irradiance[9], IrradianceGame[9], IrradianceObjects[9]; };
+		D3DXVECTOR4 sunPos;
+		D3DXVECTOR3 skyC, skyLowC, horizonC, sunColor;
+		float sunHeight, isDayTime, saturation;
+		bool physical, physExact, physMs;
+		const PhysSky::Tables* tables;
+		Settings settings;
+		Values values;
+		// The air is worked out on a grid half as fine each way (one sample per 2 x 2 of the projection's: 128 rays of 12 steps,
+		// about a quarter of a millisecond); plenty for the brightness match and the smooth sky light.
+		D3DXVECTOR3 physSamples[(16 / 2) * (32 / 2)];
+		D3DXVECTOR3 cellDir[16 * 32], cellRadiance[16 * 32];	// RunProjectionParallel: each cell's direction and game-sky colour
+	};
+	ProjectionJob projectionJob = {};
+	bool projectionPending = false;		// started on the worker, results not in Constants yet
+	static void RunProjection(void* job);			// the projection as it always ran (SkyOnWorker off, and SkyOnWorkerCheck's reference)
+	static void RunProjectionParallel(void* job);	// the same results, its independent samples spread over FrameWorker's threads
+	void	CopyProjection(), JoinProjection();
+
 	void	UpdateConstants(), UpdateSettings(), RegisterConstants();
 	void	UpdateFogSky();	// UNOFFICIAL 2026-10-27 the fog's tinted sky colours (ShaderManager::UpdateConstants, after the weather's)
 	void	UpdateMoonlight();	// UNOFFICIAL 2026-10-25 MoonBrightness: the game's night directional light (ShaderManager::UpdateConstants)

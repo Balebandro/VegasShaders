@@ -87,7 +87,9 @@ endorsed or supported by the New Vegas Reloaded authors, so please don't ask for
 With work from:
 - [macrimmon12-tech](https://github.com/macrimmon12-tech/TESReloaded10): the fork this grew from (volumetric fog v2,
   skin and lighting fixes, the first ImGui menu).
-- [Conor (mrfury97)](https://github.com/mrfury97): terrain shadow sweep, terrain variation, many lamps, skin work.
+- [Conor (mrfury97)](https://github.com/mrfury97): terrain shadow sweep, terrain variation, many lamps, skin work, Pip-Boy
+  fit, the game MSAA block.
+- [PixelsSquared](https://github.com/PixelsSquared): the Perceptual tone mapper, eye adaptation, cloud moonlight and sky light.
 - macintroll: snow accumulation and the snow look, captured normals, lens and underwater shaders.
 - Balebandro (Physically-Based-Reloaded): PBR weather scales, the grass size fade.
 - Sal, and VHeyes (mirjomi): fixes including SMAA and the material pass
@@ -98,6 +100,8 @@ With work from:
 - [WallSoGB](https://github.com/WallSoGB)'s Fallout: New Vegas database, behind the engine fixes; the NVSE / xNVSE
   projects and the community's reverse engineering of the game.
 - SMAA by Jorge Jimenez et al. (MIT).
+- Polyphony Digital: the Perceptual tone mapper (their sample code, MIT) and the eye adaptation design, from "Driving Toward
+  Reality" (SIGGRAPH 2025, Gran Turismo 7).
 
 ## License
 

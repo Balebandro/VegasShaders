@@ -41,6 +41,7 @@
 #include "HeatHaze/HeatHaze.h"
 #include "Sandstorm/Sandstorm.h"
 #include "VolumetricLight/VolumetricLight.h"
+#include "DustMotes/DustMotes.h"	// UNOFFICIAL 2026-11-03 dust motes in lit air
 #include "SkyDither/SkyDither.h"
 #include "Bodycam/Bodycam.h"
 #include "Reflections/Reflections.h"

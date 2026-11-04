@@ -182,6 +182,8 @@ void main() {
 
             // From here AvgLuma.comp line for line.
             vec2 oldLuma = prev.rg;
+            // 2026-11-04: a NaN state starts over (AvgLuma.fx.hlsl, the same guard); a NaN pixel falls in a bin, it cannot reach the sum
+            if (any(isnan(oldLuma)) || any(isinf(oldLuma))) oldLuma = vec2(0.0);
             float newLuma = (average_ + (7.0 * oldLuma.r)) / 8.0;  // average over 8 frames
 
             float decreaseRate = -pc.exposureData.z;

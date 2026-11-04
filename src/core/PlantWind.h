@@ -202,10 +202,8 @@ namespace PlantWind {
 		// and bookkeeping as ClothWind::ForGeometry (with the cloth on both run it: the same answers).
 		bool boundAnswer = false;
 		if (!shadowPass) {
-			auto t = ClothWind::TentativeNow.find(geometry);
-			if (t == ClothWind::TentativeNow.end()) ClothWind::TentativeNow.emplace(geometry, ClothWind::CurrentVSCapable);
-			else t->second = t->second && ClothWind::CurrentVSCapable;
-			boundAnswer = !ClothWind::SeenLast.count(geometry) && ClothWind::CurrentVSCapable && !ClothWind::VanillaLast.count(geometry);
+			ClothWind::NoteTentative(geometry, ClothWind::CurrentVSCapable);
+			boundAnswer = !ClothWind::SeenLast(geometry) && ClothWind::CurrentVSCapable && !ClothWind::VanillaLast(geometry);
 		}
 		BSShaderProperty* property = (BSShaderProperty*)geometry->GetProperty(NiProperty::PropertyType::kType_Shade);
 		const UInt32 vtable = property ? *(UInt32*)property : 0;
@@ -221,8 +219,8 @@ namespace PlantWind {
 			if (plant && (MatchesLogged < 32 || S.Log)) { MatchesLogged++; Logger::Log("UNOFFICIAL Plant wind: PLANT %s ('%s')", diffuse->ddsPath1, geometry->m_pcName ? geometry->m_pcName : ""); }
 		}
 		if (!plant) return;
-		if (!shadowPass && !boundAnswer && (!ClothWind::SeenLast.count(geometry) || ClothWind::VanillaLast.count(geometry))) { SkipSafety++; return; }
-		if (shadowPass && ClothWind::VanillaLast.count(geometry)) { SkipShadowVanilla++; return; }
+		if (!shadowPass && !boundAnswer && (!ClothWind::SeenLast(geometry) || ClothWind::VanillaLast(geometry))) { SkipSafety++; return; }
+		if (shadowPass && ClothWind::VanillaLast(geometry)) { SkipShadowVanilla++; return; }
 		const NiAVObject* root = RootOf(geometry);
 		if (!root || !root->m_kWorldBound) { SkipNoRoot++; return; }
 

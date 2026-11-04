@@ -1080,12 +1080,14 @@ static void AboutWindow() {
 		ImGui::Spacing();
 		ImGui::SeparatorText("With work from");
 		AboutCredit("macrimmon12-tech", "the fork this grew from: volumetric fog v2, skin and lighting fixes, the first ImGui menu");
-		AboutCredit("Conor (mrfury97)", "terrain shadow sweep, terrain variation, many lamps, skin work");
+		AboutCredit("Conor (mrfury97)", "terrain shadow sweep, terrain variation, many lamps, skin work, Pip-Boy fit, the game MSAA block");
+		AboutCredit("PixelsSquared", "the Perceptual tone mapper, eye adaptation, cloud moonlight and sky light");
 		AboutCredit("macintroll", "snow accumulation, the snow look, captured normals, lens and underwater shaders");
 		AboutCredit("Balebandro", "Physically-Based-Reloaded: PBR weather scales, grass size fade");
 		AboutCredit("Sal", "work shared for this project");
 		AboutCredit("VHeyes (mirjomi)", "fixes: SMAA edges and tuning, the material pass depth, and more");
 		AboutCredit("Community Shaders team", "terrain/cloud shadows, grass collision, skylighting, LOD blending, True PBR layout (GPL-3.0)");
+		AboutCredit("Polyphony Digital", "the Perceptual tone mapper (their MIT sample code) and the eye adaptation design, from their SIGGRAPH 2025 paper for Gran Turismo 7");
 		AboutCredit("WallSoGB", "the Fallout: New Vegas engine database behind the engine fixes");
 		AboutCredit("NVSE / xNVSE", "the plugin interface and the community's reverse engineering of the game");
 		ImGui::Spacing();

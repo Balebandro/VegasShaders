@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <deque>
 #include <thread>
+#include "../../core/FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "../../core/GpuProfiler.h"
 #include "../../core/GpuTimeline.h"
 #include "../../core/PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
@@ -751,6 +752,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	UpdateFaceGenInteriorFlag();
 	ShaderSplit::BeginFrame(TheRenderManager->device);
 	Render(This, RenderedTexture, Arg2, Arg3);
+	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: never past the frame it was started in
 	ShaderSplit::EndFrame();
 	EndPreSceneTimer();
 	ReportWorldRender(RenderedTexture, Arg2, Arg3);
@@ -1679,7 +1681,7 @@ namespace BarrelHeat {
 namespace MaterialRulesDraw {
 	static MaterialRules::Table Table;
 	static bool Loaded = false;
-	struct Entry { std::string Path; int Rule; };
+	struct Entry { std::string Path; int Rule; unsigned Frame = ~0u; };	// Frame: UNOFFICIAL 2026-11-04, the frame its path was last compared in
 	static std::unordered_map<const NiSourceTexture*, Entry> ByTexture;
 	static float Current[12] = {};
 	static bool Active = false;		// Current holds a rule's values (sent; resent after each bind)
@@ -1708,9 +1710,13 @@ namespace MaterialRulesDraw {
 		const NiSourceTexture* diffuse = lighting->ppTextures[0] ? lighting->ppTextures[0][0] : nullptr;
 		if (!diffuse || !diffuse->ddsPath1 || !diffuse->ddsPath1[0]) return 0;
 		auto known = ByTexture.find(diffuse);
-		if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) return known->second.Rule;
+		// UNOFFICIAL 2026-11-04 (cpu-workers trims): the path is compared once per texture per frame, not at every pass of every object: the
+		// compare guards against a freed texture's address being reused, and a texture an object is drawn with stays alive for the frame.
+		const unsigned frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		if (known != ByTexture.end() && known->second.Frame == frame) return known->second.Rule;
+		if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) { known->second.Frame = frame; return known->second.Rule; }
 		const int rule = Table.Match(MaterialRules::Normalize(diffuse->ddsPath1));
-		ByTexture[diffuse] = { std::string(diffuse->ddsPath1), rule };
+		ByTexture[diffuse] = { std::string(diffuse->ddsPath1), rule, frame };
 		if (log && rule) Logger::Log("[MaterialRules] %s -> %s", diffuse->ddsPath1, Table.Get(rule).Name.c_str());
 		return rule;
 	}
@@ -3143,9 +3149,16 @@ namespace LampCountStats {
 		}
 		CapFrames = 0;
 	}
+	// UNOFFICIAL 2026-11-04 (cpu-workers trims): with the F10 profile AND [Main.Main.Misc] LampCapsStats on (a diagnostic, off by default):
+	// with F10 alone it ran on every world pass (a map lookup, a vector per object, ~0.7 % of the Ultra-Luxe's main thread), so every F10 log
+	// read slower than the game runs.
+	static bool CapsWanted = false;
+	static UInt32 CapsWantedFrame = ~0u;
 	static void CountCaps(const PointShadowForward::RenderPassView* pass) {
 		if (!GpuTimer::Enabled || !pass || !pass->geometry || ShaderSplit::CurrentContext != ShaderSplit::World) return;
 		const UInt32 frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		if (frame != CapsWantedFrame) { CapsWantedFrame = frame; CapsWanted = TheSettingManager->GetSettingI("Main.Main.Misc", "LampCapsStats") != 0; }
+		if (!CapsWanted) return;
 		if (frame != CapFrame) { if (CapFrame) EndCapFrame(); CapFrame = frame; }
 		const UInt8 type = pass->passEnum & 0xFF;
 		Cap& cap = Caps[type];

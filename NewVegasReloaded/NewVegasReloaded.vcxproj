@@ -178,6 +178,7 @@
     <ClCompile Include="..\src\effects\Exposure\Exposure.cpp" />
     <ClCompile Include="..\src\effects\Flashlight\Flashlight.cpp" />
     <ClCompile Include="..\src\effects\FlashlightBeam\FlashlightBeam.cpp" />
+    <ClCompile Include="..\src\effects\DustMotes\DustMotes.cpp" />
     <ClCompile Include="..\src\effects\GodRays\GodRays.cpp" />
     <ClCompile Include="..\src\effects\Grass\Grass.cpp" />
     <ClCompile Include="..\src\effects\Particles\Particles.cpp" />
@@ -346,6 +347,7 @@
     <ClInclude Include="..\src\effects\Exposure\Exposure.h" />
     <ClInclude Include="..\src\effects\Flashlight\Flashlight.h" />
     <ClInclude Include="..\src\effects\FlashlightBeam\FlashlightBeam.h" />
+    <ClInclude Include="..\src\effects\DustMotes\DustMotes.h" />
     <ClInclude Include="..\src\effects\GodRays\GodRays.h" />
     <ClInclude Include="..\src\effects\Grass\Grass.h" />
     <ClInclude Include="..\src\effects\Particles\Particles.h" />

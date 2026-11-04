@@ -1,0 +1,15 @@
+[_Shaders.DustMotes.Main]
+Density = 0.5                          # UNOFFICIAL (2026-11-03), [0.0-1.0], live: how many specks float in the air: the chance that each 40-unit (57 cm) cell of air holds one (at most one each, so 1.0 is about five per cubic metre). Only specks in light show.
+Size = 0.15                            # UNOFFICIAL (2026-11-03), [0.01-0.5], live: a speck's radius in game units (0.15 is about 2 mm: larger than real dust, so it reads at a few metres). Specks are drawn at least about a pixel wide (smaller ones only dimmer, so far specks fade out) and at most about two, so this mostly sets how far away they stay visible.
+Brightness = 1.0                       # UNOFFICIAL (2026-11-03), [0.0-10.0], live: how much light the specks scatter, as a multiple of the lamps' light where they float (1 = about as bright as a white surface lit by the same lamp).
+MaxDistance = 250.0                    # UNOFFICIAL (2026-11-03), [100-1000], live: how far from the eye specks are drawn, in game units (250 is about 3.5 m); they fade out towards it. The main cost: the pass walks the air along each view this far.
+Drift = 1.0                            # UNOFFICIAL (2026-11-03), [0.0-5.0], live: how fast the air carries the specks (1 = about 5 units, 7 cm, a second, drifting sideways and rising a little) and how fast they wobble and twinkle. 0 = frozen.
+Glint = 0.45                           # UNOFFICIAL (2026-11-03), [0.0-0.9], live: forward scattering. Higher makes specks between you and a light glint brighter and specks with the light behind you dimmer; 0 = the same from every side.
+SunShare = 0.0                         # UNOFFICIAL (2026-11-03), [0.0-2.0], live, outdoors only, needs [Shaders.VolumetricLight.Main] Froxels and the sun shafts on: the sun lights specks where the shafts' grid says the air is sunlit, at this share of its light. 0 (default) = only lamps light specks outdoors: by day the sun lights all the air, so every pixel's view is walked the whole MaxDistance (the effect's worst cost) and the specks show mostly as glitter looking towards the sun. Try 0.25.
+Interiors = true                       # UNOFFICIAL (2026-11-03), live: specks indoors, lit by the room's lamps.
+Exteriors = true                       # UNOFFICIAL (2026-11-03), live: specks outdoors, lit by lamps (street lights, fires at night) and, with SunShare above 0, the sun.
+DebugView = 0                          # UNOFFICIAL (2026-11-03), [0-2], live, test only: 1 = the effect's half-resolution buffer drawn over the picture (blue: lamp reaches the view crosses, faint blue wherever specks could be; green: share of MaxDistance walked; red: the speck found), 2 = every speck white whether lit or not. A line in the log every 5 seconds lists the lamps picked either way.
+
+[_Shaders.DustMotes.Status]
+Enabled = false                        # UNOFFICIAL (2026-11-03): dust motes. Sparse specks of dust drifting in the air, seen only where light falls on them (near lamps, in the sun's shafts), glinting softly when between you and the light. Procedural, so it works in every interior, modded ones too.
+

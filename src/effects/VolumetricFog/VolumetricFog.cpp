@@ -224,6 +224,20 @@ void VolumetricFogEffect::UpdateSettings(){
 		Constants.Global.w = 0.0f;
 	}
 
+	// UNOFFICIAL 2026-11-03 LampHaze (indoors only; SetLampHaze): missing keys (an older toml) take the shipped defaults.
+	{
+		SettingManager::Configuration::ConfigNode lampNode;
+		auto lampF = [&](const char* key, float fallback, float lo, float hi) {
+			return std::clamp(TheSettingManager->Config.FillNode(&lampNode, "Shaders.VolumetricFog.Interiors", key) ? lampNode.FloatValue : fallback, lo, hi);
+		};
+		// 2026-11-04 LampHazeEnabled (off by default): the haze's on/off switch, apart from its strength
+		const bool lampOn = TheSettingManager->Config.FillNode(&lampNode, "Shaders.VolumetricFog.Interiors", "LampHazeEnabled") && lampNode.BoolValue;
+		lampHaze = (exterior || !lampOn) ? 0.0f : lampF("LampHaze", 0.02f, 0.0f, 4.0f);
+		lampHazeAnisotropy = lampF("LampHazeAnisotropy", 0.3f, 0.0f, 0.9f);
+		lampHazeCore = lampF("LampHazeCore", 0.1f, 0.05f, 1.0f);
+		lampHazeMaxLamps = (int)lampF("LampHazeMaxLamps", 8.0f, 0.0f, (float)LampHazeMax);
+	}
+
 	// Own section (not Main/Interiors-switched via SettingCategory), so it gets its own settings-UI
 	// tab instead of crowding Main. Harmless to read unconditionally for interiors too -- the shader
 	// gates its actual effect on isExterior the same way it already does for MorningFogDip's
@@ -327,10 +341,73 @@ void VolumetricFogEffect::RegisterConstants(){
 		{ "TESR_VolumetricFogBlend", &Constants.LegacyBlend },
 		{ "TESR_VolumetricFogHeight", &Constants.LegacyHeight },
 		{ "TESR_VolumetricFogData", &Constants.LegacyData },
+		{ "TESR_VolumetricFogLamps", &Constants.Lamps },	// UNOFFICIAL 2026-11-03 LampHaze (SetLampHaze)
 	};
 	for (const Binding& binding : bindings) TheShaderManager->RegisterConstant(binding.name, binding.value);
 }
 
+
+/*
+* UNOFFICIAL 2026-11-03 LampHaze ([Shaders.VolumetricFog.Interiors] LampHaze, LampHazeAnisotropy, LampHazeCore, LampHazeMaxLamps; the shader's
+* LampHazeLight): the lamps whose light the indoor fog takes in this frame. The source is the list ShaderManager::GetNearbyLights made this
+* frame, as AmbientLight's grid lamps and the path tracer take it: every shadow slot's lamp (BatchLightPosition / Color, all slots, not only
+* the 12 the screen passes see) and the tracked unshadowed ones (LightPosition, LightColor from 12). Their w there is the reach x
+* [Shaders.ShadowsInteriors.Main] LightRadiusMult (the cube maps' reach); the haze takes the game's own reach (Spec.r) back, so the glow
+* ends where the lamp's light on the walls does. A lamp in both lists counts once; a sphere wholly behind the camera is left out; then the
+* nearest spheres first (distance to the sphere, 0 inside it), at most LampHazeMaxLamps. Colour: the game's (gamma) colour linearized with
+* the 2.2 power, as AmbientLight's grid, times the dimmer. Outdoors, with LampHaze 0, LampHazeMaxLamps 0, ClassicLook, LegacyFog or no lamp:
+* x = 0, the shader's branch skips the term and the fog is exactly as before. Called by Render before any draw (the lists are this frame's).
+* The list goes into lampTexture (created on first use, D3DUSAGE_DYNAMIC as AmbientOcclusion's RT glow table); if that fails x stays 0.
+*/
+void VolumetricFogEffect::SetLampHaze(IDirect3DDevice9* Device) {
+	Constants.Lamps = D3DXVECTOR4(0.0f, 0.0f, lampHazeAnisotropy, lampHazeCore);
+	if (!(lampHaze > 0.0f) || lampHazeMaxLamps <= 0 || TheShaderManager->GameState.isExterior || IsLegacy() || IsClassic()) return;
+	ShaderManager* sm = TheShaderManager;
+	const float radiusMult = (std::max)(sm->Effects.ShadowsExteriors->Settings.Interiors.LightRadiusMult, 0.01f);
+	const D3DXVECTOR4 camera = TheRenderManager->CameraPosition;
+	const D3DXMATRIX& view = TheRenderManager->InvViewMatrix;
+	const D3DXVECTOR3 forward(view._31, view._32, view._33);
+	struct Lamp { D3DXVECTOR4 pos, colour; float distance; };
+	Lamp lamps[ShadowCubeMapsMax + TrackedLightsMax];
+	int found = 0;
+	auto add = [&](const D3DXVECTOR4& p, const D3DXVECTOR4& c) {
+		const float reach = p.w / radiusMult;
+		if (reach <= 10.0f || c.w <= 0.0f || found >= ShadowCubeMapsMax + TrackedLightsMax) return;
+		const D3DXVECTOR3 rel(p.x - camera.x, p.y - camera.y, p.z - camera.z);
+		if (D3DXVec3Dot(&rel, &forward) < -reach) return;	// wholly behind the camera
+		for (int i = 0; i < found; i++)	// the same lamp in both lists
+			if (fabsf(lamps[i].pos.x - rel.x) < 1.0f && fabsf(lamps[i].pos.y - rel.y) < 1.0f && fabsf(lamps[i].pos.z - rel.z) < 1.0f) return;
+		const float dimmer = c.w;
+		const D3DXVECTOR4 colour(powf((std::max)(c.x, 0.0f), 2.2f) * dimmer, powf((std::max)(c.y, 0.0f), 2.2f) * dimmer, powf((std::max)(c.z, 0.0f), 2.2f) * dimmer, 0.0f);
+		if (colour.x + colour.y + colour.z <= 0.0f) return;
+		lamps[found++] = { D3DXVECTOR4(rel.x, rel.y, rel.z, reach), colour, (std::max)(D3DXVec3Length(&rel) - reach, 0.0f) };
+	};
+	for (int s = 0; s < ShadowCubeMapsMax; s++) add(sm->BatchLightPosition[s], sm->BatchLightColor[s]);
+	for (int t = 0; t < TrackedLightsMax; t++) add(sm->LightPosition[t], sm->LightColor[ShadowCubeMapsScreen + t]);
+	std::sort(lamps, lamps + found, [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
+	const int count = (std::min)(found, (std::min)(lampHazeMaxLamps, (int)LampHazeMax));
+	if (count <= 0) return;
+	if (!lampTexture && FAILED(Device->CreateTexture(LampHazeMax, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A32B32G32R32F, D3DPOOL_DEFAULT, &lampTexture, nullptr))) {
+		lampTexture = nullptr;
+		static bool failLogged = false;
+		if (!failLogged) { failLogged = true; Logger::Log("[ERROR] UNOFFICIAL LampHaze: could not create the lamp table texture: the indoor fog stays without the lamps' light."); }
+		return;
+	}
+	D3DLOCKED_RECT rect;
+	if (FAILED(lampTexture->LockRect(0, &rect, nullptr, D3DLOCK_DISCARD))) return;
+	for (int row = 0; row < 2; row++) {
+		D3DXVECTOR4* texels = (D3DXVECTOR4*)((BYTE*)rect.pBits + row * rect.Pitch);
+		for (int i = 0; i < LampHazeMax; i++) texels[i] = i < count ? (row ? lamps[i].colour : lamps[i].pos) : D3DXVECTOR4(0, 0, 0, 0);
+	}
+	lampTexture->UnlockRect(0);
+	Constants.Lamps = D3DXVECTOR4(lampHaze, (float)count, lampHazeAnisotropy, lampHazeCore);
+	static bool logged = false;
+	if (!logged && count > 0) {
+		logged = true;
+		Logger::Log("UNOFFICIAL LampHaze: the indoor fog takes in the light of %d lamp(s) (LampHaze %.2f, anisotropy %.2f, core %.2f, at most %d); "
+			"the fog's Vulkan / SM6 passes are not used while it does (the D3D9 technique has the lamps' light).", count, lampHaze, lampHazeAnisotropy, lampHazeCore, lampHazeMaxLamps);
+	}
+}
 
 bool VolumetricFogEffect::ShouldRender()
 {
@@ -561,14 +638,15 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 	// UNOFFICIAL 2026-10-26 (deep/fork-sm6, NvrSm6Shaders): both passes from their SM6 build when it is there; the D3D9 code below then
 	// sets everything up as always and only the two draws go to Sm6Pass (null: the D3D9 draws, or the hand-ported passes below).
 	Sm6Pass* sm6[2] = { nullptr, nullptr };
-	if (!targetOverride && !sceneOverride && Sm6Pass::On()) {
+	// (UNOFFICIAL 2026-11-03 LampHaze: neither the SM6 nor the Vulkan passes have the lamps' light; while it is on, the D3D9 technique draws.)
+	if (!targetOverride && !sceneOverride && Sm6Pass::On() && !LampHazeOn()) {
 		sm6[0] = Sm6For(technique, 0);
 		sm6[1] = Sm6For(technique, 1);
 		if (!sm6[0] || !sm6[1]) sm6[0] = sm6[1] = nullptr;
 	}
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the two passes as Vulkan passes when NvrDxvkPasses is on (not for the diagnostic overrides).
-	if (!sm6[0] && !targetOverride && !sceneOverride && !ExtFailed && DxvkCompute::PassesOn()) {
+	if (!sm6[0] && !targetOverride && !sceneOverride && !ExtFailed && DxvkCompute::PassesOn() && !LampHazeOn()) {
 		const D3DXVECTOR4 extLayout((float)fog.Width / original.Width, (float)fog.Height / original.Height, 1.0f / fog.Width, 1.0f / fog.Height);
 		bool extGrid = false;
 		if (ExtDedicated(Device, RenderTarget, RenderedSurface, scene, composite, extLayout, extGrid)) {
@@ -758,6 +836,21 @@ void VolumetricFogEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 	IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget,
 	IDirect3DSurface9* SourceBuffer) {
 	if (!Enabled || !Effect || !ShouldRender()) { NoteSkip(); renderTime = 0; return; }
+	// UNOFFICIAL 2026-11-03 LampHaze: this frame's lamps, before any draw sets the constants; their table on stage 14 (NVR_FogLamps, point,
+	// clamp) while the fog draws, taken off again when this returns (bound only while the term is on: only then does the shader read it).
+	SetLampHaze(Device);
+	struct LampBinding {
+		IDirect3DDevice9* device; bool bound;
+		LampBinding(IDirect3DDevice9* d, IDirect3DTexture9* t) : device(d), bound(t != nullptr) {
+			if (!bound) return;
+			device->SetTexture(14, t);
+			TheRenderManager->renderState->NoteDeviceTexture(14, t);
+			const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+				{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
+			for (const auto& s : states) TheRenderManager->SetSamplerState(14, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+		}
+		~LampBinding() { if (bound) { device->SetTexture(14, nullptr); TheRenderManager->renderState->NoteDeviceTexture(14, nullptr); } }
+	} lampBinding(Device, Constants.Lamps.x > 0.0f ? lampTexture : nullptr);
 
 	// UNOFFICIAL: the fog's density noise, a 3D texture on stage 9 (NVR_FogNoise in the effect), for every path below;
 	// taken off again when this returns, so nothing drawn later finds it there.
@@ -1123,6 +1216,7 @@ bool VolumetricFogEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9*
 	const char* name = description.Name ? description.Name : "";
 	const bool legacy = !strcmp(name, "VolumetricFogLegacy"), classic = !strcmp(name, "VolumetricFogClassic");
 	if (*name && !legacy && !classic) return false;	// (the first technique has no name)
+	if (!legacy && !classic && LampHazeOn()) return false;	// (UNOFFICIAL 2026-11-03 LampHaze: the Vulkan pass has no lamps' light; D3D9 draws)
 	IDirect3DBaseTexture9* inputs[ExtInputCount];
 	ExtFogPush push;
 	if (!ExtSetup(inputs, push)) return false;

@@ -49,6 +49,8 @@ void VolumetricCloudsEffect::UpdateSettings() {
 	Settings.ShadowPrefilter = TheSettingManager->GetSettingI(section, "ShadowPrefilter") != 0;	// UNOFFICIAL 2026-10-27
 	Settings.ShadowSoftness = std::clamp(TheSettingManager->GetSettingF(section, "ShadowSoftness"), 0.5f, 4.0f);
 	Settings.PhysicalShadows = TheSettingManager->GetSettingI(section, "PhysicalShadows") != 0;	// UNOFFICIAL 2026-10-31
+	Settings.PhysicalMoonlight = TheSettingManager->GetSettingI(section, "PhysicalMoonlight") != 0;	// UNOFFICIAL physical cloud lighting
+	Settings.PhysicalSkyLight = TheSettingManager->GetSettingI(section, "PhysicalSkyLight") != 0;
 	Settings.ReflectionDebug = std::clamp(TheSettingManager->GetSettingI(section, "ReflectionDebug"), 0, 2);
 	Settings.FineDetail = std::clamp(TheSettingManager->GetSettingF(section, "FineDetail"), 0.0f, 1.0f);
 	Settings.FineDetailSize = std::clamp(TheSettingManager->GetSettingF(section, "FineDetailSize"), 10.0f, 5000.0f);
@@ -90,6 +92,7 @@ void VolumetricCloudsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_CloudsMotion", &Constants.Motion);
 	TheShaderManager->RegisterConstant("TESR_CloudsTint", &Constants.Tint);
 	TheShaderManager->RegisterConstant("TESR_CloudsTower", &Constants.Tower);
+	TheShaderManager->RegisterConstant("TESR_CloudsPhysical", &Constants.Physical);	// UNOFFICIAL physical cloud lighting
 	TheShaderManager->RegisterConstant("TESR_CloudsHistoryScale", &Constants.HistoryScale);	// UNOFFICIAL 2026-10-27 RenderScale v2
 }
 
@@ -518,6 +521,7 @@ void VolumetricCloudsEffect::UpdateConstants() {
 	Constants.Shape = D3DXVECTOR4(Settings.Base, Settings.Thickness * towerScale, coverage, Settings.Density);
 	Constants.Noise = D3DXVECTOR4(Settings.ShapeSize, Settings.DetailSize, Settings.Erosion, Settings.WeatherSize);
 	Constants.Light = D3DXVECTOR4(Settings.SunStrength, Settings.AmbientStrength, Settings.Forward, rain);
+	Constants.Physical = D3DXVECTOR4(Settings.PhysicalMoonlight ? 1.0f : 0.0f, Settings.PhysicalSkyLight ? 1.0f : 0.0f, 0.0f, 0.0f);	// UNOFFICIAL
 	Constants.Wind = D3DXVECTOR4(wind.x, wind.y, wind.z, typeBias);
 	Constants.March = D3DXVECTOR4((float)marchSteps, Settings.MaxDistance, (float)frame, Settings.HazeDistance);
 	Constants.Layout.w = Settings.Brightness;
@@ -928,7 +932,7 @@ namespace {
 	};
 	// Push block: the samplers' heap indices (POINT/CLAMP, LINEAR/CLAMP, POINT/WRAP, trilinear/WRAP; filled in by DXVK), then the
 	// two compile-time switches of the D3D9 shaders.
-	struct CloudsPush { UInt32 pointIndex, linearIndex, pointWrapIndex, mipIndex, fixedExit, physicalSky, towers, prefilter; };	// towers: 2026-10-26 (the *Towers techniques); prefilter: 2026-10-27 (technique 11)
+	struct CloudsPush { UInt32 pointIndex, linearIndex, pointWrapIndex, mipIndex, fixedExit, physicalSky, towers, prefilter, physicalMoonlight, physicalSkyLight; };	// towers: 2026-10-26 (the *Towers techniques); prefilter: 2026-10-27 (technique 11); physicalMoonlight, physicalSkyLight: UNOFFICIAL settings of the same names
 
 	const D3DXVECTOR4* CloudsRegistered(const char* name) {
 		auto found = TheShaderManager->ConstantsTable.find(name);
@@ -1037,6 +1041,8 @@ bool VolumetricCloudsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 	if (techniqueIndex == SkyProbePass) push.towers = TowersOn(this) ? 1 : 0;	// the probe: the clouds' current kind
 	push.prefilter = techniqueIndex == 11 ? 1 : 0;
 	push.physicalSky = physicalSky ? 1 : 0;
+	push.physicalMoonlight = Settings.PhysicalMoonlight ? 1 : 0;	// UNOFFICIAL physical cloud lighting (TESR_CloudsPhysical on D3D9)
+	push.physicalSkyLight = Settings.PhysicalSkyLight ? 1 : 0;
 
 	if (pass == 0)
 		return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, ext.Pipeline, resources, count + 5, &push, sizeof(push), true);

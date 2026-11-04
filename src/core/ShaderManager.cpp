@@ -1,4 +1,5 @@
 #include "OrthoProbe.h"	// UNOFFICIAL 2026-10-17 test tools (AfterCombine)
+#include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "RegisterClash.h"	// UNOFFICIAL 2026-10-31
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals (TESR_CapturedNormalsData)
 #include "ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (TESR_ObjectMotionData)
@@ -124,6 +125,7 @@ void ShaderManager::Initialize() {
 	EnrollEffect<HeatHazeEffect>(sm, sm->Effects.HeatHaze);
 	EnrollEffect<SandstormEffect>(sm, sm->Effects.Sandstorm);
 	EnrollEffect<VolumetricLightEffect>(sm, sm->Effects.VolumetricLight);
+	EnrollEffect<DustMotesEffect>(sm, sm->Effects.DustMotes);	// UNOFFICIAL 2026-11-03
 	EnrollEffect<SkyDitherEffect>(sm, sm->Effects.SkyDither);
 	EnrollEffect<BodycamEffect>(sm, sm->Effects.Bodycam);
 	EnrollEffect<ReflectionsEffect>(sm, sm->Effects.Reflections);
@@ -1888,6 +1890,7 @@ void ShaderManager::RenderDepthAndNormals(IDirect3DSurface9* RenderTarget) {
 }
 
 void ShaderManager::RenderEffectsPreTonemapping(IDirect3DSurface9* RenderTarget) {
+	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: every effect below may read the sky's results (some copy them by name)
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (core/Upscaler.h; off by default: nothing changes): once a frame, before anything below
 	// (the RT point first of all), last frame's RR result becomes what the RT effects' denoisers go by this frame (RayReconstructionWantsRaw),
 	// and this frame's starts at "not run". (Before the early returns: a frame without the chain ran no RR either.)
@@ -2001,6 +2004,7 @@ static void LogActiveSwitches(bool force) {
 * The post-tonemap chain, once a frame (and before it the per-frame bookkeeping: session log, F10 profile, frame interval).
 */
 void ShaderManager::RenderEffects(IDirect3DSurface9* RenderTarget) {
+	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker (as RenderEffectsPreTonemapping)
 	VolumetricSmoke::FrameNumber++;   // the smoke is fetched once a frame (VolumetricSmoke::Fetch)
 	SessionLog::OnFrame();	// UNOFFICIAL 2026-11-01: heartbeat, cell / weather / loading lines, setting changes, the frame journal switch (SessionLog.h)
 	{	// UNOFFICIAL 2026-10-31 register-clash guard: the total once, 300 frames into the first loaded game (the startup shaders are in; core/RegisterClash.h)
