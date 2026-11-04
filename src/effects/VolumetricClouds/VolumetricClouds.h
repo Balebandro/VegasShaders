@@ -38,6 +38,8 @@ public:
 		bool	ShadowPrefilter;			// UNOFFICIAL 2026-10-27: the shadow map from the smooth shape only, several taps per texel (no speckles)
 		float	ShadowSoftness;				// UNOFFICIAL 2026-10-27: how far those taps spread, in shadow map texels
 		bool	PhysicalShadows;			// UNOFFICIAL 2026-10-31: cloud shadows as real ones (full strength, soft edges, low sun kept)
+		bool	PhysicalMoonlight;			// UNOFFICIAL: the moon lights the clouds with all the weather's night light (off: 15% of it, as before)
+		bool	PhysicalSkyLight;			// UNOFFICIAL: with the physical sky, the sky light on the clouds at its physical brightness (off: matched to the weather's sky colours)
 		bool	ShadowDebug;				// UNOFFICIAL: show the cloud shadow alone (white lit, black shaded)
 		int		ReflectionDebug;			// UNOFFICIAL: in the water reflection, red where it looks up (sky), blue where down
 		float	FineDetail;					// UNOFFICIAL: a second, finer layer of edge detail (0 off)
@@ -71,6 +73,7 @@ public:
 		D3DXVECTOR4	Detail;			// UNOFFICIAL x: fine detail strength (0 off), y: fine detail tile (m), z: cloud shadow map size (texels)
 		D3DXVECTOR4	Motion;			// UNOFFICIAL xy: the cloud pattern's move this frame (m), w: sharpness 0..1
 		D3DXVECTOR4	Tint;			// UNOFFICIAL 2026-10-25 xyz: the weather's cloud colour now (linear, its brightness taken out), w: WeatherTint
+		D3DXVECTOR4	Physical;		// UNOFFICIAL TESR_CloudsPhysical x: PhysicalMoonlight, y: PhysicalSkyLight (1 / 0)
 		D3DXVECTOR4	Tower;			// UNOFFICIAL 2026-10-25 x: the ordinary layer's share of the taller one (1 off), y: towering 0..1, z: anvil 0..1
 		D3DXVECTOR4	HistoryScale = D3DXVECTOR4(1.0f, 1.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-10-27 RenderScale v2: xy the part of the history its frame drew; 2026-10-28 zw: the composite's jitter offset (screen uv)
 	};

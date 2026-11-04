@@ -31,7 +31,8 @@ vec4 MarchRay(vec3 dir, float jitter, float stepScale, bool fixedExit, bool towe
     vec3 light = normalize(cb.sunDirection.xyz);
     float day = saturate(cb.sunAmount.x);
     float cosT = dot(dir, light);
-    vec3 sun = linearize(cb.sunColor.rgb) * SunStrength * mix(0.15, 1.0, day) * (1.0 - 0.6 * RainDark);
+    // UNOFFICIAL PhysicalMoonlight (push physicalMoonlight): all the weather's light at night, as the .fx (off: 15% at night, as before).
+    vec3 sun = linearize(cb.sunColor.rgb) * SunStrength * (pc.physicalMoonlight != 0u ? 1.0 : mix(0.15, 1.0, day)) * (1.0 - 0.6 * RainDark);
     vec3 skyTop = linearize(cb.skyColor.rgb);
     vec3 skyLow = linearize(cb.horizonColor.rgb);
     vec3 ambientTop = skyTop * AmbientStrength * (1.0 - 0.4 * RainDark);
@@ -42,15 +43,40 @@ vec4 MarchRay(vec3 dir, float jitter, float stepScale, bool fixedExit, bool towe
         vec3 through = exp(-AtmSunDepth(AtmGround + Base + 0.5 * Thickness, cb.physSkySun.z, cb.physSky.w));
         vec3 physSun = luma(sun) * through / max(luma(through), 1e-4);
         sun = mix(sun, mix(physSun, sun, tint), share);
-        vec3 zenith = LINEAR_LOD(t_skyView, vec2(0.5, 1.0)).rgb * tableScale;
-        vec3 low = (LINEAR_LOD(t_skyView, vec2(0.0, 0.35)).rgb + LINEAR_LOD(t_skyView, vec2(0.5, 0.35)).rgb +
-            LINEAR_LOD(t_skyView, vec2(1.0, 0.35)).rgb) * (tableScale / 3.0);
-        zenith *= luma(skyTop) / max(luma(zenith), 1e-6);
-        low *= luma(skyLow) / max(luma(low), 1e-6);
-        vec3 physTop = mix(zenith, skyTop, tint);
-        vec3 physLow = mix(low, skyLow, tint);
-        ambientTop = mix(ambientTop, physTop * AmbientStrength * (1.0 - 0.4 * RainDark), share);
-        ambientBottom = mix(ambientBottom, mix(physLow, physTop, 0.5) * AmbientStrength * 0.5 * (1.0 - 0.6 * RainDark), share);
+        // UNOFFICIAL PhysicalSkyLight (push physicalSkyLight): the sky light at the physical sky's own brightness, as the .fx; off, as before.
+        if (pc.physicalSkyLight != 0u) {
+            // Physical sky light (see VolumetricClouds.fx.hlsl): sky-view table radiance per unit sunlight, integrated over
+            // the hemisphere each part of the cloud faces, times the sunlight above the air. AmbientStrength: 1 = physical.
+            float sunTOA = luma(sun) / max(luma(through), 1e-4);
+            vec3 up = vec3(0.0);
+            for (int ub = 0; ub < 3; ub++) {
+                float bandV = ub == 0 ? 0.35 : (ub == 1 ? 0.632 : 0.882);
+                float bandW = ub == 2 ? 0.234 : 0.383;
+                up += (LINEAR_LOD(t_skyView, vec2(0.0, bandV)).rgb + LINEAR_LOD(t_skyView, vec2(0.5, bandV)).rgb
+                    + LINEAR_LOD(t_skyView, vec2(1.0, bandV)).rgb) * (bandW / 3.0);
+            }
+            up *= 0.001;
+            float groundAlbedo = cb.physSkySun.w > 0.0 ? cb.physSkySun.w : 0.3 /* ground reflectance when the physical sky sets none (desert soil) */;
+            vec3 sunAtGround = exp(-AtmSunDepth(AtmGround, cb.physSkySun.z, cb.physSky.w)) * max(cb.physSkySun.z, 0.0);
+            vec3 groundRad = groundAlbedo / AtmPi * (sunAtGround + AtmPi * up);
+            vec3 physTopAbs = up * (sunTOA * 2.0 * AtmPi);
+            vec3 physLowAbs = groundRad * (sunTOA * 2.0 * AtmPi);
+            vec3 physTop = mix(physTopAbs, luma(physTopAbs) * skyTop / max(luma(skyTop), 1e-6), tint);
+            vec3 physLow = mix(physLowAbs, luma(physLowAbs) * skyLow / max(luma(skyLow), 1e-6), tint);
+            ambientTop = mix(ambientTop, physTop * AmbientStrength * (1.0 - 0.4 * RainDark), share);
+            ambientBottom = mix(ambientBottom, physLow * AmbientStrength * (1.0 - 0.6 * RainDark), share);
+        }
+        else {
+            vec3 zenith = LINEAR_LOD(t_skyView, vec2(0.5, 1.0)).rgb * tableScale;
+            vec3 low = (LINEAR_LOD(t_skyView, vec2(0.0, 0.35)).rgb + LINEAR_LOD(t_skyView, vec2(0.5, 0.35)).rgb +
+                LINEAR_LOD(t_skyView, vec2(1.0, 0.35)).rgb) * (tableScale / 3.0);
+            zenith *= luma(skyTop) / max(luma(zenith), 1e-6);
+            low *= luma(skyLow) / max(luma(low), 1e-6);
+            vec3 physTop = mix(zenith, skyTop, tint);
+            vec3 physLow = mix(low, skyLow, tint);
+            ambientTop = mix(ambientTop, physTop * AmbientStrength * (1.0 - 0.4 * RainDark), share);
+            ambientBottom = mix(ambientBottom, mix(physLow, physTop, 0.5) * AmbientStrength * 0.5 * (1.0 - 0.6 * RainDark), share);
+        }
     }
     float lightStep = (towers ? BaseThickness : Thickness) / 12.0;   // (Towering: the ordinary clouds keep their light march)
     float lightRise = max(light.z, 0.1);
