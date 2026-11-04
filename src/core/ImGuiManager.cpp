@@ -1120,6 +1120,7 @@ static const char* const kToneMappers[] = {
 	"8 - Uchimura (GT)",
 	"9 - AGX",
 	"10 - DICE",
+	"11 - GT7 (Gran Turismo 7)",
 };
 static const char* const kWhenShown[] = { "0 - Always", "1 - Not during dialog", "2 - Only during dialog", "3 - Disabled" };
 // SleepingMode Mode (no comment in the settings file): the cases of ShowSleepWaitMenuHook (src/core/Hooks/SleepingCommon.cpp)
