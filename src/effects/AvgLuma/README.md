@@ -102,3 +102,11 @@ Cost: D3D9: a 1 x 1 target with 112 samples and 13 depth reads (cheap). Compute:
 5. AvgLumaHistogram.comp (kept) must agree with the state layout in section 7. Not verified.
 6. The exact average (compute) and the 112-sample average (D3D9) still differ, as before; the D3D9 pass keeps its sampling.
 7. Histogram bin layout (126 log2 steps) is unchanged; it lives in the kept histogram shader.
+
+## GT7 adaptation (technique 1, [Shaders.Exposure.Main] Mode 1)
+
+With Exposure's `Mode` 1, EffectChain draws technique 1 ("GT7", PS AvgLumaGT7) instead of the pass above, and RenderCompute stands aside (no compute port). It meters and adapts for Exposure's GT7 technique (see Exposure's README, section 10, and Effects/Includes/GT7Adaptation.hlsl) and keeps the focus as technique 0 does:
+- R = short-term adaptation level, G = long-term adaptation level (log2 luminance, scene units), B = the depth-of-field focus (same as technique 0, so DepthOfField reads it unchanged), A = white-balance colour temperature in mired (below 50 = not initialised: the first frame starts from the measurement).
+- Extra inputs: TESR_ShadowAtlas (stage 3) and TESR_OrthoMapBuffer (stage 4), the sun cascades and the ortho transform (Includes/Shadows.hlsl, SunCascades.hlsl), TESR_SkyIrradiance, TESR_SunsetColor, TESR_ShadowFade, TESR_ShadowSunLight, TESR_ShadowAmbientLight, TESR_GT7AdaptData, TESR_HDRData and the weather colours.
+- The texel is cleared when Mode changes (EffectChain), since the two techniques keep different values in it.
+- Technique 0 is unchanged and compiles to the same code as before.

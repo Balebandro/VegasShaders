@@ -1126,20 +1126,29 @@ void ShaderManager::PreStep_LumaExposureBloom(ChainContext& ctx) {
 			GpuProfileScope gpuLuma(avgLumaTimer, Device);
 			// UNOFFICIAL 2026-10-23 (NVR DXVK): the compute version when AvgLumaCompute is on and the NVR DXVK extension is
 			// present (effects\AvgLuma.cpp); otherwise, and when it fails, the D3D9 pass as before.
+			// UNOFFICIAL GT7 adaptation ([Shaders.Exposure.Main] Mode 1): technique 1 of AvgLuma.fx keeps a different state in the 1x1 texel
+			// (log2 adaptation levels and a colour temperature); it is cleared when the mode changes so neither technique reads the other's.
+			static int lumaMode = -1;
+			const int exposureMode = Effects.Exposure ? Effects.Exposure->Settings.Mode : 0;
+			if (exposureMode != lumaMode) {
+				if (Effects.AvgLuma->Textures.AvgLumaSurface) Device->ColorFill(Effects.AvgLuma->Textures.AvgLumaSurface, NULL, D3DCOLOR_ARGB(0, 0, 0, 0));
+				lumaMode = exposureMode;
+			}
 			const bool computed = Effects.AvgLuma->RenderCompute(Device);
 			if (!computed) {
-				RenderEffectToRT(Effects.AvgLuma->Textures.AvgLumaSurface, Effects.AvgLuma, NULL);
+				RenderEffectToRT(Effects.AvgLuma->Textures.AvgLumaSurface, Effects.AvgLuma, NULL, Effects.Exposure ? Effects.Exposure->Technique() : 0);
 				Device->SetRenderTarget(0, RenderTarget); 	// restore device used for effects
 			}
-			Effects.AvgLuma->CheckCompute(Device, !computed && TheSettingManager->SettingsMain.Main.AvgLumaComputeCheck > 0);	// test tool, off by default
+			Effects.AvgLuma->CheckCompute(Device, !computed && TheSettingManager->SettingsMain.Main.AvgLumaComputeCheck > 0 && exposureMode == 0);	// test tool, off by default
 		}
 		{
 			GpuProfileScope gpuExposure(exposureTimer, Device);
 			// UNOFFICIAL (postchain): with MaxBrightness 0 (the Night default) the pass returns delinearize(linearize(c)), which is c
 			// again at the buffer's precision (c is a half float; the round trip's 1e-6 error rounds back to it): a full-screen
 			// read and write for nothing. Skipped, the image is left where it is (no chain commit).
-			if (!(TheSettingManager->SettingsMain.Main.SkipIdentityExposure && Effects.Exposure->Constants.Data.y == 0.0f))
-				{ Effects.Exposure->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Exposure); }
+			// (UNOFFICIAL GT7 adaptation, Mode 1: its technique 1; skipped only with both its strengths at 0, Exposure::IsIdentity.)
+			if (!(TheSettingManager->SettingsMain.Main.SkipIdentityExposure && Effects.Exposure->IsIdentity()))
+				{ Effects.Exposure->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, Effects.Exposure->Technique(), false, SourceSurface); PixelInspector::AfterFrame(Effects.Exposure); }
 		}
 		{
 			GpuProfileScope gpuBloom(bloomTimer, Device);

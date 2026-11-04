@@ -1,4 +1,8 @@
 [_Shaders.Exposure.Main]
+Mode = 0                               # UNOFFICIAL, live: 0 = the classic exposure (the settings above). 1 = GT7-style adaptation (Polyphony Digital's Gran Turismo 7, SIGGRAPH 2025): two-stage auto-exposure (fast pupil and slow receptor adaptation, light faster than dark, limited so sunny days stay mildly glaring and nights stay dark) that meters the light reaching the eye from the whole field of view outdoors (sky dome, sky openness and sun shadow, not only the screen), plus auto white balance. Calibrate the Tonemapping Exposure once in full midday sun: GT7's limits follow it. Uses the D3D9 pass (AvgLumaCompute and Histogram stand aside); the GT7 values below set it, MinBrightness / MaxBrightness / the adapt speeds do not.
+GT7AutoExposure = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): strength of the GT7-style auto-exposure by day. 1 = full, 0 = off (the white balance can stay on).
+GT7WhiteBalance = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): strength of the auto white balance toward daylight (D65) by day: warm or blue light is partly neutralised, as a camera or the eye does. 0 = off.
+GT7WeatherLight = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): how much the weather's sun, sky and ambient colours count in the white balance by day, against the screen's own colour. 1 = full weight (outdoors); 0 = the screen only.
 Histogram = false                      # UNOFFICIAL (2026-10-26), CHANGES THE IMAGE, needs the DXVK fork (does nothing on native D3D9 or stock DXVK): the auto exposure measures the screen with a brightness histogram and leaves out the darkest and the brightest pixels (below), so a sun disc, a lamp or a bright doorway no longer pulls the whole picture darker, and black corners no longer brighten it. Same units as before (MinBrightness / MaxBrightness keep their meaning). Applies immediately.
 HistogramLowPercent = 10               # UNOFFICIAL [0-90] With Histogram: the share of the darkest pixels left out of the exposure's average, in percent.
 HistogramHighPercent = 5               # UNOFFICIAL [0-90] With Histogram: the share of the brightest pixels left out of the exposure's average, in percent.
@@ -8,12 +12,18 @@ MaxBrightness = 0.5                    # Brightness treshold above which the scr
 MinBrightness = 0.2                    # Brightness treshold below which the screen will be brightened.
 
 [_Shaders.Exposure.Interiors]
+GT7AutoExposure = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): strength of the GT7-style auto-exposure indoors. 1 = full, 0 = off (the white balance can stay on).
+GT7WhiteBalance = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): strength of the auto white balance toward daylight (D65) indoors: warm or blue light is partly neutralised, as a camera or the eye does. 0 = off.
+GT7WeatherLight = 0.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): how much the weather's sun, sky and ambient colours count in the white balance indoors, against the screen's own colour. Indoors the weather's sky is not the light: 0 = the screen only.
 DarkAdaptSpeed = 0.2                   # Speed for the exposure to adjust when the screen gets darker, in brightness units per second. UNOFFICIAL: 0.2 since P50, so it adjusts over a second or two; the old default 50 followed every blinking sign within a few frames and made the screen flicker (the Strip). A saved 50 is moved to 0.2 once.
 LightAdaptSpeed = 0.2                  # Speed for the exposure to adjust when the screen gets brighter, in brightness units per second. UNOFFICIAL: 0.2 since P50 (was 50, which flickered); see DarkAdaptSpeed.
 MaxBrightness = 0.3                    # Brightness treshold above which the screen will be darkened.
 MinBrightness = 1.0                    # Brightness treshold below which the screen will be brightened.
 
 [_Shaders.Exposure.Night]
+GT7AutoExposure = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): strength of the GT7-style auto-exposure at night. 1 = full, 0 = off (the white balance can stay on).
+GT7WhiteBalance = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): strength of the auto white balance toward daylight (D65) at night: warm or blue light is partly neutralised, as a camera or the eye does. 0 = off.
+GT7WeatherLight = 1.0                 # [0.0-1.0] UNOFFICIAL, with Mode 1 (GT7): how much the weather's sun, sky and ambient colours count in the white balance at night, against the screen's own colour. 1 = full weight (outdoors); 0 = the screen only.
 DarkAdaptSpeed = 0.2                   # Speed for the exposure to adjust when the screen gets darker, in brightness units per second. UNOFFICIAL: 0.2 since P50, so it adjusts over a second or two; the old default 50 followed every blinking sign within a few frames and made the screen flicker (the Strip). A saved 50 is moved to 0.2 once.
 LightAdaptSpeed = 0.2                  # Speed for the exposure to adjust when the screen gets brighter, in brightness units per second. UNOFFICIAL: 0.2 since P50 (was 50, which flickered); see DarkAdaptSpeed.
 MaxBrightness = 0.0                    # Brightness treshold above which the screen will be darkened.

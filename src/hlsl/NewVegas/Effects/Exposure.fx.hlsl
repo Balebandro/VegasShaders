@@ -8,9 +8,22 @@
 #include "Includes/Helpers.hlsl"
 
 float4 TESR_ExposureData;	// x: MinBrightness (pivot), y: MaxBrightness (strength), z, w: adaptation speeds (AvgLuma)
+// UNOFFICIAL GT7 adaptation ([Shaders.Exposure.Main] Mode 1, technique GT7 below): the weather lights for its white balance
+float4 TESR_SunColor;
+float4 TESR_SkyColor;
+float4 TESR_SunAmbient;
+float4 TESR_HDRData;		// y: Tonemapping Exposure (the setup's scene-to-display scale)
+float4 TESR_SunDirection;
 
 sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 sampler2D TESR_AvgLumaBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+
+#include "Includes/GT7Adaptation.hlsl"
+
+// The green-magenta tint of the light, from the weather's sun, sky and ambient (they change smoothly by themselves).
+static const float3 envXYZ = GT7EnvironmentXYZ(TESR_SunColor.rgb, TESR_SunDirection.z, TESR_SkyColor.rgb, TESR_SunAmbient.rgb, GT7EnvWeight());
+static const float2 envXY = GT7LightXY(envXYZ);
+static const float envDuv = clamp(GT7XYtoDuv(envXY, clamp(GT7XYtoCCT(envXY), GT7WB_MIN_K, GT7WB_MAX_K)), -GT7WB_MAX_DUV, GT7WB_MAX_DUV);
 
 struct VSOUT
 {
@@ -49,6 +62,23 @@ float4 ExposurePS(VSOUT IN) : COLOR
     return float4(delinearize(corrected), 1.0f);
 }
 
+// GT7 adaptation: white balance toward D65 and exposure from AvgLuma's GT7 state (technique GT7 there).
+float4 ExposureGT7PS(VSOUT IN) : COLOR0
+{
+	float3 color = linearize(tex2D(TESR_RenderedBuffer, IN.UVCoord).rgb);
+	float4 state = tex2D(TESR_AvgLumaBuffer, float2(0.5, 0.5));
+
+	if (state.a > 50.0) {
+		// White balance toward D65 (colour temperature smoothed over time, tint from the weather lights).
+		float T = 1e6 / state.a;
+		color = GT7WhiteBalance(color, GT7WhiteXY(T, envDuv), GT7WBStrength());
+
+		// Exposure: only below the light adaptation limit, as far as the short-term adaptation has got.
+		color *= exp2(max(GT7LightLimit() - state.r, 0.0) * GT7AEStrength());
+	}
+	return delinearize(float4(max(color, 0.0), 1));
+}
+
 technique
 {
     pass
@@ -56,4 +86,14 @@ technique
         VertexShader = compile vs_3_0 FrameVS();
         PixelShader = compile ps_3_0 ExposurePS();
     }
+}
+
+// UNOFFICIAL technique 1: GT7 adaptation ([Shaders.Exposure.Main] Mode 1). D3D9 only (Exposure::ExtRender keeps technique 0).
+technique GT7
+{
+	pass
+	{
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 ExposureGT7PS();
+	}
 }

@@ -1124,6 +1124,7 @@ static const char* const kToneMappers[] = {
 static const char* const kWhenShown[] = { "0 - Always", "1 - Not during dialog", "2 - Only during dialog", "3 - Disabled" };
 // SleepingMode Mode (no comment in the settings file): the cases of ShowSleepWaitMenuHook (src/core/Hooks/SleepingCommon.cpp)
 static const char* const kRestModes[] = { "0 - Always (Wait, Sit, Sleep)", "1 - Sleeping only", "2 - Sitting only", "3 - Sitting & Sleeping" };
+static const char* const kExposureModes[] = { "0 - Classic (screen average)", "1 - GT7 (full-field, white balance)" };	// UNOFFICIAL [Shaders.Exposure.Main] Mode
 static const char* const kShadowQualities[] = { "0 - Low", "1 - Medium", "2 - High", "3 - Full", "4 - Custom" };
 static const char* const kShadowFormats[] = { "0 - 16 bit", "1 - 32 bit" };
 static const char* const kCascadeSizes[] = { "0 - 1024", "1 - 1536", "2 - 2048", "3 - 2560", "4 - 3072", "5 - 3584", "6 - 4096" };
@@ -1142,6 +1143,7 @@ static const Choices* ChoicesFor(const char* section, const char* key) {
 	static const std::unordered_map<std::string, Choices> kBySetting = {
 		{ "Shaders.Tonemapping.Main.TonemappingMode", NAMES(kToneMappers) },
 		{ "Shaders.Tonemapping.Interiors.TonemappingMode", NAMES(kToneMappers) },
+		{ "Shaders.Exposure.Main.Mode", NAMES(kExposureModes) },
 		{ "Shaders.Cinema.Main.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.FirstPersonView.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.ThirdPersonView.Mode", NAMES(kWhenShown) },

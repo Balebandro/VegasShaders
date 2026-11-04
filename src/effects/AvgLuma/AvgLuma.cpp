@@ -94,6 +94,13 @@ bool AvgLumaEffect::RenderCompute(IDirect3DDevice9* Device) {
 	const ExposureEffect* exposure = TheShaderManager->Effects.Exposure;
 	const bool histogramWanted = exposure && exposure->Settings.Histogram;
 	if (!TheSettingManager->SettingsMain.Main.AvgLumaCompute && !histogramWanted) return false;
+	// UNOFFICIAL GT7 adaptation ([Shaders.Exposure.Main] Mode 1): its state and metering are the D3D9 technique 1's (no compute port).
+	if (exposure && exposure->GT7Mode()) {
+		static bool said = false;
+		if (!said) Logger::Log("UNOFFICIAL AvgLuma: the GT7 exposure mode uses the D3D9 pass (AvgLumaCompute and Histogram stand aside)");
+		said = true;
+		return false;
+	}
 	// UNOFFICIAL 2026-10-27 RenderScale v2: the compute shaders read the whole screen; a rect frame takes the D3D9 pass (it reads
 	// only the drawn part). Histogram therefore gives the plain average while RenderScale is below 1.
 	if (RenderRect::Active()) return false;
