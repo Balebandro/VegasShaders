@@ -29,7 +29,8 @@ void main() {
     vec3 view = WorldToViewDir(d);
     if (view.z > 0.05) {
         vec2 at = ToScreen(view);
-        if (all(greaterThan(at, vec2(0.002))) && all(lessThan(at, vec2(0.998))) && readDepthLod(at) >= farZ * 0.98 && !IsWeapon(at)) {
+        vec2 s01 = rectToScreen(at);   // (UNOFFICIAL 2026-11-03 RenderScale < 1: at is in the rect; the edge test on the screen point)
+        if (all(greaterThan(s01, vec2(0.002))) && all(lessThan(s01, vec2(0.998))) && readDepthLod(at) >= farZ * 0.98 && !IsWeapon(at)) {
             vec3 screen = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
             colour = seen > 0.0 ? mix(colour, screen, 0.5) : screen;   // a little smoothing against flicker (rain streaks, dither)
             seen = 1.0;

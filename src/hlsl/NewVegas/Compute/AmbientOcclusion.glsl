@@ -32,6 +32,9 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 rtReproject;              // this frame's view space -> last frame's clip space (BounceLightMath.h), as stored
     vec4 rtTemporal;               // x last frame's share (0: no history), y pixels of motion that halve it, z frame number (0-1023),
                                    // w [Shaders.AmbientOcclusion.RT] DebugView
+    // UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md): read by RtAOInput / AmbientOcclusionTemporalRT only
+    vec4 rtRect;                   // xy this frame's RenderRect scale (the frame is the top-left xy part of the targets; 1 when off),
+                                   // zw the scale the RT history was made at
 } cb;
 
 // Per pass (24 bytes).

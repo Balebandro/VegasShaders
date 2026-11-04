@@ -223,6 +223,10 @@ namespace ManyLamps {
 	inline bool TableFailed = false;
 	inline UInt32 TableFrame = 0;		// FrameId the table was filled for
 	inline std::unordered_map<const ShadowSceneLight*, int> TableIndex;
+	// UNOFFICIAL 2026-11-03 (rtspec) the table's ACTIVE lamps (the ones the deferred pass bins) for the reference path tracer (RtPathTrace.cpp
+	// PTGameLamps 4): world position, reach (Spec.r), colour as in the table (linear when linear lighting is compiled in); TableFrame says when
+	struct ActiveLamp { float pos[3], reach, colour[3]; };
+	inline std::vector<ActiveLamp> ActiveLamps;
 	inline unsigned StatTableMissing = 0, StatTableLamps = 0;
 	// UNOFFICIAL 2026-10-31 LampTableStandalone / TableLamps (F10 line, BeginFrame)
 	inline double StatBuildMs = 0;
@@ -401,6 +405,7 @@ namespace ManyLamps {
 		std::vector<const ShadowSceneLight*> active;	// UNOFFICIAL 2026-10-30 ClusteredLamps: the lamps the game has on
 		static std::vector<const ShadowSceneLight*> order;	// UNOFFICIAL 2026-10-31 TableLamps: lamp n of the table
 		order.clear();
+		ActiveLamps.clear();
 		const bool linear = LinearCompiled && LinearPreDecode::Gamma > 1.0f;
 		const float gamma = LinearPreDecode::Gamma;
 		int n = 0;
@@ -421,7 +426,10 @@ namespace ManyLamps {
 			order.push_back(light);
 			// as GetNumberOfActiveNonShadowLights: not switched off for the view (+0x110), not culled, not flagged (+0xEC)
 			const UInt8* raw8 = (const UInt8*)light;
-			if (*(const UInt16*)(raw8 + 0x110) != 0xFF && !(((const UInt8*)source)[0x30] & 1) && !raw8[0xEC]) active.push_back(light);
+			if (*(const UInt16*)(raw8 + 0x110) != 0xFF && !(((const UInt8*)source)[0x30] & 1) && !raw8[0xEC]) {
+				active.push_back(light);
+				ActiveLamps.push_back({ { p[0], p[1], p[2] }, p[3], { p[4], p[5], p[6] } });
+			}
 		}
 		ClusterLive = false;
 		// (the lists only at a world-scene draw: an earlier draw of the frame may be a reflection or a cube map, with its own camera and size)

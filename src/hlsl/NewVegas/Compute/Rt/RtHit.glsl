@@ -74,3 +74,38 @@ vec3 rtHitGlow(uint instance, uint primitive, vec2 bary) {
 #endif
 	return rtHitAlbedo(instance, primitive, bary);
 }
+
+// UNOFFICIAL 2026-11-02 the hit's normal with its normal map ([Main.Main.RayTracing] NormalTextures; record flag 0x80): n = the surface
+// normal in scene space facing the ray (the triangle's, or a smoother one), toScene = the instance's object-to-world rotation. The
+// tangent frame is the triangle's own (from its positions and texcoords; no vertex tangents in the arena), made orthogonal to n; the
+// map's texel (64 x 64 a texture, as stored: rgb x 2 - 1) bends n. A slot without the map (0) or a degenerate triangle: n unchanged.
+// #define RT_NORMAL_ATLAS <the normal atlas: layout(rgba8) readonly image2D> before including, with RtCore::NormalAtlasImage() bound.
+#define RT_HIT_NORMAL_FLAG 0x80u
+#ifdef RT_NORMAL_ATLAS
+vec3 rtHitNormalMapped(uint instance, uint primitive, vec2 bary, vec3 n, mat3 toScene) {
+	if ((records[instance].flags & RT_HIT_NORMAL_FLAG) == 0u || !rtHitHasTexcoords(instance) || records[instance].vertexOffset == 0xFFFFFFFFu) return n;
+	const uint slot = records[instance].flags >> 16;
+	const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
+	const vec2 uv = rtHitTexcoord(instance, primitive, bary);
+	const vec3 m = imageLoad(RT_NORMAL_ATLAS, origin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;
+	if (dot(m, m) < 1.0e-4) return n;
+	vec3 t = m * 2.0 - 1.0;
+	const uvec3 i = rtHitTriangle(instance, primitive);
+	const vec3 p0 = rtHitObjectPosition(instance, i.x), p1 = rtHitObjectPosition(instance, i.y), p2 = rtHitObjectPosition(instance, i.z);
+	const uint uvOffset = floatBitsToUint(records[instance].albedo.w);
+	const vec2 u0 = vec2(uintBitsToFloat(words[uvOffset + 2u * i.x]), uintBitsToFloat(words[uvOffset + 2u * i.x + 1u]));
+	const vec2 u1 = vec2(uintBitsToFloat(words[uvOffset + 2u * i.y]), uintBitsToFloat(words[uvOffset + 2u * i.y + 1u]));
+	const vec2 u2 = vec2(uintBitsToFloat(words[uvOffset + 2u * i.z]), uintBitsToFloat(words[uvOffset + 2u * i.z + 1u]));
+	const vec3 e1 = toScene * (p1 - p0), e2 = toScene * (p2 - p0);
+	const vec2 d1 = u1 - u0, d2 = u2 - u0;
+	const float det = d1.x * d2.y - d2.x * d1.y;
+	if (abs(det) < 1.0e-12) return n;
+	vec3 tangent = (e1 * d2.y - e2 * d1.y) / det, bitangent = (e2 * d1.x - e1 * d2.x) / det;
+	tangent -= n * dot(n, tangent);
+	if (dot(tangent, tangent) < 1.0e-12) return n;
+	tangent = normalize(tangent);
+	const vec3 b = cross(n, tangent) * (dot(cross(n, tangent), bitangent) < 0.0 ? -1.0 : 1.0);
+	const vec3 bent = normalize(tangent * t.x + b * t.y + n * max(t.z, 0.05));
+	return bent;
+}
+#endif

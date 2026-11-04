@@ -25,9 +25,9 @@
 #include <stdint.h>
 
 #define NVR_RT_MAGIC            0x54525256u   // 'VRRT'
-#define NVR_RT_PROTOCOL_VERSION 4u            // 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders
+#define NVR_RT_PROTOCOL_VERSION 5u            // 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images
 #define NVR_RT_FRAME_RING       4u            // frame records; NVR waits for consumedFrame before reusing one
-#define NVR_RT_MAX_IMAGES       32u           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20)
+#define NVR_RT_MAX_IMAGES       48u           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
 #define NVR_RT_MAX_SHADERS      32u           // trace shaders (.spv paths), registered any time (16 until 2026-10-30: the four RT strands used 15)
 #define NVR_RT_MAX_OPS          2048u         // geometry operations per frame
 #define NVR_RT_MAX_INSTANCES    32768u        // scene instances per frame
@@ -35,8 +35,9 @@
 #define NVR_RT_PASS_IMAGES      8u            // images bound to one pass (bindings 2..9) in NvrRtPass::images
 // UNOFFICIAL 2026-10-30 (rt-ao-sky: GI merged into the AO pass): up to 4 more images (8..11) at bindings 12..15, their indices as
 // bytes in NvrRtPass::extraImages (the old pad word: same layout, protocol 3). A helper older than this skips a pass with more than 8.
-#define NVR_RT_PASS_IMAGES_MAX  12u
-#define NVR_RT_PASS_EXTRA_BINDING 12u          // binding of image 8 (9..11 follow)
+// UNOFFICIAL 2026-11-02 (protocol 5, the reference path tracer): 16 images, 12..15 at bindings 16..19 (NvrRtPass::extraImages2).
+#define NVR_RT_PASS_IMAGES_MAX  16u
+#define NVR_RT_PASS_EXTRA_BINDING 12u          // binding of image 8 (9..15 follow: 13..19)
 #define NVR_RT_PASS_CONSTANTS   512u          // bytes of a pass's uniform block (binding 1)
 #define NVR_RT_ARENA_IMAGE      0u
 #define NVR_RT_BINDING_RECORDS  10u           // readonly std430 SSBO: NvrRtInstanceRecord per instance, by rayQueryGetIntersectionInstanceIdEXT
@@ -58,6 +59,13 @@
 // floatBitsToUint(albedo.w) (as alpha-tested ones) and its diffuse colour is the albedo atlas' slot (flags >> 16) (RGBA8, the same
 // slots as the alpha atlas). src/hlsl/NewVegas/Compute/Rt/RtHit.glsl reads it.
 #define NVR_RT_RECORD_TEXTURED      0x40u
+// UNOFFICIAL 2026-11-02 normal textures ([Main.Main.RayTracing] NormalTextures, with HitTextures): the draw's normal map (tangent space,
+// as stored) is in the normal atlas at the same slot (RGBA8; a slot filled before the map was known reads 0: no map). RtHit.glsl rtHitNormalMapped.
+#define NVR_RT_RECORD_NORMAL        0x80u
+// UNOFFICIAL 2026-11-03 the material rule (VegasShaders.materials.txt, the object shaders' table) in bits 26..31 of a textured /
+// alpha-tested record: bits 26-28 roughness (0 unknown, k = 1..7: k / 7), bits 29-31 metal (0 unknown, k = 1..7: (k - 1) / 6)
+#define NVR_RT_RECORD_ROUGH_SHIFT   26u
+#define NVR_RT_RECORD_METAL_SHIFT   29u
 #define NVR_RT_MASK_ACTOR           0x20u     // UNOFFICIAL 2026-10-29: skinned actors ([Main.Main.RayTracing] Actors), posed every frame
 #define NVR_RT_MASK_ALPHA           0x10u     // the instance mask of alpha-tested geometry (rays that cannot test alpha leave it out)
 #define NVR_RT_MASK_PLAYER          0x40u     // UNOFFICIAL 2026-10-30: the player's own rigid parts with Actors on (the third-person body's
@@ -146,7 +154,7 @@ struct NvrRtInstanceRecord {         // 32 bytes
 	uint32_t	indexOffset;         // filled by the helper: word offset of its uint triangle list (indices from its vertex 0)
 };
 
-struct NvrRtPass {                   // 576 bytes
+struct NvrRtPass {                   // 580 bytes (protocol 5)
 	uint32_t	shader;              // index into shaderPaths
 	uint32_t	groupsX, groupsY, groupsZ;
 	uint32_t	imageCount;          // images[0 .. imageCount-1] bound at bindings 2 .. (storage images, GENERAL)
@@ -154,10 +162,12 @@ struct NvrRtPass {                   // 576 bytes
 	uint32_t	writeMask;           // bit i: the pass writes images[i] (a barrier after the pass for those)
 	uint32_t	constantsSize;
 	uint32_t	extraImages;         // images 8..11: byte i - 8 (imageCount > 8 only; was pad)
+	uint32_t	extraImages2;        // images 12..15: byte i - 12 (protocol 5)
 	uint8_t		constants[NVR_RT_PASS_CONSTANTS];
 };
 
-inline uint32_t NvrRtPassImage(const NvrRtPass& p, uint32_t i) { return i < NVR_RT_PASS_IMAGES ? p.images[i] : (p.extraImages >> (8u * (i - NVR_RT_PASS_IMAGES))) & 0xFFu; }
+inline uint32_t NvrRtPassImage(const NvrRtPass& p, uint32_t i) { return i < NVR_RT_PASS_IMAGES ? p.images[i] : i < NVR_RT_PASS_IMAGES + 4u ?
+	(p.extraImages >> (8u * (i - NVR_RT_PASS_IMAGES))) & 0xFFu : (p.extraImages2 >> (8u * (i - NVR_RT_PASS_IMAGES - 4u))) & 0xFFu; }
 inline uint32_t NvrRtPassBinding(uint32_t i) { return i < NVR_RT_PASS_IMAGES ? 2u + i : NVR_RT_PASS_EXTRA_BINDING + (i - NVR_RT_PASS_IMAGES); }
 
 struct NvrRtFrame {
@@ -234,7 +244,7 @@ struct NvrRtShared {
 static_assert(sizeof(NvrRtImageDesc) == 56, "NvrRtImageDesc layout");
 static_assert(sizeof(NvrRtGeometryOp) == 32, "NvrRtGeometryOp layout");
 static_assert(sizeof(NvrRtInstance) == 64, "NvrRtInstance layout");
-static_assert(sizeof(NvrRtPass) == 576, "NvrRtPass layout");
+static_assert(sizeof(NvrRtPass) == 580, "NvrRtPass layout");	// (protocol 5: + extraImages2)
 static_assert(sizeof(NvrRtInstanceRecord) == 32, "NvrRtInstanceRecord layout");
 static_assert(sizeof(NvrRtFrame) % 8 == 0, "NvrRtFrame layout");
 static_assert(sizeof(NvrRtShared) % 8 == 0, "NvrRtShared layout");

@@ -30,6 +30,10 @@ namespace Paths {
 	constexpr const char* NewDataRoot = "Data\\VegasShaders\\";
 	constexpr const char* OldDataRoot = "Data\\NVR\\";	// PresetManager also takes over files from here (ImportOldData)
 
+	// The two names of the shader folder (2026-11-03: named here for the install check, InstallCheck.h)
+	constexpr const char* NewShaderRoot = "Data\\Shaders\\VegasShaders\\";
+	constexpr const char* OldShaderRoot = "Data\\Shaders\\NewVegasReloaded\\";
+
 	// The shader folder as messages name it, without the leading "Data\" ("Shaders\VegasShaders\").
 	const char* ShaderRootShort();
 
@@ -77,4 +81,8 @@ namespace Paths {
 	// The plugin DLL's file name, and the old one: both in one plugins folder would load the plugin twice (Main.cpp logs it).
 	constexpr const char* DllName = "VegasShaders.dll";
 	constexpr const char* OldDllName = "NewVegasReloaded.dll";
+	// 2026-11-03: the other-named DLL Main.cpp found next to this one (an old NewVegasReloaded.dll left by an upgrade), full path;
+	// empty when there is none. Both load (xNVSE loads every DLL in the folder) and both replace the game's shaders: white or
+	// broken objects and ground (three testers, 1.0.1). ImGuiManager shows a large warning while it is set (RenderTwinDllWarning).
+	inline std::string TwinDll;
 }

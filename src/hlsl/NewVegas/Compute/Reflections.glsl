@@ -58,6 +58,8 @@ layout(set = 2, binding = 0, std140) uniform Constants {
                                 // panorama (SkyPanorama, ReflectionsSkyPano.frag) instead, z the clouds' brightness (TESR_CloudsLayout.w)
     vec4 weapon;                // UNOFFICIAL 2026-10-30 RT weapon reflections ([Shaders.Reflections.RT] Weapon): x 1 on (RT traced this frame),
                                 // y tan(world FOV / 2) / tan(1st-person FOV / 2), z the strength, w the roughness without material data
+    vec4 renderScale;           // UNOFFICIAL 2026-11-03 TESR_RenderScale (Includes/RenderRect.hlsl): xy this frame's RenderScale rect, zw 1 / xy;
+                                // (1, 1, 1, 1) in a native frame. Only the RT passes (RayGen, Resolve, SkyPano) run in rect frames.
 } cb;
 
 layout(push_constant) uniform Push {
@@ -112,7 +114,15 @@ const float BrightestReflection = 16.0;   // linear: a lamp's core reflected in 
 
 float readDepthLod(vec2 coord) { return textureLod(sampler2D(t_depth, POINT_S), coord, 0.0).x * farZ; }
 
+// UNOFFICIAL 2026-11-03 RT reflections at RenderScale < 1 (docs/next/RT-RENDERSCALE.md): Includes/RenderRect.hlsl's rules, as the .fx
+// follows them. In a rect frame the frame is the top-left renderScale.xy part of every screen-shaped texture: uv (texture coordinates)
+// runs 0..renderScale.xy, the projection maths wants the screen point it shows (rectToScreen), and a projected point is read back at
+// screenToRect of it. In a native frame renderScale is 1 and every function here changes nothing.
+vec2 rectToScreen(vec2 uv) { return uv * cb.renderScale.zw; }
+vec2 screenToRect(vec2 s01) { return s01 * cb.renderScale.xy; }
+
 vec3 toWorld(vec2 tex) {
+    tex = rectToScreen(tex);   // (2026-11-03, as Includes/Depth.hlsl)
     vec3 v = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
     v += (1.0 / cb.projectionTransform[0][0] * (2.0 * tex.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
     v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * tex.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
@@ -131,11 +141,13 @@ float GradientNoise(vec2 pixel) {
 
 // View-space position of a screen point at a linear depth (NVR's projection has no off-centre terms).
 vec3 ViewPosition(vec2 uv, float depth) {
+    uv = rectToScreen(uv);   // (2026-11-03: uv is a texture coordinate, as in the .fx)
     return vec3((uv.x * 2.0 - 1.0) / cb.projectionTransform[0][0], (1.0 - uv.y * 2.0) / cb.projectionTransform[1][1], 1.0) * depth;
 }
 
 vec2 ToScreen(vec3 view) {
-    return vec2(view.x * cb.projectionTransform[0][0] / view.z * 0.5 + 0.5, 0.5 - view.y * cb.projectionTransform[1][1] / view.z * 0.5);
+    // (2026-11-03: a texture coordinate, as in the .fx: the rect's in a rect frame)
+    return screenToRect(vec2(view.x * cb.projectionTransform[0][0] / view.z * 0.5 + 0.5, 0.5 - view.y * cb.projectionTransform[1][1] / view.z * 0.5));
 }
 
 bool IsWeapon(vec2 uv) {

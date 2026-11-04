@@ -28,6 +28,8 @@ public:
 	// Copy of the last lines written via Log() (not Debug()), for the in-game log window. Log() can be called from any
 	// thread, so the copy is taken under a mutex and handed back by value: the caller never holds the lock while drawing.
 	static void GetRecentLines(std::deque<std::string>& lines);
+	// 2026-11-03: text scrubbed the way every log line is (LogScrub.h: <GAME>, no user / computer names), for the bug report
+	static std::string Scrub(const std::string& text);
 
 	static FILE*		LogFile;	// null until Initialize
 	static std::string	FilePath;	// UNOFFICIAL 2026-11-01: the open log's path (game folder relative or absolute; the report folder copies it)

@@ -17,9 +17,10 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 layout(location = 1) out vec4 o_history;
 
-vec3 reconstructPosition(vec2 uv) {
+// (2026-11-03) the depth read at the texel (uv), the point rebuilt at its screen point s (uv / the RenderRect scale; = uv when off)
+vec3 reconstructPosition(vec2 uv, vec2 s) {
     float z = projectedDepthFromLinear(LINEAR_LOD(t_depth, uv).x);
-    vec4 viewSpace = cb.invProjectionTransform * vec4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, z, 1.0);
+    vec4 viewSpace = cb.invProjectionTransform * vec4(s.x * 2.0 - 1.0, (1.0 - s.y) * 2.0 - 1.0, z, 1.0);
     return viewSpace.xyz / viewSpace.w;
 }
 
@@ -27,13 +28,18 @@ void main() {
     vec4 current = POINT_LOD(t_current, uv);
     o_color = current;
     o_history = current;
+    // UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md): the frame is the top-left cb.rtRect.xy part of the targets,
+    // last frame's history the top-left cb.rtRect.zw part of its own (the C++ restarts the history when the two differ). Past the rect:
+    // a history no depth matches.
+    vec2 s = uv / cb.rtRect.xy;
+    if (s.x > 1.0 || s.y > 1.0) { o_history = vec4(1.0, 0.0, 0.0, 1.0); return; }
     if (!(cb.rtTemporal.x > 0.0) || current.y >= endFade) return;
-    vec3 origin = reconstructPosition(uv);
+    vec3 origin = reconstructPosition(uv, s);
     vec4 clip = cb.rtReproject * vec4(origin, 1.0);   // mul(float4(origin, 1), reproject)
     float w = max(clip.w, 0.001);
     vec3 last = vec3(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5, clip.w);
     vec2 texel = cb.aoLayout.zw;
-    vec2 position = last.xy / texel - 0.5;
+    vec2 position = last.xy * cb.rtRect.zw / texel - 0.5;   // (2026-11-03: in the history's rect)
     vec2 base = floor(position);
     vec2 f = position - base;
     vec2 t00 = POINT_LOD(t_history, (base + 0.5) * texel).rg;
@@ -45,16 +51,17 @@ void main() {
     float found = dot(weight, vec4(1.0));
     float history = dot(vec4(t00.r, t10.r, t01.r, t11.r), weight) / max(found, 1.0e-4);
     float low = current.x, high = current.x;
+    vec2 rectEnd = cb.rtRect.xy - 0.5 * texel;   // (2026-11-03) the neighbours kept inside the rect (its last texel's centre)
     for (int i = 0; i < 4; i++) {
         vec2 offset = (i < 2 ? vec2(float(i * 2 - 1), 0.0) : vec2(0.0, float(i * 2 - 5))) * texel;
-        float n = POINT_LOD(t_current, uv + offset).x;
+        float n = POINT_LOD(t_current, min(uv + offset, rectEnd)).x;
         low = min(low, n);
         high = max(high, n);
     }
     float margin = (high - low) * 0.25;
     history = clamp(history, low - margin, high + margin);
     float inside = (all(greaterThan(last.xy, vec2(0.0))) && all(lessThan(last.xy, vec2(1.0))) && last.z > 1.0) ? 1.0 : 0.0;
-    float moved = length((last.xy - uv) / texel);
+    float moved = length((last.xy * cb.rtRect.zw - uv) / texel);   // (AO-target texels; 2026-11-03: both in their rects)
     float keep = cb.rtTemporal.x / (1.0 + moved / cb.rtTemporal.y) * saturate(found * 2.0) * inside;
     o_color = vec4(mix(current.x, history, keep), current.y, 0.0, 1.0);
     o_history = o_color;

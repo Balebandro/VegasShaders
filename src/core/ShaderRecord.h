@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ShaderTemplate.h"
+#include <mutex>
+#include <unordered_set>
 
 // How LoadShader treats the compiled-shader cache.
 enum ShaderCompileType { AlwaysOff, AlwaysOn, RecompileChanged, RecompileInMenu, RecompileAbsent };
@@ -126,6 +128,29 @@ public:
 inline int MarkShadersFrom = 0, MarkShadersTo = 0, MarkShadersFamily = 0, MarkShadersVanilla = 0, MarkShadersVsFrom = 0, MarkShadersVsTo = 0;
 // UNOFFICIAL 2026-10-27 [Shaders.PBR.Main] GameShaderEyes (SetShadersHook, Render.cpp): eyeballs drawn with the game's own shaders.
 inline bool GameShaderEyes = true;
+
+// 2026-11-03 (white env-mapped objects with Real Time Reflections, three testers): NVR keeps its own fields INSIDE the game's shader
+// objects (Enabled, ShaderProg[3], ShaderHandleBackup: GameNi.h NiD3DShaderProgram), filled in by the CreateVertexShader /
+// CreatePixelShader hooks (ShaderIO.cpp PrepareNewShader). A shader another plugin makes some other way -- Real Time Reflections
+// swaps its own env-map pixel shaders (made through Fallout Shader Loader) into the game's passes -- never went through them, so
+// those slots hold whatever the game keeps there: SetupShader copied that "backup" over the real handle on every draw (NVR on or
+// off), and the env pass drew with no pixel shader (flat white). Only shaders this plugin prepared are touched now; any other one
+// is left exactly as its owner set it, and named once in the log.
+namespace ShaderOwnership {
+	inline std::unordered_set<const void*> Prepared;
+	inline std::mutex Lock;
+	inline void Mark(const void* shader) { std::lock_guard<std::mutex> hold(Lock); Prepared.insert(shader); }
+	inline void Forget(const void* shader) { std::lock_guard<std::mutex> hold(Lock); Prepared.erase(shader); }
+	inline bool Ours(const void* shader) { std::lock_guard<std::mutex> hold(Lock); return Prepared.count(shader) != 0; }
+	// true when NVR may set this shader up; false (named in the log the first time) for another plugin's
+	inline bool MaySetUp(const void* shader, const char* kind) {
+		if (Ours(shader)) return true;
+		static std::unordered_set<const void*> named;
+		if (named.size() < 64 && named.insert(shader).second)
+			Logger::Log("UNOFFICIAL shaders: a %s shader NVR did not make is in a game pass (another plugin's, e.g. Real Time Reflections): left as its owner set it", kind);
+		return false;
+	}
+}
 
 class NiD3DPixelShaderEx : public NiD3DPixelShader {
 public:

@@ -12,9 +12,10 @@ layout(set = 1, binding = 1) uniform texture2D t_normals;    // TESR_NormalsBuff
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
-vec3 reconstructPosition(vec2 uv) {
+// (2026-11-03) the depth read at the texel (uv), the point rebuilt at its screen point s (uv / the RenderRect scale; = uv when off)
+vec3 reconstructPosition(vec2 uv, vec2 s) {
     float z = projectedDepthFromLinear(LINEAR_LOD(t_depth, uv).x);
-    vec4 viewSpace = cb.invProjectionTransform * vec4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, z, 1.0);
+    vec4 viewSpace = cb.invProjectionTransform * vec4(s.x * 2.0 - 1.0, (1.0 - s.y) * 2.0 - 1.0, z, 1.0);
     return viewSpace.xyz / viewSpace.w;
 }
 
@@ -28,7 +29,11 @@ vec2 OctEncode(vec3 n) {
 }
 
 void main() {
-    vec3 P = reconstructPosition(uv);
+    // UNOFFICIAL 2026-11-03 RenderScale < 1: the frame is the top-left cb.rtRect.xy part (the trace covers only that); past it no rays
+    // (x 0: the RT sky pass's neighbour taps there never match a surface's distance)
+    vec2 s = uv / cb.rtRect.xy;
+    if (s.x > 1.0 || s.y > 1.0) { o_color = vec4(0.0); return; }
+    vec3 P = reconstructPosition(uv, s);
     if (!(P.z < endFade) || P.z <= 0.0) { o_color = vec4(0.0); return; }
     vec3 N = POINT_LOD(t_normals, uv).xyz * 2.0 - 1.0;
     N = dot(N, -P) < 0.0 ? -N : N;

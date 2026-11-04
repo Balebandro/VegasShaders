@@ -35,7 +35,9 @@ namespace RtAmbient {
 		bool	GI = false;
 		float	GIDistance = 1500.0f;	// [100-8000] GI ray length, world units
 		float	GIStrength = 1.0f;		// [0-4] the bounce light added (x the surface colour), as ComputeGIStrength
-		float	GIOffscreen = 0.1f;		// [0-1] (GI v2) the analytic light's scale for bounce hits the screen did not see
+		float	GIOffscreen = 1.0f;		// [0-1] (GI v2) the analytic light's scale for bounce hits the screen did not see (2026-11-03 rtgi-cal: 1, was 0.1)
+		bool	GIScreenLight = false;	// UNOFFICIAL 2026-11-03 (rtgi-cal) on-screen bounce hits take the game's lit frame (GI v2); false (default): every hit the analytic light
+		bool	GIGameLamps = true;		// UNOFFICIAL 2026-11-03 (rtspec) the bounce hits lit by the game's lamp table (its lamps, reach, colour, falloff)
 		float	GIClamp = 1.0f;			// [0.05-4] (2026-10-29) one bounce sample's luminance cap (fireflies from lamp glows)
 		bool	Denoise = true;			// (2026-10-29) the AO visibility through the shared RT denoiser (RtDenoise.h) before AO / AmbientLight use it
 		int		Interleave = 1;
@@ -86,6 +88,8 @@ namespace RtAmbient {
 		Current.GIStrength = std::clamp(TheSettingManager->GetSettingF(s, "GIStrength"), 0.0f, 4.0f);
 		Current.GIAmbient = std::clamp(TheSettingManager->GetSettingF(s, "GIAmbient"), 0.0f, 1.0f);
 		Current.GIOffscreen = std::clamp(TheSettingManager->GetSettingF(s, "GIOffscreen"), 0.0f, 1.0f);
+		Current.GIScreenLight = TheSettingManager->GetSettingI(s, "GIScreenLight") != 0;	// UNOFFICIAL 2026-11-03 (rtgi-cal)
+		Current.GIGameLamps = TheSettingManager->GetSettingI(s, "GIGameLamps") != 0;	// UNOFFICIAL 2026-11-03 (rtspec)
 		Current.GIClamp = std::clamp(TheSettingManager->GetSettingF(s, "GIClamp"), 0.05f, 4.0f);
 		{ const int i = TheSettingManager->GetSettingI(s, "Interleave"); Current.Interleave = i >= 4 ? 4 : i >= 2 ? 2 : 1; }
 		Current.Denoise = TheSettingManager->GetSettingI(s, "Denoise") != 0;
@@ -177,10 +181,14 @@ namespace RtAmbient {
 	// passes check (DxvkCompute::PassesOn) is false inside a rect frame only, and this is asked both before the rect starts (the
 	// constants: the sky's ortho map) and inside it (the AO pass): two answers a frame. Rect frames now count for the whole frame
 	// (RenderRect::InUse) and say so: RT AO does not run at RenderScale below 1 (the trace, GI, denoisers read and write whole screens).
+	// UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md "RT AO / GI plan", phase 1): it does now. The trace
+	// covers the frame's top-left rect, and in rect frames the RT estimate runs as the one Vulkan pass inside AmbientOcclusion's (and
+	// AmbientLight's) rect-aware D3D9 passes. State 4 is gone (its text stays for the numbering); the GI bounce is not traced in rect
+	// frames (phase 2: its consumers are Vulkan passes that are off there).
 	inline bool PassesWanted() { return TheSettingManager->SettingsMain.Main.NvrDxvkPasses && DxvkCompute::Available(); }
 	inline bool Ready() {
 		static int reported = -1;
-		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : RenderRect::InUse(TheFrameRateManager->FrameNumber) ? 4 : !CoreReady() ? 2 : 3;
+		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : !CoreReady() ? 2 : 3;
 		if (state != reported && (state != 0 || reported > 0)) {
 			const char* text[] = { "off", "on but the NVR DXVK passes are off ([Main.Main.Performance] NvrDxvkPasses): NVR's AO runs",
 				"on but the RT core is not running (see its log line: no NvrRtHelper, no fork 0028, or a GPU without ray tracing): NVR's AO runs",

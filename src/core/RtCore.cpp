@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "RtCore.h"
+bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal);	// UNOFFICIAL 2026-11-03 (NewVegas/Hooks/Render.cpp)
 #include "DxvkCompute.h"
 #include "GpuProfiler.h"
 #include "PlantWind.h"	// (2026-10-30) PlantSway: a wind-bent plant's traced instance leans with it
@@ -188,6 +189,13 @@ namespace {
 	IDirect3DBaseTexture9* GlowTextureOf(BSShaderProperty* shaderProperty) {
 		return HasGlowMap(shaderProperty) ? (*((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[2])->rendererData->dTexture : nullptr;
 	}
+	// UNOFFICIAL 2026-11-02 the draw's normal map (texture slot 1, the _n.dds) for NormalTextures, or null
+	IDirect3DBaseTexture9* NormalTextureOf(BSShaderProperty* shaderProperty) {
+		const UInt32 type = static_cast<NiShadeProperty*>((NiProperty*)shaderProperty)->m_eShaderType;
+		if (!shaderProperty->IsLightingProperty() && type != NiShadeProperty::kProp_PPLighting && type != NiShadeProperty::kProp_Lighting30) return nullptr;
+		NiSourceTexture** normal = ((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[1];
+		return normal && *normal && (*normal)->rendererData ? (*normal)->rendererData->dTexture : nullptr;
+	}
 
 	// Where a vertex declaration keeps the position (cached per declaration).
 	struct PositionElement {
@@ -213,7 +221,8 @@ namespace {
 		bool		walkingFar = false;					// UNOFFICIAL 2026-10-31: Gather's walk of the far object LOD (FarObjectLOD; NVR_RT_MASK_FAR)
 		bool		farLodOn = false;					// [Main.Main.RayTracing] FarObjectLOD (live)
 		bool		farLandOn = false;					// UNOFFICIAL 2026-10-31 [Main.Main.RayTracing] FarLandLOD (live): LOD land in the same ring
-		UInt32		farLandInstances = 0;				// far LOD land instances (the scene log)
+		UInt32		farLandInstances = 0;
+		UInt32		farLandOverGrid = 0;				// UNOFFICIAL 2026-11-03: far LOD land quads left out over the loaded cells (Walk)				// far LOD land instances (the scene log)
 		float		farRadius = 40000.0f;				// FarRadius: the far ring's outer edge (game units)
 		UInt32		farInstances = 0;					// far LOD instances (the scene log)
 		UInt32		farWalk[8] = {};					// the far walk's fates (the scene log): seen, culled, out of the ring, geometries, faded, nodes,
@@ -290,8 +299,12 @@ namespace {
 		// GlowBrightness): a slot is a (diffuse, glow map) pair; the glow map goes into the glow atlas (RGBA8) at the same slot and texcoords
 		IDirect3DTexture9* glowUpload = nullptr;
 		int			glowAtlasImage = -1;
+		// UNOFFICIAL 2026-11-02 normal textures ([Main.Main.RayTracing] NormalTextures, with HitTextures): the normal map at the same slot
+		IDirect3DTexture9* normalUpload = nullptr;
+		int			normalAtlasImage = -1;
+		UInt32		normalSlots = 0;
 		PositionElement lastElement;						// Describe's: where the texcoords are
-		int			AlphaSlotOf(IDirect3DBaseTexture9* texture, IDirect3DBaseTexture9* glow = nullptr);		// land subtree: objects popped, APP_CULLED, nodes, faded fade nodes (alpha <= 0, walked anyway), switch nodes
+		int			AlphaSlotOf(IDirect3DBaseTexture9* texture, IDirect3DBaseTexture9* glow = nullptr, IDirect3DBaseTexture9* normal = nullptr);		// land subtree: objects popped, APP_CULLED, nodes, faded fade nodes (alpha <= 0, walked anyway), switch nodes
 		UInt32		instances = 0, waiting = 0, released = 0;
 		float		radius = 8192.0f;
 		// UNOFFICIAL 2026-10-30 scene cost (the main session's soak list, item 2), all [Main.Main.RayTracing], live:
@@ -364,8 +377,9 @@ namespace {
 	// A texture's slot in the alpha atlas: >= 0, -1 not possible (never again), -2 not this frame (8 a frame at most). On the GPU: the
 	// fork pass RtAlphaToAtlas draws the texture's alpha into a 64 x 64 R16F target (the texture's mips downsample; any pool and format),
 	// then that goes into the atlas slot. Both are recorded before this exchange's signal, so the helper sees them this frame.
-	int Core::AlphaSlotOf(IDirect3DBaseTexture9* texture, IDirect3DBaseTexture9* glow) {
+	int Core::AlphaSlotOf(IDirect3DBaseTexture9* texture, IDirect3DBaseTexture9* glow, IDirect3DBaseTexture9* normal) {
 		if (glowAtlasImage < 0) glow = nullptr;
+		if (normalAtlasImage < 0) normal = nullptr;	// (the key leaves the normal map out: a diffuse texture comes with one normal map)
 		const UInt64 key = (UInt64)(uintptr_t)texture | ((UInt64)(uintptr_t)glow << 32);	// a 32-bit process
 		auto found = alphaSlots.find(key);
 		if (found != alphaSlots.end()) return found->second;
@@ -408,6 +422,7 @@ namespace {
 		if (!alphaUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R16F, D3DPOOL_DEFAULT, &alphaUpload, nullptr);
 		if (which && !albedoUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &albedoUpload, nullptr);
 		if (glow && !glowUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &glowUpload, nullptr);
+		if (normal && !normalUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &normalUpload, nullptr);
 		ID3D9NvrExtSampler* sampler = DxvkCompute::MipSampler(false, NVR_EXT_ADDRESS_WRAP);
 		IDirect3DSurface9* target = nullptr;
 		IDirect3DSurface9* target2 = nullptr;
@@ -441,6 +456,15 @@ namespace {
 						if (FAILED(DxvkCompute::Extension()->Draw(&draw)) || FAILED(share->CopyToShared(images[glowAtlasImage], x, y, glowUpload, &all))) slot = -1;
 						glowTarget->Release();
 					}
+				}
+				if (slot >= 0 && normal) {	// (2026-11-02) the normal map the same way: its rgb as stored (tangent space) into the normal atlas
+					IDirect3DSurface9* normalTarget = nullptr;
+					bindings[0].pResource = normal;
+					if (normalUpload && SUCCEEDED(normalUpload->GetSurfaceLevel(0, &normalTarget))) {
+						draw.Targets[1].pResource = normalTarget;
+						if (SUCCEEDED(DxvkCompute::Extension()->Draw(&draw)) && SUCCEEDED(share->CopyToShared(images[normalAtlasImage], x, y, normalUpload, &all))) normalSlots++;
+						normalTarget->Release();
+					}	// (no map in the slot: it reads 0, the shaders keep the triangle's normal)
 				}
 				if (slot >= 0) { atlasUsed++; if (glow) glowSlots++; }
 			}
@@ -545,6 +569,8 @@ namespace {
 		atlasImage = -1;
 		albedoAtlasImage = -1;
 		glowAtlasImage = -1;
+		normalAtlasImage = -1;
+		normalSlots = 0;
 		atlasUsed = 0;
 		glowSlots = 0;
 		alphaSlots.clear();
@@ -564,6 +590,12 @@ namespace {
 			if (TheSettingManager->GetSettingI("Main.Main.RayTracing", "GlowTextures") != 0) {
 				glowAtlasImage = (int)imageDescs.size();
 				imageNames.push_back("NVR RT glow atlas");
+				imageDescs.push_back({ side, side, NVR_EXT_SHARED_RGBA8, nullptr });
+				imageSizes.push_back({ side, side });
+			}
+			if (TheSettingManager->GetSettingI("Main.Main.RayTracing", "NormalTextures") != 0) {	// UNOFFICIAL 2026-11-02
+				normalAtlasImage = (int)imageDescs.size();
+				imageNames.push_back("NVR RT normal atlas");
 				imageDescs.push_back({ side, side, NVR_EXT_SHARED_RGBA8, nullptr });
 				imageSizes.push_back({ side, side });
 			}
@@ -740,7 +772,9 @@ namespace {
 			}
 			else if (helperState == NVR_RT_STATE_FAILED || helperState == NVR_RT_STATE_EXITED) TurnOff("the helper gave up (its message is above)");
 			else if (InterlockedCompareExchange(&tripped, 0, 0)) TurnOff(tripReason);
-			else if (GetTickCount64() - startTick > 15000) TurnOff("the helper did not get ready within 15 seconds");
+			// (2026-11-03: 15 -> 60 s: the helper compiles every registered trace shader before it says ready, ~1 s each on the iGPU; with
+			// 12 it was ready at 15.4 s and the core had turned itself off (warm slot, Lucky 38). The game never waits for it meanwhile.)
+			else if (GetTickCount64() - startTick > 60000) TurnOff("the helper did not get ready within 60 seconds");
 			return;
 		}
 		if (state == Running) {
@@ -1286,7 +1320,10 @@ namespace {
 		bool alphaTested = false;
 		// (UNOFFICIAL 2026-10-31 FarObjectLOD: the object LOD meshes all carry an alpha property for their distance fade, not cut-outs:
 		// rtrefl-20 met 30 a frame, all refused as alpha. Past SceneRadius they go in as opaque.)
-		if (alpha && !walkingFar && (alpha->flags & (NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK | NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK))) {
+		// (UNOFFICIAL 2026-11-03: but far tree / billboard LOD IS cut out (TEST_ENABLE): it takes the alpha-tested path like near geometry;
+		// as opaque quads it traced as solid black boards over the skyline, rtpt-4. Blend-only far LOD (the fade) stays opaque.)
+		if (alpha && (!walkingFar || (alpha->flags & NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK)) &&
+			(alpha->flags & (NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK | NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK))) {
 			if (!(alpha->flags & NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK)) { skip[kAlpha]++; alphaFate[0]++; return; }
 			if (!alphaOn) { skip[kAlpha]++; alphaFate[1]++; return; }
 			alphaTested = true;
@@ -1315,7 +1352,7 @@ namespace {
 			NiSourceTexture** textures = ((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[0];
 			NiTexture* texture = textures ? *textures : nullptr;
 			if (!texture || !texture->rendererData || !texture->rendererData->dTexture) { skip[kAlpha]++; alphaFate[4]++; return; }
-			alphaSlot = AlphaSlotOf(texture->rendererData->dTexture, GlowTextureOf(shaderProperty));
+			alphaSlot = AlphaSlotOf(texture->rendererData->dTexture, GlowTextureOf(shaderProperty), NormalTextureOf(shaderProperty));
 			if (alphaSlot == -2) { waiting++; alphaFate[6]++; return; }	// this frame's uploads are used up: next frame
 			if (alphaSlot < 0) { skip[kAlpha]++; alphaFate[5]++; return; }
 			desc.Flags = NVR_EXT_RT_TEXCOORD_FLAGS((int)lastElement.uvOffset - (int)lastElement.offset, lastElement.uvHalf);
@@ -1327,7 +1364,7 @@ namespace {
 			NiSourceTexture** textures = ((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[0];
 			NiTexture* texture = textures ? *textures : nullptr;
 			if (texture && texture->rendererData && texture->rendererData->dTexture) {
-				alphaSlot = AlphaSlotOf(texture->rendererData->dTexture, GlowTextureOf(shaderProperty));
+				alphaSlot = AlphaSlotOf(texture->rendererData->dTexture, GlowTextureOf(shaderProperty), NormalTextureOf(shaderProperty));
 				if (alphaSlot == -2) { waiting++; return; }
 				if (alphaSlot >= 0) {
 					textured = true;
@@ -1392,6 +1429,14 @@ namespace {
 		extra.flags = (land ? NVR_RT_RECORD_LAND : 0u) | (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (HasGlowMap(shaderProperty) ? NVR_RT_RECORD_GLOW : 0u);
 		if (alphaTested) extra.flags |= NVR_RT_RECORD_ALPHA_TESTED | ((UInt32)alpha->alphaTestRef << 8) | ((UInt32)alphaSlot << 16);
 		else if (textured) extra.flags |= NVR_RT_RECORD_TEXTURED | ((UInt32)alphaSlot << 16);
+		if ((alphaTested || textured) && normalAtlasImage >= 0 && NormalTextureOf(shaderProperty)) extra.flags |= NVR_RT_RECORD_NORMAL;	// UNOFFICIAL 2026-11-02
+		if (alphaTested || textured) {	// UNOFFICIAL 2026-11-03 the material rule's roughness / metal (bits 26-31; NvrRtProtocol.h)
+			float rough = -1.0f, metal = -1.0f;
+			if (RtMaterialRuleOf(geo, &rough, &metal)) {
+				if (rough >= 0.0f) extra.flags |= (UInt32)(std::min)((std::max)((int)(rough * 7.0f + 0.5f), 1), 7) << NVR_RT_RECORD_ROUGH_SHIFT;
+				if (metal >= 0.0f) extra.flags |= (UInt32)(std::min)((int)(metal * 6.0f + 0.5f) + 1, 7) << NVR_RT_RECORD_METAL_SHIFT;
+			}
+		}
 		if ((extra.flags & NVR_RT_RECORD_GLOW) && geo->m_kWorldBound && glows.size() < 4096) {	// (2026-10-30) GlowLights()
 			const NiBound* b = geo->m_kWorldBound;
 			glows.push_back({ { b->Center.x - TheRenderManager->CameraPosition.x, b->Center.y - TheRenderManager->CameraPosition.y,
@@ -1588,6 +1633,15 @@ namespace {
 				}
 			}
 			if (!object || (object->m_flags & NiAVObject::NiFlags::APP_CULLED) || ((!land || lod) && !inReach(object))) continue;
+			// UNOFFICIAL 2026-11-03 FarLandLOD: a far LOD land quad whose area reaches into the loaded cells stays out: the ring test above
+			// lets in coarse quads (4-cell blocks and up, bound radius ~11600) that cover the loaded land, and where they stand above it they
+			// block every sun / sky / bounce ray from the near ground (the reference path tracer's black ground, rtpt-2 / rtpt-4). The loaded
+			// grid: 5 x 5 cells of 4096 round the camera's cell (uGridsToLoad 5), taken as a square of half-side 2.5 cells round the camera.
+			if (walkingFar && land && object->IsGeometry()) {
+				const NiBound* b = object->m_kWorldBound;
+				const float half = 2.5f * 4096.0f;
+				if (b && fabsf(b->Center.x - camera.x) < half + b->Radius && fabsf(b->Center.y - camera.y) < half + b->Radius) { farLandOverGrid++; continue; }
+			}
 			if (object->IsGeometry()) {
 				NiGeometry* g = static_cast<NiGeometry*>(object);
 				if (g->skinInstance && actorsOn && rtSkin) AddSkinned(g);
@@ -1834,7 +1888,8 @@ bool RtCore::AddPass(int Shader, const int* Images, UINT ImageCount, UINT WriteM
 	for (UINT i = 0; i < ImageCount; i++) {
 		if (Images[i] <= 0 || Images[i] >= (int)TheCore.images.size()) return false;
 		if (i < NVR_RT_PASS_IMAGES) p.images[i] = (uint32_t)Images[i];
-		else p.extraImages |= (uint32_t)Images[i] << (8u * (i - NVR_RT_PASS_IMAGES));	// images 8..11: bindings 12..15 (2026-10-30)
+		else if (i < NVR_RT_PASS_IMAGES + 4) p.extraImages |= (uint32_t)Images[i] << (8u * (i - NVR_RT_PASS_IMAGES));	// images 8..11: bindings 12..15 (2026-10-30)
+		else p.extraImages2 |= (uint32_t)Images[i] << (8u * (i - NVR_RT_PASS_IMAGES - 4));	// images 12..15: bindings 16..19 (2026-11-02, protocol 5)
 	}
 	p.imageCount = ImageCount;
 	p.writeMask = WriteMask;
@@ -1980,10 +2035,11 @@ namespace {
 				for (int k = 0; k < 9; k++) if (k != 8) c.leafFate[k] = 0;
 			}
 			if (c.farLandOn) {	// UNOFFICIAL 2026-10-31 FarLandLOD
-				Logger::Log("RT CORE: far LOD land on: %.1f instances a frame in the ring %.0f .. %.0f (mask 0x80)",
-					c.farLandInstances / (float)(n == 60 ? 60 : n == 600 ? 540 : 600), c.radius, c.farRadius);
+				Logger::Log("RT CORE: far LOD land on: %.1f instances a frame in the ring %.0f .. %.0f (mask 0x80), %.1f quads a frame left out over the loaded cells",
+					c.farLandInstances / (float)(n == 60 ? 60 : n == 600 ? 540 : 600), c.radius, c.farRadius, c.farLandOverGrid / (float)(n == 60 ? 60 : n == 600 ? 540 : 600));
 			}
 			c.farLandInstances = 0;
+			c.farLandOverGrid = 0;
 			if (c.farLodOn)	// UNOFFICIAL 2026-10-31 FarObjectLOD
 			{
 				const float frames = (float)(n == 60 ? 60 : n == 600 ? 540 : 600);
@@ -2012,7 +2068,8 @@ namespace {
 				const UInt32* a = c.alphaFate;
 				Logger::Log("RT CORE: alpha-tested meshes met (exchanges 1-60): taken %u, atlas %u slots; left out: blended only %u, AlphaTested off %u, "
 					"not described %u, texcoords not in the position's stream %u, no diffuse texture %u, alpha unreadable or atlas full %u; "
-					"waited for an upload %u; glow maps in the atlas %u (%s)", a[7], c.atlasUsed, a[0], a[1], a[2], a[3], a[4], a[5], a[6], c.glowSlots, c.glowAtlasImage >= 0 ? "GlowTextures on" : "GlowTextures off");
+					"waited for an upload %u; glow maps in the atlas %u (%s); normal maps %u (%s)", a[7], c.atlasUsed, a[0], a[1], a[2], a[3], a[4], a[5], a[6], c.glowSlots, c.glowAtlasImage >= 0 ? "GlowTextures on" : "GlowTextures off",
+					c.normalSlots, c.normalAtlasImage >= 0 ? "NormalTextures on" : "NormalTextures off");
 			}
 			if (n == 60 && c.grassOn) {
 				const UInt32* g = c.grassFate;
@@ -2058,6 +2115,12 @@ bool RtCore::Exchange(IDirect3DDevice9* Device, const User& user) {
 }
 
 bool RtCore::Running() { return TheCore.state == Core::Running; }
+void RtCore::Restart(const char* Why) {	// UNOFFICIAL 2026-11-02: as a screen-size change (Core::Ready)
+	Core& c = TheCore;
+	if (c.state == Core::Off || c.state == Core::Idle) return;
+	c.Stop(Why);
+	c.state = Core::Idle;
+}
 const char* RtCore::StatusText() { return TheCore.status; }
 const NvrRtShared* RtCore::Helper() { return TheCore.state == Core::Running ? TheCore.shared : nullptr; }
 UInt32 RtCore::Instances() { return TheCore.instances; }
@@ -2069,6 +2132,7 @@ bool RtCore::AlphaTested() { return TheCore.state == Core::Running && TheCore.al
 int RtCore::AlphaAtlasImage() { return TheCore.alphaOn || TheCore.hitTextures ? TheCore.atlasImage : -1; }	// shared slots
 int RtCore::AlbedoAtlasImage() { return TheCore.state == Core::Running && TheCore.hitTextures ? TheCore.albedoAtlasImage : -1; }
 int RtCore::GlowAtlasImage() { return TheCore.state == Core::Running && TheCore.hitTextures ? TheCore.glowAtlasImage : -1; }
+int RtCore::NormalAtlasImage() { return TheCore.state == Core::Running && TheCore.hitTextures ? TheCore.normalAtlasImage : -1; }	// UNOFFICIAL 2026-11-02
 bool RtCore::GrassWanted() { return TheCore.state == Core::Running && TheCore.grassOn; }
 
 void RtCore::NoteGrass(NiGeometry* Geometry, IDirect3DBaseTexture9* Texture, const float* Instances, UINT Count, UINT VertsPerTuft, const float* ScaleMask, UInt32 AlphaRef) {

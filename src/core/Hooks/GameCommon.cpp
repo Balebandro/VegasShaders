@@ -21,7 +21,8 @@ NiDX9Renderer* __fastcall InitializeRendererHook(NiDX9Renderer* self, UInt32 edx
 	// late and every SKIN shader was loaded from the standalone files whether VPS was installed or not.
 	const bool vpsPresent = GetModuleHandle(L"VanillaPlusSkin.dll") != NULL;
 	if (vpsPresent) TheShaderManager->Shaders.Skin->bVPSLoaded = true;
-	Logger::Log(vpsPresent ? "Vanilla Plus Skin found, routing SKIN shaders through SkinVPSTemplate" : "Vanilla Plus Skin not found");
+	// (2026-11-03: which skin shader is used is decided and logged later, SkinShaders::Templates: OverrideVanillaPlusSkin, on by default, keeps ours)
+	Logger::Log(vpsPresent ? "Vanilla Plus Skin found (the skin shader in use is logged as the SKIN shaders load)" : "Vanilla Plus Skin not found");
 
 	return renderer;
 }

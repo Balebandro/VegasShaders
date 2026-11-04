@@ -327,6 +327,8 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	AppendDefine("HAND_BLOOD", TheSettingManager->GetSettingI("Shaders.HandBlood.Status", "Enabled") ? "1" : "0");
 	// UNOFFICIAL 2026-10-16 cloth wind (Includes/ClothWind.hlsl, core/ClothWind.h): the vertex shaders get it only when on at startup.
 	AppendDefine("CLOTH_WIND_ON", TheSettingManager->GetSettingI("Shaders.Cloth.Main", "Enabled") ? "1" : "0");
+	// UNOFFICIAL 2026-11-03 PipboyFit (Includes/PipboyFit.hlsl, core/PipboyFit.h): sleeves fitted under the Pip-Boy, likewise.
+	AppendDefine("PIPBOY_FIT_ON", TheSettingManager->GetSettingI("Shaders.PipboyFit.Main", "Enabled") ? "1" : "0");
 	// UNOFFICIAL 2026-10-20 plant wind (Includes/PlantWind.hlsl, core/PlantWind.h): the static plants' part, likewise.
 	AppendDefine("PLANT_WIND_ON", TheSettingManager->GetSettingI("Shaders.Plants.Wind", "Enabled") ? "1" : "0");
 
@@ -917,6 +919,9 @@ ShaderRecordVertex* NiD3DVertexShaderEx::GetShaderRecord(ShaderRecordType Varian
 
 // The game frees one of its shaders: our records go first, and the family forgets it.
 void __fastcall NiD3DVertexShaderEx::Free(NiD3DVertexShaderEx* Shader) {
+	// (2026-11-03) another plugin's shader: its slots are not NVR's records, nothing of NVR's to free
+	if (!ShaderOwnership::Ours(Shader)) { ThisCall(0xE89B70, Shader); return; }
+	ShaderOwnership::Forget(Shader);
 	Shader->DisposeShader();
 	if (ShaderCollection* family = TheShaderManager->GetShaderCollection(Shader->Name)) {
 		auto& members = family->VertexShaderList;
@@ -1022,6 +1027,8 @@ ShaderRecordPixel* NiD3DPixelShaderEx::GetShaderRecord(ShaderRecordType Variant)
 
 // As the vertex version above.
 void __fastcall NiD3DPixelShaderEx::Free(NiD3DPixelShaderEx* Shader) {
+	if (!ShaderOwnership::Ours(Shader)) { ThisCall(0xE89970, Shader); return; }	// (2026-11-03) as the vertex version
+	ShaderOwnership::Forget(Shader);
 	Shader->DisposeShader();
 	if (ShaderCollection* family = TheShaderManager->GetShaderCollection(Shader->Name)) {
 		auto& members = family->PixelShaderList;

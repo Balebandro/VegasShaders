@@ -115,4 +115,5 @@ private:
 	int					rtHistoryIndex = 0;
 	bool	ExtEstimateRT(IDirect3DDevice9* Device, IDirect3DTexture9* const* Textures, IDirect3DSurface9* const* Surfaces, const D3DSURFACE_DESC& Target);
 	bool	ExtSkyVisibilityRT(IDirect3DSurface9* Target, IDirect3DTexture9* SunMask, IDirect3DTexture9* SmoothedNormals);
+	void	RtTemporalSetup(const D3DSURFACE_DESC& AoDesc);	// UNOFFICIAL 2026-11-03: the RT temporal constants (ExtDedicated, Render's D3D9 loop)
 };

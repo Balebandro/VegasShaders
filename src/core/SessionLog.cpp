@@ -4,6 +4,7 @@
 #include "DxvkCompute.h"
 #include "Diagnostics.h"
 #include "SettingChanges.h"
+#include "InstallCheck.h"
 #include <intrin.h>
 #include <tlhelp32.h>
 #include <cstdarg>
@@ -379,12 +380,22 @@ void SessionLog::OnSettingsLoaded() {
 // UNOFFICIAL 2026-11-01: the live values (Config.TomlConfig: a change made in the menu, a preset loaded or a settings file reloaded
 // after the start is in it), so the REPORT block's call lists what the tester has NOW, not what the SESSION header saw at the start
 void SessionLog::LogSettingsDiff(const char* head) {
+	unsigned differ = 0, total = 0;
+	const std::vector<std::string> items = SettingsDiff(differ, total);
+	if (!total) return;
+	Logger::Log("%s: %u of %u differ from this build's defaults%s (key=yours (default)):", head, differ, total,
+		TheSettingManager->Config.MaxQualityActive ? "; Max Quality is ON (its values are used in place of these)" : "");
+	LogList((std::string(head) + ": ").c_str(), items, " | ");
+}
+
+// 2026-11-03: the walk LogSettingsDiff logged, as data (the bug report, InstallCheck.h, lists the same)
+std::vector<std::string> SessionLog::SettingsDiff(unsigned& differ, unsigned& total) {
 	typedef SettingManager::Configuration Config;
-	if (!TheSettingManager) return;
-	Config& config = TheSettingManager->Config;
-	if (!config.DefaultConfig.is_table()) return;
 	std::vector<std::string> items;
-	unsigned total = 0, differ = 0;
+	differ = total = 0;
+	if (!TheSettingManager) return items;
+	Config& config = TheSettingManager->Config;
+	if (!config.DefaultConfig.is_table()) return items;
 	auto number = [](const tomlValue& v, double& out) {
 		if (v.is_floating()) { out = v.as_floating(); return true; }
 		if (v.is_integer()) { out = (double)v.as_integer(); return true; }
@@ -409,7 +420,7 @@ void SessionLog::LogSettingsDiff(const char* head) {
 			bool same;
 			if (number(value, a) && number(*mine, b)) same = fabs(a - b) <= 1e-5 * (std::max)(1.0, fabs(a));
 			else if (value.is_boolean() && mine->is_boolean()) same = value.as_boolean() == mine->as_boolean();
-			else if (value.is_string() && mine->is_string()) same = value.as_string() == mine->as_string();
+			else if (value.is_string() && mine->is_string()) same = value.as_string().str == mine->as_string().str;	// (the text only: toml11's == also compares "basic" vs 'literal' quoting)
 			else same = false;
 			if (same) continue;
 			differ++;
@@ -422,9 +433,7 @@ void SessionLog::LogSettingsDiff(const char* head) {
 		}
 	};
 	walk(walk, config.DefaultConfig, &config.TomlConfig, "");
-	Logger::Log("%s: %u of %u differ from this build's defaults%s (key=yours (default)):", head, differ, total,
-		config.MaxQualityActive ? "; Max Quality is ON (its values are used in place of these)" : "");
-	LogList((std::string(head) + ": ").c_str(), items, " | ");
+	return items;
 }
 
 // UNOFFICIAL 2026-11-01 the environment (SessionLog.h): programs that take the game's frames or draw over them. A tester's 4K smear
@@ -548,6 +557,12 @@ void SessionLog::OnDevice(IDirect3DDevice9* device) {
 	const char* runtime = TheRenderManager->D3D9RuntimeDescription();
 	Logger::Log("SESSION D3D9 runtime: %.*s, d3d9.dll %s | NVR DXVK extension: %s", (int)(strchr(runtime, '(') ? strchr(runtime, '(') - runtime : strlen(runtime)), runtime,
 		d3d9.empty() ? "(no version info)" : d3d9.c_str(), DxvkCompute::Available() ? DxvkCompute::Status() : "not there");
+	// 2026-11-03: the same facts for the install check and the bug report (InstallCheck.h)
+	std::string gpuWindows;
+	for (const std::string& g : gpus) gpuWindows += (gpuWindows.empty() ? "" : " | ") + g;
+	char gpuGame[320];
+	sprintf_s(gpuGame, "%s, vendor %04lX device %04lX", adapter.Description, adapter.VendorId, adapter.DeviceId);
+	InstallCheck::OnDevice(gpuWindows, gpuGame, !strncmp(runtime, "DXVK", 4), d3d9, DxvkCompute::Available() ? DxvkCompute::Status() : "");
 	const char* wrappers[] = { "dxgi.dll", "d3d11.dll", "dinput8.dll", "ReShade32.dll", "dxvk_d3d9.dll" };
 	std::vector<std::string> found;
 	for (const char* w : wrappers) if (GetModuleHandleA(w)) { const std::string v = FileVersion(w); found.push_back(std::string(w) + (v.empty() ? "" : " " + v)); }
@@ -616,6 +631,7 @@ void SessionLog::OnDeferredInit() {
 			names.push_back(name);
 		}
 		Logger::Log("SESSION load order: %u plugins, hash %08X", (unsigned)names.size(), hash);
+		InstallCheck::OnLoadOrder(names, hash);	// 2026-11-03: weather / lighting mods (InstallCheck.h)
 		LogList("SESSION load order: ", names);
 	}
 

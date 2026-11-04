@@ -154,6 +154,7 @@
     <ClCompile Include="..\src\core\DxvkCompute.cpp" />
     <ClCompile Include="..\src\core\SessionLog.cpp" />
     <ClCompile Include="..\src\core\Paths.cpp" />
+    <ClCompile Include="..\src\core\InstallCheck.cpp" />
     <ClCompile Include="..\src\core\Diagnostics.cpp" />
     <ClCompile Include="..\src\core\HiZ.cpp" />
     <ClCompile Include="..\src\core\PixelInspector.cpp" />
@@ -202,6 +203,7 @@
     <ClCompile Include="..\src\core\UpscalerFsr31.cpp" />
     <ClCompile Include="..\src\core\RtCore.cpp" />
     <ClCompile Include="..\src\core\RtSunShadows.cpp" />
+    <ClCompile Include="..\src\core\RtPathTrace.cpp" />
     <ClCompile Include="..\src\core\RtDenoise.cpp" />
     <ClCompile Include="..\src\effects\ShadowsExteriors\ShadowsExterior.cpp" />
     <ClCompile Include="..\src\effects\ShadowsInteriors\ShadowsInteriors.cpp" />
@@ -295,6 +297,7 @@
     <ClInclude Include="..\src\core\DxvkCompute.h" />
     <ClInclude Include="..\src\core\RtCore.h" />
     <ClInclude Include="..\src\core\RtSunShadows.h" />
+    <ClInclude Include="..\src\core\RtPathTrace.h" />
     <ClInclude Include="..\src\core\RtDenoise.h" />
     <ClInclude Include="..\src\core\HiZ.h" />
     <ClInclude Include="..\src\core\Upscaler.h" />
@@ -304,6 +307,7 @@
     <ClInclude Include="..\src\core\MenuTools.h" />
     <ClInclude Include="..\src\core\Branding.h" />
     <ClInclude Include="..\src\core\Paths.h" />
+    <ClInclude Include="..\src\core\InstallCheck.h" />
     <ClInclude Include="..\src\core\ShaderCounters.h" />
     <ClInclude Include="..\src\core\NvrDxvkExt.h" />
     <ClInclude Include="..\src\core\GpuProfiler.h" />

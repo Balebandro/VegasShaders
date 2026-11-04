@@ -76,6 +76,17 @@ sampler2D TESR_BackDepthBuffer : register(s12) = sampler_state { ADDRESSU = CLAM
 // colour where NVR's templates wrote it this frame (a 1), for the bounce's surface colour in Apply and in the balance samples (SurfaceAlbedo); bound by
 // AmbientLight.cpp on s12 for those two passes only (the grid passes' NVR_GridSunColor stage, which they never read). NVR_ALFlags.z 1 = bound.
 sampler2D NVR_ALAlbedo : register(s12) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes ([Shaders.AmbientOcclusion.RT] GI with [Main.Main.Performance] NvrDxvkAmbientLight off,
+// its default since 2026-11-01): before this, the RT bounce light reached the picture only through the Vulkan twins of these passes
+// (AmbientLightEstimateRT / AmbientLightGIAccumulate / AmbientLightApply-gi), so by default RT GI changed nothing. Now the same three
+// steps run here, line for line with those shaders, switched by NVR_ALGI (all 0 = every pass exactly as before):
+//   x 1: Estimate puts the traced bounce light (NVR_ALRTGI, bound by hand on s7, which Estimate never reads otherwise) into rgb, x the fade;
+//   y 1: Accumulate keeps the bounce from frame to frame as it keeps the occlusion (same reprojection, depth test, neighbour clamp, share);
+//   z 1: Apply adds this frame's accumulated bounce (NVR_ALGIHistory, bound by hand on s5: Apply never reads the prep) upsampled with the
+//        occlusion's own depth-weighted taps, x the surface colour x TESR_AmbientLightData.z (GIStrength). DebugView 13: the light alone.
+float4 NVR_ALGI;
+sampler2D NVR_ALRTGI : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+sampler2D NVR_ALGIHistory : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 
 static const float Radius = max(TESR_AmbientLightData.x, 1.0f);
 static const float OcclusionStrength = TESR_AmbientLightData.y;
@@ -340,11 +351,16 @@ float4 Estimate(VSOUT IN) : COLOR0 {
 		weightSum += projectedLength * SliceArc(lowCos0, lowCos1, n, cosNormal, sinN);
 	}
 	// Raised to a power (1.5 at strength 1, as XeGTAO does) so creases and contact read as the eye expects.
-	[branch] if (DebugView > 5.5f) return float4(visibility / max(weightSum, 1e-4f), firstCos * 0.5f + 0.5f, firstLow, 1.0f);
+	// (UNOFFICIAL 2026-11-03: not with NVR_ALGI.x, whose DebugView 13 is the RT bounce light: Estimate's normal output then)
+	[branch] if (DebugView > 5.5f && !(NVR_ALGI.x > 0.5f)) return float4(visibility / max(weightSum, 1e-4f), firstCos * 0.5f + 0.5f, firstLow, 1.0f);
 	visibility = pow(saturate(visibility / max(weightSum, 1e-4f)), 1.5f * OcclusionStrength);
 	visibility = lerp(1.0f, visibility, fade);
 	// Bounce: the average over the reads, x BounceScale so a pixel enclosed by surfaces showing light L receives about L.
-	return float4(bounce * (BounceScale * fade / (SLICES * STEPS * 2)), saturate(visibility));
+	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.x, see the samplers): the traced bounce light instead, x the fade, as
+	// AmbientLightEstimateRT.frag writes it (point read: each texel's own ray; the blurs and Accumulate average them).
+	[branch] if (NVR_ALGI.x > 0.5f) bounce = tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb * fade;
+	else bounce *= BounceScale * fade / (SLICES * STEPS * 2);
+	return float4(bounce, saturate(visibility));
 }
 
 // Passes 3-4: depth-aware blur, 7 taps along axis (half-resolution texels apart x BlurStep). UNOFFICIAL 2026-10-14: the bounce
@@ -416,11 +432,14 @@ AccumulateOut Accumulate(VSOUT IN) {
 	// Held within what the bounce round the spot shows now (its four neighbours), a little wider: a blade that swayed away, or
 	// light that changed, does not linger.
 	float low = current.a, high = current.a;
+	float3 lowC = current.rgb, highC = current.rgb;	// UNOFFICIAL 2026-11-03 (NVR_ALGI.y) the bounce's range the same way
 	[unroll] for (int i = 0; i < 4; i++) {
 		float2 offset = (i < 2 ? float2(i * 2 - 1, 0.0f) : float2(0.0f, i * 2 - 5)) * NVR_ALLayout.zw;
-		float n = tex2Dlod(NVR_ALBuffer, float4(uv + offset, 0.0f, 0.0f)).a;
-		low = min(low, n);
-		high = max(high, n);
+		float4 n = tex2Dlod(NVR_ALBuffer, float4(uv + offset, 0.0f, 0.0f));
+		low = min(low, n.a);
+		high = max(high, n.a);
+		lowC = min(lowC, n.rgb);
+		highC = max(highC, n.rgb);
 	}
 	float margin = (high - low) * 0.25f;
 	occlusionHistory = clamp(occlusionHistory, low - margin, high + margin);
@@ -428,6 +447,19 @@ AccumulateOut Accumulate(VSOUT IN) {
 	float moved = length((lastUV - uv) / NVR_ALLayout.zw);
 	float keep = NVR_ALTemporal.x / (1.0f + moved / NVR_ALTemporal.y) * saturate(found * 2.0f) * inside;
 	OUT.occlusion = float4(lerp(current.a, occlusionHistory, keep), viewZ, 0.0f, 1.0f);
+	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.y, see the samplers): the bounce light kept from frame to frame in the
+	// bounce history (NVR_ALHistory: last frame's, rgb bounce, a view depth) as AmbientLightGIAccumulate.frag keeps it: the same four
+	// taps and depth weights as the occlusion, held within this frame's neighbours' range (a quarter of it as margin, per channel), the
+	// same share kept.
+	[branch] if (NVR_ALGI.y > 0.5f) {
+		float3 bounceHistory = (tex2Dlod(NVR_ALHistory, float4((base + 0.5f) * NVR_ALLayout.zw, 0.0f, 0.0f)).rgb * weight.x +
+			tex2Dlod(NVR_ALHistory, float4((base + float2(1.5f, 0.5f)) * NVR_ALLayout.zw, 0.0f, 0.0f)).rgb * weight.y +
+			tex2Dlod(NVR_ALHistory, float4((base + float2(0.5f, 1.5f)) * NVR_ALLayout.zw, 0.0f, 0.0f)).rgb * weight.z +
+			tex2Dlod(NVR_ALHistory, float4((base + 1.5f) * NVR_ALLayout.zw, 0.0f, 0.0f)).rgb * weight.w) / max(found, 1.0e-4f);
+		float3 marginC = (highC - lowC) * 0.25f;
+		bounceHistory = clamp(bounceHistory, lowC - marginC, highC + marginC);
+		OUT.bounce = float4(lerp(current.rgb, bounceHistory, keep), viewZ);
+	}
 	return OUT;
 }
 
@@ -905,6 +937,10 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	// On: a tap past the tolerance counts nothing (saturate(1 - d / tolerance)), and where all four do, the nearest in depth is taken.
 	const float edgeReject = NVR_ALFlags.w > 0.5f ? 1.0f : 0.0f;
 	float nearestCloseness = 1.0e9f, nearestValue = 1.0f;
+	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (see the samplers). Tested per pixel (x depth, > 0 here) on purpose: as a plain
+	// constant test the compiler gives each branch on it a boolean register, and technique AmbientLightSky's Apply ran out of ps_3_0's 16.
+	const bool giApply = NVR_ALGI.z * depth > 0.5f;
+	float3 giSum = 0.0f, nearestGI = 0.0f;
 	[unroll] for (int y = 0; y < 2; y++) {
 		[unroll] for (int x = 0; x < 2; x++) {
 			float2 tapUV = clampToRectIfOn((base + float2(x, y) + 0.5f) * NVR_ALLayout.zw, NVR_ALLayout.zw);	// (RenderScale v2: no stale texels)
@@ -916,6 +952,12 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 			float value = tex2Dlod(NVR_ALOcclusionHistory, float4(tapUV, 0.0f, 0.0f)).r;
 			sum.a += value * weight;	// (the occlusion only: no screen bounce)
 			weights += weight;
+			// (NVR_ALGI.z) the accumulated bounce light through the same taps and weights, as AmbientLightApply-gi does
+			[branch] if (giApply) {
+				float3 gi = tex2Dlod(NVR_ALGIHistory, float4(tapUV, 0.0f, 0.0f)).rgb;
+				giSum += gi * weight;
+				nearestGI = closeness < nearestCloseness ? gi : nearestGI;
+			}
 			nearestValue = closeness < nearestCloseness ? value : nearestValue;
 			nearestCloseness = min(closeness, nearestCloseness);
 		}
@@ -950,12 +992,17 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		bendY = min(bendY, min(abs(up2 + depth - 2.0f * up), abs(depth + down2 - 2.0f * down)));
 	}
 	float busy = saturate((bendX + bendY) / depth * 20.0f - 0.1f);
+	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.z): the bounce light arriving (EdgeReject: the nearest tap's where no tap is at
+	// this depth, as the occlusion), x GIStrength; DebugView 13 shows it alone (before the surface colour), as AmbientLightApply-gi (in
+	// view 12's branch below: one more constant branch here would run out of the 16 boolean registers).
+	float3 giLight = 0.0f;
+	[branch] if (giApply) giLight = (edgeReject > 0.5f && weights < 0.01f ? nearestGI : giSum / weights) * BounceStrength;
 	// 12 (lightgrid2, diagnostic): the walls the grid knows in the pixel's own cell (r, g, b: cover across x, y, z; the wall memory merged
 	// with the sun map's, as GridPropagate reads it), NVR_GridWave's stage bound to the blocking buffer for it.
 	[branch] if (DebugView > 11.5f) {
 		float3 c = floor((toWorld(IN.UVCoord) * depth - NVR_GridOrigin.xyz) / NVR_GridOrigin.w);
 		float4 m = tex2Dlod(NVR_GridWave, float4(CellUV(clamp(c, 0.0f, float3(GridX, GridY, GridZ) - 1.0f)), 0.0f, 0.0f));
-		return float4(saturate(m.xyz * NVR_GridStep.y), 1.0f);
+		return giApply && DebugView > 12.5f ? delinearize(float4(giLight, 1.0f)) : float4(saturate(m.xyz * NVR_GridStep.y), 1.0f);	// (13 with NVR_ALGI.z: the RT bounce light, above)
 	}
 	[branch] if (DebugView > 10.5f) return float4(busy.xxx, 1.0f);	// 11 (diagnostic): where the busy-depth rule lifts the occlusion
 	ao = lerp(ao, lerp(1.0f, ao, 0.25f), busy);
@@ -992,6 +1039,9 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		if (sky) lit = SkyTake(lit, skyFactor.x, skyFactor.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w);	// (UNOFFICIAL 2026-10-20 skyamb)
 		lin = lit + gridBounce * albedo;	// (the screen bounce removed 2026-10-14: the light grid is the bounce)
 	}
+	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.z): the bounce light x the surface colour, after the occlusion, as
+	// AmbientLightApply-gi adds it (that one takes SurfaceColour's guess; here SurfaceAlbedo, the same guess unless AlbedoBuffer wrote the pixel)
+	[branch] if (giApply) lin += giLight * albedo;
 	return delinearize(float4(lin, color.a));
 }
 

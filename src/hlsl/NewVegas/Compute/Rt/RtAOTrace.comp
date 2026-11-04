@@ -127,6 +127,9 @@ layout(set = 0, binding = 5, r16f) uniform readonly image2D alphaAtlas;   // the
 layout(set = 0, binding = 6, rgba16f) uniform readonly image2D frameLight; // (GI v2) the game's lit frame at the trace grid's size (as rendered: gamma)
 #endif
 layout(set = 0, binding = 7, rgba8) uniform readonly image2D albedoAtlas;  // (2026-10-29) the core's albedo atlas (HitTextures), or a stand-in
+// UNOFFICIAL 2026-11-03 (rtgi-lamps, docs/next/RT-PATH-TRACING.md section 18) all the frame's lamps (up to 80; RtPathTrace.comp's layout:
+// 4 RG32F texels a lamp: pos xy, pos z + reach, colour rg, colour b), NVR's pass image 12 in every variant; read when gi.z < 0 (-count)
+layout(set = 0, binding = 16, rg32f) uniform readonly image2D lampImage;
 
 // The core's protocol v2 hit data (FORK-RT-CORE.md): per-instance records and the geometry (positions float3 + triangle lists, as words).
 struct Record { vec4 albedo; uint flags; uint geometryId; uint vertexOffset; uint indexOffset; };
@@ -258,6 +261,9 @@ vec3 HitNormal(uint instance, uint prim, mat4x3 toScene, vec3 d) {
 #endif
 // (2026-10-31 b) CACHE_B.w 16 and up: DebugView 7 (every bounce hit lit as off screen: the cache's whole share shows); the strength is the rest
 #define CACHE_STRENGTH (CACHE_B.w >= 16.0 ? CACHE_B.w - 16.0 : CACHE_B.w)
+// UNOFFICIAL 2026-11-03 (rtspec) a lamp's falloff at x = distance / reach. GIGameLamps (the C++ gives the reach NEGATIVE): the game's own,
+// (1 - x^2)^2.2 (Pointlights.hlsl vanillaAtt decoded by LinFalloff), as the deferred lamp pass lights them; else (1 - x)^2, as before.
+float LampFall(float x, bool game) { return game ? pow(max(1.0 - x * x, 0.0), 2.2) : (1.0 - x) * (1.0 - x); }
 const ivec3 CacheGrid = ivec3(32, 32, 16);
 
 // A cell's slot texel (k = 0) and its stamp, for a cell given relative to the camera's cell.
@@ -320,6 +326,36 @@ vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 n, float t, float
     vec3 e = cb.ambient.rgb * (cb.gi.w * (0.5 + 0.5 * n.z));   // GIAmbient (default 0: the game's ambient is already the indirect light)
     float sunCos = dot(n, cb.sunDir.xyz);
     if (cb.sunDir.w > 0.5 && sunCos > 0.0 && Visible(lift, cb.sunDir.xyz, 30000.0)) e += cb.sunColor.rgb * sunCos;
+    // UNOFFICIAL 2026-11-03 (rtgi-lamps) gi.z < 0: ALL the frame's lamps (-gi.z of them) from the lamp image, ONE picked in proportion to
+    // its unshadowed light here by a one-pass weighted reservoir (RtPathTrace.comp Direct; scalars only, each candidate's own random
+    // number hashed from xi), the same light formula and shadow ray as the 8-lamp pick below (which stays as it was for gi.z >= 0).
+    if (cb.gi.z < -0.5) {
+        int count = int(-cb.gi.z + 0.5);
+        float total = 0.0, chosenWeight = 0.0;
+        vec3 chosenLight = vec3(0.0), chosenPos = vec3(0.0);
+        uint seed = floatBitsToUint(xi);
+        for (int k = 0; k < count; k++) {
+            vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
+            vec3 l = vec3(a, b.x) - hit;
+            float dist = length(l), reach = abs(b.y);
+            if (dist >= reach || dist < 1.0e-3) continue;
+            vec3 colour = vec3(imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, imageLoad(lampImage, ivec2(4 * k + 3, 0)).r);
+            vec3 light = colour * (LampFall(dist / reach, b.y < 0.0) * max(dot(n, l / dist), 0.0));
+            float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
+            if (!(w > 0.0)) continue;
+            total += w;
+            uint h = (seed ^ uint(k) * 0x9E3779B9u) * 747796405u + 2891336453u;
+            h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+            h = (h >> 22u) ^ h;
+            if (float(h >> 8u) * (1.0 / 16777216.0) * total < w) { chosenWeight = w; chosenLight = light; chosenPos = vec3(a, b.x); }
+        }
+        if (total > 0.0 && chosenWeight > 0.0) {
+            vec3 l = chosenPos - lift;
+            float dist = length(l);
+            if (Visible(lift, l / dist, max(dist - 16.0, 0.0))) e += chosenLight * (total / chosenWeight);   // (short of its fixture)
+        }
+    }
+    else {
     // The lamps: each one's unshadowed light here, a pick in proportion to its luminance, a shadow ray to the picked one.
     int lamps = int(cb.gi.z + 0.5);
     vec3 lampLight[8];
@@ -331,10 +367,9 @@ vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 n, float t, float
         if (k >= lamps) continue;
         vec3 l = cb.lampPos[k].xyz - hit;
         float dist = length(l);
-        float reach = cb.lampPos[k].w;
+        float reach = abs(cb.lampPos[k].w);
         if (dist >= reach || dist < 1.0e-3) continue;
-        float fall = 1.0 - dist / reach;
-        lampLight[k] = cb.lampColor[k].rgb * (fall * fall * max(dot(n, l / dist), 0.0));
+        lampLight[k] = cb.lampColor[k].rgb * (LampFall(dist / reach, cb.lampPos[k].w < 0.0) * max(dot(n, l / dist), 0.0));
         weights[k] = dot(lampLight[k], vec3(0.2126, 0.7152, 0.0722));
         total += weights[k];
     }
@@ -353,6 +388,7 @@ vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 n, float t, float
             if (Visible(lift, l / dist, max(dist - 16.0, 0.0))) e += lampLight[chosen] * (total / weights[chosen]);
         }
     }
+    }   // (2026-11-03 rtgi-lamps: the constants' lamps)
     // (2026-10-30) GlowGI (ambient.w, 0 = off): a hit on a draw with a glow map (record flag 0x04: neon, lit windows, lamp globes,
     // screens) also sends its own light, its colour (the hit texture's) x GlowGI. The flag covers the whole mesh while the glow map
     // marks only parts of it (a facade's windows), so only the bright parts of the colour count (its strongest channel from 0.35 up to

@@ -57,6 +57,8 @@ namespace SessionLog {
 	// start counts), as "<head>: N of M differ ..." then "<head>: [section] key=yours (default), ... | [section] ..." lines; the
 	// SESSION header's list (head "SESSION settings") and the REPORT block's (head "REPORT n settings", core/Diagnostics.cpp)
 	void LogSettingsDiff(const char* head);
+	// 2026-11-03: the same list as data ("[section] key=yours (default), ..." per section), and the counts
+	std::vector<std::string> SettingsDiff(unsigned& differ, unsigned& total);
 	void OnDevice(IDirect3DDevice9* device);	// RenderManager::Initialize: GPU, runtime, screen
 	void OnDeferredInit();					// xNVSE DeferredInit: the game INI values, the load order, the plugin DLLs
 	void NoteIni(const GameSetting* setting);	// ReadSettingHook: keeps the few INI values the header lists

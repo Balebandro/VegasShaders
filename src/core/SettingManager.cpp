@@ -1,5 +1,6 @@
 #include <mutex>
 #include <unordered_set>	// UNOFFICIAL 2026-10-30 SettingsCache
+#include "InstallCheck.h"	// 2026-11-03: the user toml's unknown keys and version mark, for the install self-check
 #include "GpuDebug.h"	// UNOFFICIAL 2026-10-26: GpuDebugLabels / RenderDoc capture key ([Main.Develop.Main])
 
 // A settings file in <game>\Data\NVSE\Plugins (the game folder is read once, Paths::GameRoot: common-dialog calls can change the
@@ -54,11 +55,16 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 	return std::to_string(number);
 }
 
+// The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
+static const int UnofficialSettingsVersion = 75;  // 53 was an enhanced-water step, since removed
+
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
 // load; a whole unknown section is one line. [_Unofficial] is NVR's own bookkeeping, never in the defaults.
-static void WarnUnknownKeys(const tomlValue& User, const tomlValue& Defaults) {
-	if (!User.is_table() || !Defaults.is_table()) return;
+// 2026-11-03: also returns them (section.key), for the install check (InstallCheck.h)
+static std::vector<std::string> WarnUnknownKeys(const tomlValue& User, const tomlValue& Defaults) {
+	std::vector<std::string> unknown;
+	if (!User.is_table() || !Defaults.is_table()) return unknown;
 	int logged = 0, more = 0;
 	auto name = [](const std::string& path, const std::string& key) {
 		std::string k = key[0] == '_' ? key.substr(1) : key;
@@ -70,6 +76,7 @@ static void WarnUnknownKeys(const tomlValue& User, const tomlValue& Defaults) {
 			const bool known = defaults.contains(key);
 			if (known && value.is_table() && defaults.at(key).is_table()) { self(self, value, defaults.at(key), name(path, key)); continue; }
 			if (known) continue;
+			unknown.push_back(name(path, key));
 			if (logged >= 40) { more++; continue; }
 			logged++;
 			if (value.is_table())
@@ -80,6 +87,7 @@ static void WarnUnknownKeys(const tomlValue& User, const tomlValue& Defaults) {
 	};
 	walk(walk, User, Defaults, "");
 	if (more) Logger::Log("UNOFFICIAL settings: %i more settings in your toml aren't known to this build (ignored)", more);
+	return unknown;
 }
 
 /*
@@ -92,6 +100,7 @@ void SettingManager::Configuration::Init() {
 	ConfigPathOf(defaultsFile, Paths::File::Defaults);
 
 	configLoaded = false;
+	bool userFileRead = false;	// 2026-11-03 (InstallCheck): the user's file was there and parsed
 
 	// the defaults keep their comments: a setting's first one is its description in the menu
 	try {
@@ -109,6 +118,7 @@ void SettingManager::Configuration::Init() {
 			Paths::AddOldFilesNotice("Settings read from %s (newer than %s: a New Vegas Reloaded preset?). Save keeps them as %s.", Paths::OldName(Paths::File::UserSettings), Paths::NewName(Paths::File::UserSettings), Paths::NewName(Paths::File::UserSettings));
 		}
 		TomlConfig = toml::parse<toml::discard_comments, std::map>(std::string_view(userFile)).as_table();
+		userFileRead = true;
 	}
 	catch (const std::exception& failure) {
 		// UNOFFICIAL 2026-10-19: no settings file yet (a new install, or a test run that moved it aside) is no error
@@ -170,8 +180,15 @@ void SettingManager::Configuration::Init() {
 	// Before anything reads a setting: the effects read theirs while they register, which is before the first
 	// LoadSettings, and a read of a section the user config lacks writes the defaults into it -- so a migration that
 	// fills a new section from the user's old one (P63's Interiors) would find it already there and skip it.
+	// 2026-11-03 (InstallCheck): the version mark the file was saved with, before UpdateOldDefaults sets this build's
+	int savedVersion = 0;
+	if (TomlConfig.is_table() && TomlConfig.contains("_Unofficial") && TomlConfig.at("_Unofficial").is_table() &&
+		TomlConfig.at("_Unofficial").contains("SettingsVersion") && TomlConfig.at("_Unofficial").at("SettingsVersion").is_integer())
+		savedVersion = (int)TomlConfig.at("_Unofficial").at("SettingsVersion").as_integer();
 	UpdateOldDefaults();
-	WarnUnknownKeys(TomlConfig, DefaultConfig);
+	const std::vector<std::string> unknown = WarnUnknownKeys(TomlConfig, DefaultConfig);
+	const char* slash = strrchr(userFile, '\\');
+	InstallCheck::OnSettingsRead(userFileRead, slash ? slash + 1 : userFile, savedVersion, UnofficialSettingsVersion, unknown);
 }
 
 
@@ -361,7 +378,7 @@ tomlValue* SettingManager::Configuration::UserSection(const char* section) {
 // not in the defaults file, so the menu does not list it, and Save writes it with the rest. Configs without
 // it (anything saved before P50) count as version 0. Called at the start of every LoadSettings; after the
 // first call the version is current and it returns at once.
-static const int UnofficialSettingsVersion = 75;  // 53 was an enhanced-water step, since removed
+// (UnofficialSettingsVersion is declared above Configuration::Init, which hands it to the install check)
 extern bool ParallaxLiteDistanceMigrationPending;  // effects/Terrain.cpp (version 65)
 
 void SettingManager::Configuration::UpdateOldDefaults() {

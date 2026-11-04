@@ -71,7 +71,10 @@ void main() {
 	const ivec2 source = ivec2((vec2(pixel) + 0.5) * p.full.xy * p.size.zw);
 	float linear01 = imageLoad(depthImage, source).r;
 	float viewZ = linear01 * p.forward.w;
-	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw;
+	// (2026-11-03) + the jitter the depth was drawn with (TAA / FSR / DLSS; full.zw, screen uv): the depth pixel lies on the unjittered
+	// ray through uv + jitter. Without it the rebuilt point was off the surface by the jitter: far ground at grazing angles shadowed
+	// itself (a dark band at RenderScale 0.67, rtpt-rs1c)
+	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.full.zw;
 	const int debug = int(p.range.w + 0.5);
 
 	if (debug == 3) {

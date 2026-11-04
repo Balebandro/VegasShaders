@@ -163,6 +163,7 @@
 #include "../effects/CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness and snow
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
+#include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
 #include "EffectChain.h"
 
@@ -304,8 +305,9 @@ void ShaderManager::PreStep_RtCore(ChainContext& ctx) {
 	// fork, a GPU with ray tracing and the helper are there).
 	{
 		static bool rtRegistered = false;
-		if (!rtRegistered) { RtSunShadows::Register(); Effects.Reflections->RtRegister(); RtLampShadows::Register(); AmbientOcclusionEffect::RtRegister(); rtRegistered = true; }	// UNOFFICIAL 2026-10-28 RT sun + RT reflections + RT lamp shadows + RT AO/sky
+		if (!rtRegistered) { RtSunShadows::Register(); Effects.Reflections->RtRegister(); RtLampShadows::Register(); AmbientOcclusionEffect::RtRegister(); RtPathTrace::Register(); rtRegistered = true; }	// UNOFFICIAL 2026-10-28 RT sun + RT reflections + RT lamp shadows + RT AO/sky
 		RtCore::Frame(Device);
+		RtPathTrace::Replace(Device);	// UNOFFICIAL 2026-11-03 [Main.Main.RayTracing] PTReplace: the path traced picture into the scene (off)
 		RtLampShadows::Denoise(Device);	// UNOFFICIAL 2026-10-29: the traced lamp shadows through the shared denoiser (Denoise, off)
 		CapsuleShadows::Render(Device);	// UNOFFICIAL 2026-10-31: people's capsules + contact shadows into the same buffer (no RT; off)
 		BackDepth::Render(Device);	// UNOFFICIAL 2026-10-31 BackDepth: the near objects' back faces, for the effects' thickness (off)
@@ -1450,6 +1452,7 @@ void ShaderManager::PostStep_RtSunDebug(ChainContext& ctx) {
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
 	RtSunShadows::RenderDebug(Device, RenderTarget);	// UNOFFICIAL 2026-10-28 [Shaders.ShadowsExteriors.RT] DebugView 4 (nothing otherwise)
+	RtPathTrace::RenderDebug(Device, RenderTarget);	// UNOFFICIAL 2026-11-02 [Main.Main.RayTracing] ReferencePT (nothing otherwise)
 }
 
 void ShaderManager::PostStep_Debug(ChainContext& ctx) {

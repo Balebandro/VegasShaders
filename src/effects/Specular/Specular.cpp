@@ -1,4 +1,5 @@
 #include "Specular.h"
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-03 PTReplace (Replacing)
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 
@@ -42,6 +43,7 @@ void SpecularEffect::RegisterTextures() {
 }
 
 bool SpecularEffect::ShouldRender() {
+	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own highlights (PTSpecular)
 	return TheShaderManager->GameState.isExterior && !TheShaderManager->GameState.isUnderwater;
 };
 

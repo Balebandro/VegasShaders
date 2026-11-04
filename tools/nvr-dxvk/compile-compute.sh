@@ -30,6 +30,20 @@ for f in Rt/*.comp; do
   spirv-val --target-env vulkan1.2 "$b.spv"
   n=$((n+1))
 done
+# UNOFFICIAL 2026-11-02: the RT helper's passes built from another pass's source with a define (no .comp of their own; each source's
+# header names its variants). Checked 2026-11-02: all four rebuild byte for byte with the Vulkan SDK 1.3.296.0 glslangValidator.
+while read -r out src defs; do
+  [ ${#NAMES[@]} -eq 0 ] || want "$out" || want "$src" || continue
+  # shellcheck disable=SC2086
+  if ! log=$(glslangValidator -V --target-env vulkan1.2 $defs -o "Rt/$out.spv" "Rt/$src.comp" 2>&1); then echo "$log" >&2; echo "FAILED: Rt/$out" >&2; exit 1; fi
+  spirv-val --target-env vulkan1.2 "Rt/$out.spv"
+  n=$((n+1))
+done <<'RT_VARIANTS'
+RtGITrace RtAOTrace -DRT_GI_PASS
+RtRadianceCache RtAOTrace -DRT_CACHE_PASS
+RtLampTraceSplit RtLampTrace -DSPLIT
+RtLampTraceExterior RtLampTrace -DEXTERIOR
+RT_VARIANTS
 v=0
 while read -r frag suffix defs; do
   case "$frag" in ""|\#*) continue ;; esac

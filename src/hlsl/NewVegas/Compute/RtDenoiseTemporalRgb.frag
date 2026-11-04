@@ -21,6 +21,8 @@ layout(push_constant) uniform Push {
     vec4 params;         // x max history, y depth tolerance
     vec4 backbone;       // x 1: subtract the object motion, y 1: the shared disocclusion mask restarts, z the history cap on moving
                          // pixels (0 none), w 1: half size (the mask's 2 x 2)
+    vec4 rect;           // (2026-11-03) RenderScale < 1: xy this frame's RenderRect scale (the signal is in the top-left xy part),
+                         // zw last frame's (its history's part); 1 when off
     uint samplerIndex;
     uint pad[3];
 } pc;
@@ -30,6 +32,9 @@ layout(location = 0) out vec4 o_a;
 layout(location = 1) out vec4 o_b;
 
 void main() {
+    // (2026-11-03) the screen point of this texel (the rect's uv / its scale); past the rect nothing (the a-trous passes skip it)
+    const vec2 s = uv / pc.rect.xy;
+    if (s.x > 1.0 || s.y > 1.0) { o_a = vec4(0.0); o_b = vec4(0.0); return; }
     const vec3 value = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb;
     const float l = luma(value);
     const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
@@ -41,7 +46,7 @@ void main() {
         ? any(greaterThan(textureGather(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 2), vec4(0.5)))
         : textureLod(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).b > 0.5);
     if (pc.move.w < 0.5 && viewZ > 0.0 && !fresh) {
-        vec3 p = (pc.forward.xyz + pc.right.xyz * (2.0 * uv.x - 1.0) - pc.up.xyz * (2.0 * uv.y - 1.0)) * viewZ + pc.move.xyz;
+        vec3 p = (pc.forward.xyz + pc.right.xyz * (2.0 * s.x - 1.0) - pc.up.xyz * (2.0 * s.y - 1.0)) * viewZ + pc.move.xyz;
         float cap = pc.params.x;
         if (pc.backbone.x > 0.5) {
             const vec3 own = textureLod(sampler2D(t_motion, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb;
@@ -54,8 +59,8 @@ void main() {
         if (clip.w > 0.0) {
             const vec2 prevUv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
             if (all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)))) {
-                const vec4 ha = textureLod(sampler2D(t_historyA, NVR_SAMPLER(pc.samplerIndex)), prevUv, 0.0);
-                const vec4 hb = textureLod(sampler2D(t_historyB, NVR_SAMPLER(pc.samplerIndex)), prevUv, 0.0);
+                const vec4 ha = textureLod(sampler2D(t_historyA, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
+                const vec4 hb = textureLod(sampler2D(t_historyB, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
                 if (abs(hb.g - clip.w) <= pc.params.y * max(clip.w, 1.0) && ha.a > 0.0) {
                     const float length = min(min(ha.a, cap) + 1.0, pc.params.x);
                     const float alpha = 1.0 / length;

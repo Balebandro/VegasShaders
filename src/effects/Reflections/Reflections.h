@@ -87,7 +87,8 @@ public:
 		D3DXVECTOR4	Grid3;		// rgb: the light every surface gets here (AmbientLight's, linear)
 		D3DXVECTOR4	Material;	// UNOFFICIAL 2026-10-20 x: 1 = the material buffer is read, y: MaterialMaxRoughness, z: MaterialReflect
 		D3DXVECTOR4	WaterData;		// UNOFFICIAL 2026-10-31 RT water (TESR_RTWaterData, the water shaders): x 1 = last frame's RT reflection
-									// holds the water, y 1 = the planar pass is skipped this frame, z its strength, w unused
+									// holds the water, y 1 = the planar pass is skipped this frame, z its strength, w (2026-11-03) the
+									// traced frame's RenderScale (x; 1 native): Buffer's drawn part, WaterReproject is pre-scaled into it
 		D3DXMATRIX	WaterReproject;	// TESR_RTWaterReproject: camera-relative world now -> the clip space of the frame that traced it
 	};
 	ConstantsStruct	Constants;
@@ -155,6 +156,9 @@ private:
 	UINT				rtTraceFrames = 0, rtFallbackFrames = 0;	// for the log: frames traced with RT / RT wanted but the helper had nothing
 	ExtUniformBuffer	extRtUniforms;		// the RtConstants block
 public:	// (the RT core user in Reflections.cpp reads the images)
+	// UNOFFICIAL 2026-11-02 (the reference path tracer, core/RtPathTrace.cpp): the sky panorama written last (SkyPanorama), null when it
+	// was not written in the last few frames (Reflections off, indoors, SkyPanorama off)
+	IDirect3DTexture9*	SkyPanoramaTexture(UInt32 frame, UInt32 maxAge) const { return pano[panoIndex] && panoFrame + maxAge >= frame ? pano[panoIndex] : nullptr; }
 	struct RtImagesStruct {					// half resolution, made on first use: march, hit A16B16G16R16F; dir, ray G32R32F
 		IDirect3DTexture9* March = nullptr;	IDirect3DSurface9* MarchSurface = nullptr;
 		IDirect3DTexture9* Dir = nullptr;	IDirect3DSurface9* DirSurface = nullptr;
@@ -183,6 +187,7 @@ private:
 	void				RenderSkyPano(IDirect3DDevice9* Device);
 	UINT				rtWaterFrame = 0;		// the FrameNumber whose Buffer holds the water's RT reflection (0 none)
 	D3DXMATRIX			rtWaterView, rtWaterInvView, rtWaterProj;	// that frame's camera
+	float				rtWaterScaleX = 1.0f, rtWaterScaleY = 1.0f;	// UNOFFICIAL 2026-11-03 that frame's RenderScale rect (1: native)
 	bool				rtResolved = false;	// Resolve drew this frame (the blur passes read Rt.Spread)
 	bool				RtWanted() const;	// RT on, nothing failed, the RT core up (its helper alive, RT on that GPU)
 	bool				RtImages();			// makes Rt on first use

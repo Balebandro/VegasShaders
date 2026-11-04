@@ -45,7 +45,7 @@ namespace {
 		Folder shaders, textures, data;
 		std::string shadersDir, effectsDir, computeDir, lutDir, shaderShort;
 		State() {
-			shaders = Choose("Data\\Shaders\\VegasShaders\\", "Data\\Shaders\\NewVegasReloaded\\");
+			shaders = Choose(NewShaderRoot, OldShaderRoot);
 			textures = Choose("Data\\Textures\\VegasShaders\\", "Data\\Textures\\NewVegasReloaded\\");
 			data = Choose(NewDataRoot, OldDataRoot);
 			shadersDir = shaders.path + "Shaders\\";
@@ -120,7 +120,7 @@ namespace {
 	// are made for that mod's code and would not work with ours, so they stay unused; the notice says so and names them.
 	void CheckOldShaderFiles() {
 		const State& s = S();
-		const char* oldRoot = "Data\\Shaders\\NewVegasReloaded\\";
+		const char* oldRoot = OldShaderRoot;
 		if (s.shaders.old || !s.shaders.found) return;	// the old folder is the one in use, or neither exists
 		const std::string oldFull = GameRoot() + "\\" + oldRoot, newFull = GameRoot() + "\\" + s.shaders.path;
 		char dll[MAX_PATH] = {};

@@ -1,6 +1,7 @@
 // UNOFFICIAL 2026-10-29 (NVR DXVK) the shared RT denoiser (RtDenoise.h). Passes: Compute\RtDenoiseTemporal.frag, Compute\RtDenoiseAtrous.frag.
 
 #include "RtDenoise.h"
+#include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "DxvkCompute.h"
 #include "GpuProfiler.h"
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw)
@@ -28,6 +29,7 @@ namespace RtDenoise {
 		UInt32				frame = 0;
 		bool				hasHistory = false;
 		D3DXMATRIX			prevViewProj;
+		float				lastScale[2] = { 1.0f, 1.0f };	// (2026-11-03) the RenderRect scale the history was made at
 		D3DXVECTOR3			prevCamera = { 0.0f, 0.0f, 0.0f };
 	};
 
@@ -236,9 +238,9 @@ namespace RtDenoise {
 		if (!d || !Noisy || !Output || !DxvkCompute::Extension() || !DxvkCompute::PointClamp()) return false;
 		if (!tried) {
 			tried = true;
-			temporal = Make("RtDenoiseTemporal", 5, 176);	// 2026-10-31: + motion, backbone (stand-ins when off)
+			temporal = Make("RtDenoiseTemporal", 5, 192);	// (2026-11-03: + rect)	// 2026-10-31: + motion, backbone (stand-ins when off)
 			atrous = Make("RtDenoiseAtrous", 3, 48);
-			temporalRgb = Make("RtDenoiseTemporalRgb", 6, 176, 2);
+			temporalRgb = Make("RtDenoiseTemporalRgb", 6, 192, 2);
 			backbonePipe = Make("RtBackbone", 3, 160);
 			atrousRgb = Make("RtDenoiseAtrousRgb", 3, 48, 2);
 		}
@@ -271,15 +273,21 @@ namespace RtDenoise {
 		const D3DXVECTOR3 camera(TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z);
 		const D3DXVECTOR3 move = camera - d->prevCamera;
 		if (d->rawSeen != rawGeneration) { d->rawSeen = rawGeneration; d->hasHistory = false; }	// UNOFFICIAL 2026-10-30 DLSS RR (above)
-		const bool cut = !d->hasHistory || S.Reset || D3DXVec3Length(&move) > 512.0f;	// a jump: a camera cut, a load, a teleport
+		// (2026-11-03) RenderScale < 1: the signal is in the top-left RenderRect part; a scale change (or a rect <-> native frame) restarts
+		const float scaleX = RenderRect::On ? RenderRect::ScaleX : 1.0f, scaleY = RenderRect::On ? RenderRect::ScaleY : 1.0f;
+		const bool rescaled = scaleX != d->lastScale[0] || scaleY != d->lastScale[1];
+		const bool cut = !d->hasHistory || S.Reset || D3DXVec3Length(&move) > 512.0f || rescaled;	// a jump: a camera cut, a load, a teleport, a new RenderScale
 		if (cut) SessionLog::HistoryReset("RT denoiser", !d->hasHistory ? "no history" : S.Reset ? "reset asked (cut / mode / size)" : "camera moved over 512 units");	// UNOFFICIAL 2026-11-01
 
 		struct {
 			float prevViewProj[16];
 			float forward[4], right[4], up[4], move[4], params[4];
 			float backbone[4];	// 2026-10-31 DenoiseBackbone: x object motion, y the shared disocclusion mask
+			float rect[4];		// (2026-11-03) xy this frame's RenderRect scale, zw last frame's
 			UInt32 samplerIndex, pad[3];
 		} t = {};
+		t.rect[0] = scaleX; t.rect[1] = scaleY; t.rect[2] = rescaled ? scaleX : d->lastScale[0]; t.rect[3] = rescaled ? scaleY : d->lastScale[1];
+		d->lastScale[0] = scaleX; d->lastScale[1] = scaleY;
 		memcpy(t.prevViewProj, &d->prevViewProj, 64);
 		t.forward[0] = view._13; t.forward[1] = view._23; t.forward[2] = view._33; t.forward[3] = cameraData->y;
 		t.right[0] = view._11 / proj._11; t.right[1] = view._21 / proj._11; t.right[2] = view._31 / proj._11;

@@ -14,6 +14,8 @@ void main() {
     vec2 vpos = floor(gl_FragCoord.xy);
     vec2 uv = (vpos + 0.5) * LowTexel;
     vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);   // a pixel centre in the block
+    // UNOFFICIAL 2026-11-03 RenderScale < 1: past this frame's rect nothing reflects (no ray: Resolve's neighbour taps skip it there).
+    if (any(greaterThanEqual(uv, cb.renderScale.xy))) { o_color = vec4(0.0); o_dir = vec4(0.0); o_ray = vec4(0.0); return; }
     float depth = readDepthLod(pixelUV);
     vec3 N = ViewNormal(pixelUV);
     float roughness;
@@ -64,7 +66,7 @@ void main() {
         float t = RayLength * s * s + 2.0;
         vec3 p = position + R * t;
         vec2 at = ToScreen(p);
-        if (p.z <= nearZ || any(lessThanEqual(at, vec2(0.0))) || any(greaterThanEqual(at, vec2(1.0)))) searching = false;   // off the screen
+        if (p.z <= nearZ || any(lessThanEqual(at, vec2(0.0))) || any(greaterThanEqual(at, cb.renderScale.xy))) searching = false;   // off the screen (2026-11-03: the drawn part)
         else {
             float sceneZ = readDepthLod(at);
             float behind = p.z - sceneZ;
@@ -88,7 +90,7 @@ void main() {
         // Not the weapon (it is not where the depth says, for the world), not the back of something.
         if (!IsWeapon(hit) && dot(hitNormal, R) < 0.2) {
             colour = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), hit, 0.0).rgb);
-            vec2 edge = min(hit, 1.0 - hit);
+            vec2 edge = min(rectToScreen(hit), 1.0 - rectToScreen(hit));   // (2026-11-03: the screen's edges, as the .fx)
             confidence = saturate(min(edge.x, edge.y) * 12.0) * (1.0 - smoothstep(0.75, 1.0, hi / RayLength));
         }
     }

@@ -21,6 +21,7 @@
 #include "LampFixtures.h"
 #include "DxvkCompute.h"
 #include "RtCore.h"
+#include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "RtDenoise.h"
 
 namespace RtLampShadows {
@@ -64,6 +65,7 @@ namespace RtLampShadows {
 		float many[4];							// x reservoirs, y history frames, z spatial radius, w 1 = history valid
 		float reproject[4][4];					// scene-space point -> the previous trace's clip space (Reproject)
 		float many2[4];							// x frame number, y history depth tolerance
+		float jitter[4];						// (2026-11-03) xy the depth's jitter (TAAEffect::DepthJitterUV, screen uv), every variant
 	};
 	static_assert(sizeof(PassConstants) <= 512, "RtCore: 512 bytes of constants a pass");
 
@@ -84,7 +86,8 @@ namespace RtLampShadows {
 
 	// The camera of the frame the newest result was traced for (Record) and whether it exists
 	struct TracedCamera { D3DXMATRIX view; D3DXVECTOR3 location;	// location: the traced frame's eye in world space
-		 float p11, p22, farZ; bool valid; };
+		 float p11, p22, farZ; bool valid; float sx = 1.0f, sy = 1.0f, jx = 0.0f, jy = 0.0f; };	// sx, sy (2026-11-03): the RenderRect scale it was
+		// traced at; jx, jy: the depth's jitter then (screen uv)
 	inline TracedCamera Traced = {};
 	inline TracedCamera Pending = {};
 
@@ -293,6 +296,17 @@ namespace RtLampShadows {
 		Reproject[3][1] = D3DXVec3Dot(&d, &up) * Traced.p22;
 		Reproject[3][2] = 0.0f;
 		Reproject[3][3] = D3DXVec3Dot(&d, &forward);
+		// (2026-11-03) RenderScale < 1: the traced result is in the top-left sx x sy part of its texture: the forward shaders' uv
+		// (clip.xy / w x (0.5, -0.5) + 0.5) is scaled into it by the matrix itself (x' = sx x + (sx - 1) w, y' = sy y - (sy - 1) w gives
+		// uv' = s uv), no shader change; points past the part read stale texels whose depth code does not match: the cube map.
+		// (2026-11-03) and the traced frame's jitter off (its texel at uv shows the ray through uv + j): uv' = s (uv - j), i.e.
+		// x' = s x + (s - 1 - 2 s jx) w, y' = s y - (s - 1 - 2 s jy) w. Without it the depth codes missed across whole floors with TAA /
+		// FSR / DLSS on (rtpt-rs5 coverage: ~75 % red at RenderScale 1 and 0.67) and the cube maps were used there.
+		if (Traced.sx != 1.0f || Traced.sy != 1.0f || Traced.jx != 0.0f || Traced.jy != 0.0f)
+			for (int i = 0; i < 4; i++) {
+				Reproject[i][0] = Traced.sx * Reproject[i][0] + (Traced.sx - 1.0f - 2.0f * Traced.sx * Traced.jx) * Reproject[i][3];
+				Reproject[i][1] = Traced.sy * Reproject[i][1] - (Traced.sy - 1.0f - 2.0f * Traced.sy * Traced.jy) * Reproject[i][3];
+			}
 		RtConstant[1] = (std::max)(TheSettingManager->GetSettingF(kSection, "DepthTolerance"), 0.004f);	// at least the depth code's step
 		RtConstant[2] = log2f((std::max)(Traced.farZ, 2.0f)) / 4095.0f;
 		RtConstant[3] = ScreenSourceFrame || ActorsFromCubeMaps() ? 1.0f : 0.0f;	// the capsule / contact buffer: always the darker of it and the lamp's map
@@ -474,6 +488,9 @@ namespace RtLampShadows {
 	inline void Record(IDirect3DDevice9* Device) {
 		if (imageDepth < 0 || imageNormals < 0 || imageResult < 0 || imageTable < 0 || shader < 0) return;
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
+		// (2026-11-03) RenderScale < 1: trace only the frame's top-left RenderRect part (uv = pixel / rect size is the screen's; the
+		// depth is read in the rect); the forward shaders read it through Reproject's scaled uv. Off: the whole screen, as before.
+		const UINT tw = RenderRect::Width(w), th = RenderRect::Height(h);
 		if (!ResultTexture || TextureWidth != w || TextureHeight != h) {
 			if (ResultSurface) { ResultSurface->Release(); ResultSurface = nullptr; }
 			if (ResultTexture) { ResultTexture->Release(); ResultTexture = nullptr; }
@@ -508,7 +525,7 @@ namespace RtLampShadows {
 				const D3DXVECTOR4& fcam = TheRenderManager->CameraPosition;
 				const D3DXVECTOR4& spot = TheShaderManager->SpotLightPosition[0];
 				struct { float size[4], forward[4], right[4], up[4], origin[4], light[4], params[4]; } f = {};
-				f.size[0] = (float)w; f.size[1] = (float)h;
+				f.size[0] = (float)tw; f.size[1] = (float)th;
 				f.forward[0] = fv._13; f.forward[1] = fv._23; f.forward[2] = fv._33; f.forward[3] = cameraData->y;
 				f.right[0] = fv._11 / fp._11; f.right[1] = fv._21 / fp._11; f.right[2] = fv._31 / fp._11;
 				f.up[0] = fv._12 / fp._22; f.up[1] = fv._22 / fp._22; f.up[2] = fv._32 / fp._22;
@@ -518,7 +535,7 @@ namespace RtLampShadows {
 				f.params[1] = (std::max)(TheSettingManager->GetSettingF(kSection, "FlashlightStop"), 0.0f);
 				f.params[2] = (float)(0xFF & ~MaskAlphaTested & ~MaskGlass);	// people (0x20) block it; lamp glass never does
 				const int flashImages[3] = { imageDepth, imageNormals, imageFlash };
-				if (RtCore::AddPass(flashShader, flashImages, 3, 0x4, &f, sizeof(f), (w + 7) / 8, (h + 7) / 8))
+				if (RtCore::AddPass(flashShader, flashImages, 3, 0x4, &f, sizeof(f), (tw + 7) / 8, (th + 7) / 8))
 					FlashThisFrame = RtCore::CopyOut(imageFlash, FlashSurface);
 			}
 		}
@@ -528,7 +545,10 @@ namespace RtLampShadows {
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 		PassConstants c = {};
-		c.size[0] = (float)w; c.size[1] = (float)h; c.size[2] = 1.0f / w; c.size[3] = 1.0f / h;
+		c.size[0] = (float)tw; c.size[1] = (float)th; c.size[2] = 1.0f / tw; c.size[3] = 1.0f / th;
+		D3DXVECTOR2 jitter(0.0f, 0.0f);	// (2026-11-03) the depth's jitter, for the trace and (Traced) the lookup
+		if (TAAEffect* taa = TheShaderManager->Effects.TAA) jitter = taa->DepthJitterUV();
+		c.jitter[0] = jitter.x; c.jitter[1] = jitter.y;
 		c.forward[0] = view._13; c.forward[1] = view._23; c.forward[2] = view._33; c.forward[3] = cameraData->y;
 		c.right[0] = view._11 / proj._11; c.right[1] = view._21 / proj._11; c.right[2] = view._31 / proj._11;
 		c.up[0] = view._12 / proj._22; c.up[1] = view._22 / proj._22; c.up[2] = view._32 / proj._22;
@@ -583,7 +603,7 @@ namespace RtLampShadows {
 			c.mask[0] = pointNear.y; c.mask[1] = pointNear.z;
 			c.mask[2] = (float)TheSettingManager->GetSettingI(kSection, "ExteriorDebug");	// diagnostic: 1 = mask 0, 2 = mask 1
 			const int exteriorImages[5] = { imageDepth, imageNormals, imageResult, imageTable, imageMask };
-			if (!RtCore::AddPass(exteriorShader, exteriorImages, 5, 0x14, &c, sizeof(c), (w + 7) / 8, (h + 7) / 8)) return;
+			if (!RtCore::AddPass(exteriorShader, exteriorImages, 5, 0x14, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 			MaskThisFrame = RtCore::CopyOut(imageMask, MaskSurface);
 			return;
 		}
@@ -610,16 +630,16 @@ namespace RtLampShadows {
 				if (moved) MotionFrames++;
 				const int images[9] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity],
 					imageHistoryIds[HistoryParity], imageHistoryIds[1 - HistoryParity], moved ? imageMotion : imageNormals };
-				if (!RtCore::AddPass(restirShader, images, 9, 0xA4, &c, sizeof(c), (w + 7) / 8, (h + 7) / 8)) return;
+				if (!RtCore::AddPass(restirShader, images, 9, 0xA4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 			} else {
 				const int manyImages[6] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity] };
-				if (!RtCore::AddPass(manyShader, manyImages, 6, 0x24, &c, sizeof(c), (w + 7) / 8, (h + 7) / 8)) return;
+				if (!RtCore::AddPass(manyShader, manyImages, 6, 0x24, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 			}
 			TracedOneRay = oneRay;
 			HistoryParity = 1 - HistoryParity;
 			SplitThisFrame = false;
 			if (!RtCore::CopyOut(imageResult, ResultSurface)) { TracedMany = false; return; }
-			Traced = { view, D3DXVECTOR3(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z), proj._11, proj._22, cameraData->y, true };
+			Traced = { view, D3DXVECTOR3(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z), proj._11, proj._22, cameraData->y, true, (float)tw / (float)w, (float)th / (float)h, jitter.x, jitter.y };
 			memcpy(TracedMap, PendingMap, sizeof(TracedMap));
 			memset(TracedLampWorld, 0, sizeof(TracedLampWorld));
 			TracedIds.swap(PendingIds);
@@ -665,22 +685,22 @@ namespace RtLampShadows {
 			split = SplitSurface[i] != nullptr;
 		}
 		const int images[8] = { imageDepth, imageNormals, filter ? imageRaw : imageResult, imageTable, imageSplit[0], imageSplit[1], imageSplit[2], imageSplit[3] };
-		if (!RtCore::AddPass(split ? splitShader : shader, images, split ? 8 : 4, split ? 0xF4 : 0x4, &c, sizeof(c), (w + 7) / 8, (h + 7) / 8)) return;
+		if (!RtCore::AddPass(split ? splitShader : shader, images, split ? 8 : 4, split ? 0xF4 : 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 		for (int i = 0; split && i < 4; i++) split = RtCore::CopyOut(imageSplit[i], SplitSurface[i]);
 		SplitThisFrame = split;
 		if (filter) {
 			struct { float size[4], params[4]; } f = {};
-			f.size[0] = (float)w; f.size[1] = (float)h;
+			f.size[0] = (float)tw; f.size[1] = (float)th;
 			f.size[2] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "FilterStep"), 1), 4);
 			f.size[3] = (std::max)(TheSettingManager->GetSettingF(kSection, "FilterDepthSigma"), 0.01f);
 			f.params[0] = (std::max)(TheSettingManager->GetSettingF(kSection, "FilterNormalPower"), 0.0f);
 			const int filterImages[4] = { imageDepth, imageNormals, imageRaw, imageResult };
-			if (!RtCore::AddPass(filterShader, filterImages, 4, 0x8, &f, sizeof(f), (w + 7) / 8, (h + 7) / 8)) return;
+			if (!RtCore::AddPass(filterShader, filterImages, 4, 0x8, &f, sizeof(f), (tw + 7) / 8, (th + 7) / 8)) return;
 		}
 		if (!RtCore::CopyOut(imageResult, ResultSurface)) return;
 		TracedMany = false;
 		// The next frame's draws reproject into this frame
-		Traced = { view, D3DXVECTOR3(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z), proj._11, proj._22, cameraData->y, true };
+		Traced = { view, D3DXVECTOR3(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z), proj._11, proj._22, cameraData->y, true, (float)tw / (float)w, (float)th / (float)h, jitter.x, jitter.y };
 		memcpy(TracedMap, PendingMap, sizeof(TracedMap));
 		memset(TracedLampWorld, 0, sizeof(TracedLampWorld));
 		for (int i = 0; i < LampCount; i++)

@@ -67,6 +67,9 @@ public:
 	// in the game while the eye was 71000 units away: every ray started outside the scene, FORK-RT-SUN.md rtsun-4).
 	static D3DXVECTOR3	Eye();
 	static bool			Running();							// the helper is ready (users trace from the frame after it got ready)
+	// UNOFFICIAL 2026-11-02 (bench warm slot, shot command reloadshaders): stop a running helper; it starts again on the next frame an RT
+	// effect wants it, so it loads every Compute\Rt\*.spv again (and settings read at its start: HitTextures ...). Users' Setup runs again.
+	static void			Restart(const char* Why);
 	static const char*	StatusText();
 	static const NvrRtShared* Helper();						// the helper's counters (null when not running)
 	static UInt32		Instances();						// this frame's
@@ -84,6 +87,9 @@ public:
 	// UNOFFICIAL 2026-10-30 glow textures ([Main.Main.RayTracing] GlowTextures, needs HitTextures): the glow atlas' image index (RGBA8,
 	// same slots and texcoords as the albedo atlas; -1: none). A pass adds it to its images, #define RT_GLOW_ATLAS and calls rtHitGlow.
 	static int			GlowAtlasImage();
+	// UNOFFICIAL 2026-11-02 normal textures ([Main.Main.RayTracing] NormalTextures, with HitTextures): the normal atlas' image index
+	// (RGBA8, the same slots; record flag NVR_RT_RECORD_NORMAL; RtHit.glsl rtHitNormalMapped with RT_NORMAL_ATLAS). -1: none.
+	static int			NormalAtlasImage();
 	// UNOFFICIAL 2026-10-29 (rt-lamp-shadows): true while the scene holds the posed skinned actors ([Main.Main.RayTracing] Actors +
 	// fork patch 0033; instance mask NVR_RT_MASK_ACTOR = 0x20), so a pass can stop taking people's shadows from elsewhere
 	static bool			Actors();

@@ -104,7 +104,10 @@ float4 getRTWaterReflection(PS_INPUT IN, float3 surfaceNormal, float refractionC
     p.xy += refractionCoeff * surfaceNormal.xy;
     float4 clip = mul(float4(p, 1.0), TESR_RTWaterReproject);
     float2 uv = clip.xy / max(clip.w, 1.0e-4) * float2(0.5, -0.5) + 0.5;
-    float inside = (clip.w > 0.0 && uv.x > 0.0 && uv.y > 0.0 && uv.x < 1.0 && uv.y < 1.0) ? 1.0 : 0.0;
+    // UNOFFICIAL 2026-11-03 RenderScale < 1: a rect frame traced the water into Buffer's top-left part; TESR_RTWaterReproject comes
+    // pre-scaled into it (Reflections.cpp UpdateWaterConstants) and .w is that frame's scale (1 native; 0 from an older DLL: 1).
+    float edge = TESR_RTWaterData.w > 0.0 ? TESR_RTWaterData.w : 1.0;
+    float inside = (clip.w > 0.0 && uv.x > 0.0 && uv.y > 0.0 && uv.x < edge && uv.y < edge) ? 1.0 : 0.0;
     float4 s = tex2Dlod(TESR_ReflectionsBuffer, float4(uv, 0.0, 0.0));
     float share = saturate(s.a) * inside * TESR_RTWaterData.z;
     float3 t = s.rgb / max(s.a, 1.0e-4);

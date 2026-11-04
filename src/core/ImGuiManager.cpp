@@ -11,6 +11,7 @@
 #include "MenuWidgets.h"
 #include "Branding.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the status bar lists the parts switched off
+#include "InstallCheck.h"	// 2026-11-03: the install self-check (main-menu notice, Help > Install check, Copy bug report)
 #include <sstream>
 #include <iomanip>
 #include <ctime>
@@ -50,6 +51,8 @@ namespace {
 		bool testSettings = false;		// UNOFFICIAL 2026-10-19: the auto-test's 'menu' shots show the test settings (TestShowMenu)
 		bool devOptions = false;		// UNOFFICIAL 2026-10-25: [Main.Menu.Developer] DeveloperOptions, read every drawn frame
 		bool diskConfirm = false;		// File > Reload from disk was picked: open its confirmation next to the main window
+		bool installCheckOpen = false;	// 2026-11-03: Help > Install check
+		double reportCopiedAt = -1.0;	// 2026-11-03: when Copy bug report was last pressed (ImGui time), for the "Copied" line
 		// The value each setting had when it was first drawn since the menu opened: section -> key -> text (the ~ buttons)
 		std::unordered_map<std::string, std::unordered_map<std::string, std::string>> sessionValues;
 	};
@@ -68,6 +71,7 @@ static void NewPatchRebuild();	// UNOFFICIAL 2026-10-18: the "New in this patch"
 static void CaptureStartupValues();	// UNOFFICIAL 2026-10-19: what the restart-only settings were at start (menu honesty)
 static void SetOverlayVisible(bool visible);
 static char* SearchTestBuffer();	// UNOFFICIAL 2026-10-25: the menu search box (defined with the search)
+static void CopyBugReport();	// 2026-11-03: Help > Copy bug report (defined with the install check)
 
 static bool DevOptionsShown() { return gMenu.devOptions || gMenu.testSettings; }
 
@@ -129,6 +133,7 @@ static void SetGameInputBlocked(bool blocked) {
 // UNOFFICIAL 2026-10-19: the auto-test's 'menu <section>' shots open the menu at that page (the picture is taken after it is
 // drawn, SettingShots::CaptureMenu) and close it again (nullptr); ShowTests shows the test settings for that shot.
 // 2026-10-25: 'menu search:<text>' fills the search box instead ('+' stands for a space, e.g. search:shadow+bias).
+// 2026-11-03: 'menu @InstallCheck' opens Help > Install check and presses its Copy bug report (the report goes to the log too).
 void ImGuiManager::TestShowMenu(const char* Section, bool ShowTests) {
 	if (!gOverlay.ready) return;
 	const bool opening = Section != nullptr;
@@ -140,9 +145,14 @@ void ImGuiManager::TestShowMenu(const char* Section, bool ShowTests) {
 		strncpy_s(search, 64, Section + 7, _TRUNCATE);
 		std::replace(search, search + strlen(search), '+', ' ');
 	}
+	else if (opening && !strcmp(Section, "@InstallCheck")) {	// 2026-11-03: the Install check window, and Copy bug report pressed
+		gMenu.installCheckOpen = true;
+		CopyBugReport();
+	}
 	else if (opening) {
 		gMenu.page = Section;
 	}
+	if (!opening) gMenu.installCheckOpen = false;
 	SetOverlayVisible(opening);
 }
 #endif
@@ -2228,7 +2238,7 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.AmbientOcclusion.RT", "Sky visibility", "Sky, SkyRays, SkyDistance",
 		FogType::None, false, "How much of the sky each spot sees, from rays instead of a top-down map.", nullptr },
 	{ "Shaders.AmbientOcclusion.RT", "Bounce light",
-		"GI, GIDistance, GIStrength, GIOffscreen, GIClamp, GIAmbient, GISpatial, GIReuse, GIInterleave, GIMovingHistory, GlowGI, GlowDirect",
+		"GI, GIDistance, GIStrength, GIOffscreen, GIScreenLight, GIGameLamps, GIClamp, GIAmbient, GISpatial, GIReuse, GIInterleave, GIMovingHistory, GlowGI, GlowDirect",
 		FogType::None, true, "One bounce of light from walls and floors, and glowing signs and windows lighting what is near them.", nullptr },
 	{ "Shaders.AmbientOcclusion.RT", "Light that bounces more than once",
 		"RadianceCache, CacheStrength, CacheCellSize, CacheRays, CacheFrames, CacheExteriors, CacheSpread, CacheRaysExterior, CacheSpreadExterior",
@@ -2921,6 +2931,151 @@ static void RenderMainMenuToast() {
 	for (auto it = notices.rbegin(); it != notices.rend(); ++it) line(it->c_str(), IM_COL32(255, 200, 90, 255));
 }
 
+// 2026-11-03: an old NewVegasReloaded.dll left next to VegasShaders.dll by an upgrade (Paths::TwinDll, found in Main.cpp). Both load
+// and both replace the game's shaders, which turns objects and ground white or wrong (three testers on 1.0.1; reproduced by putting
+// P85 v4's DLL beside 1.0.1). Nothing in the picture says why, so a red panel says it: large in the middle of the main menu, a banner
+// across the top in game, every frame, until the file is gone. Drawn on the foreground list (no window, no input).
+static void RenderTwinDllWarning(bool mainMenu) {
+	if (Paths::TwinDll.empty()) return;
+	const char* name = strrchr(Paths::TwinDll.c_str(), '\\') ? strrchr(Paths::TwinDll.c_str(), '\\') + 1 : Paths::TwinDll.c_str();
+	char title[160], body[640];
+	sprintf_s(title, "Old New Vegas Reloaded is still installed: %s", name);
+	sprintf_s(body,
+		"Data\\NVSE\\Plugins\\%s loads next to %s. Both replace the game's shaders, so objects and ground can turn white or look wrong.\n"
+		"Fix: quit the game, delete or move %s out of Data\\NVSE\\Plugins, and start again. "
+		"With Mod Organizer, untick the old New Vegas Reloaded mod.", name, Paths::DllName, name);
+
+	const ImVec2 screen = ImGui::GetIO().DisplaySize;
+	ImFont* font = ImGui::GetFont();
+	const float base = ImGui::GetFontSize();
+	const float titleSize = base * (mainMenu ? 1.8f : 1.35f), bodySize = base * (mainMenu ? 1.25f : 1.0f);
+	const float pad = base * (mainMenu ? 1.2f : 0.7f);
+	const float width = ImMin(screen.x - 2.0f * base, mainMenu ? base * 52.0f : screen.x - 2.0f * base);
+	const float wrap = width - 2.0f * pad;
+	const ImVec2 titleDim = font->CalcTextSizeA(titleSize, FLT_MAX, wrap, title);
+	const ImVec2 bodyDim = font->CalcTextSizeA(bodySize, FLT_MAX, wrap, body);
+	const float height = pad * 2.0f + titleDim.y + base * 0.5f + bodyDim.y;
+	const ImVec2 at((screen.x - width) * 0.5f, mainMenu ? (screen.y - height) * 0.4f : base);
+
+	ImDrawList* front = ImGui::GetForegroundDrawList();
+	const float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 3.0f);	// the border breathes, so it is seen
+	front->AddRectFilled(at, ImVec2(at.x + width, at.y + height), IM_COL32(70, 8, 8, 235), base * 0.4f);
+	front->AddRect(at, ImVec2(at.x + width, at.y + height), IM_COL32(255, 60 + (int)(80 * pulse), 60, 255), base * 0.4f, 0, 3.0f);
+	ImVec2 text(at.x + pad, at.y + pad);
+	front->AddText(font, titleSize, ImVec2(text.x + 2, text.y + 2), IM_COL32(0, 0, 0, 220), title, nullptr, wrap);
+	front->AddText(font, titleSize, text, IM_COL32(255, 225, 90, 255), title, nullptr, wrap);
+	text.y += titleDim.y + base * 0.5f;
+	front->AddText(font, bodySize, ImVec2(text.x + 1, text.y + 1), IM_COL32(0, 0, 0, 220), body, nullptr, wrap);
+	front->AddText(font, bodySize, text, IM_COL32(255, 255, 255, 255), body, nullptr, wrap);
+}
+
+// ---- Install check (2026-11-03, InstallCheck.h) -----------------------------------------------------------------------------
+// What the start-up check found, on screen: a panel at the top of the game's main menu (first 45 s), the same at the top in game
+// when the main menu was skipped (first 20 s), a status-bar item, and Help > Install check with every result and the bug report.
+// The old-DLL result has its own large red panel (RenderTwinDllWarning), so the panels and counts here leave it out.
+
+static int InstallIssueCount() {
+	int n = 0;
+	for (const InstallCheck::Result& r : InstallCheck::Results()) if (r.level != InstallCheck::Level::Info && r.group != "twin") n++;
+	return n;
+}
+
+// Help > Copy bug report: the report on the clipboard, and in the log (so a report without the paste still has it)
+static void CopyBugReport() {
+	const std::string report = InstallCheck::BugReport();
+	ImGui::SetClipboardText(report.c_str());
+	gMenu.reportCopiedAt = ImGui::GetTime();
+	size_t lines = 0, start = 0;
+	for (size_t end; (end = report.find("\r\n", start)) != std::string::npos; start = end + 2, lines++)
+		Logger::Log("INSTALL report | %s", report.substr(start, end - start).c_str());
+	Logger::Log("INSTALL bug report copied to the clipboard (%zu lines)", lines);
+}
+
+static void RenderInstallNotice(bool mainMenu) {
+	static ULONGLONG firstSeen = 0;
+	static bool shownAtMainMenu = false;
+	const int issues = InstallIssueCount();
+	if (!issues) return;
+	if (!firstSeen) firstSeen = GetTickCount64();
+	if (mainMenu) shownAtMainMenu = true;
+	else if (shownAtMainMenu) return;	// read at the main menu already
+	if (GetTickCount64() - firstSeen > (mainMenu ? 45000u : 20000u)) return;
+	static bool logged = false;
+	if (!logged) {	// once: a report's log then shows the player was told
+		logged = true;
+		Logger::Log("INSTALL notice shown %s: %d thing%s to fix", mainMenu ? "on the main menu" : "in game", issues, issues == 1 ? "" : "s");
+	}
+
+	const bool problem = InstallCheck::Count(InstallCheck::Level::Problem) > (Paths::TwinDll.empty() ? 0 : 1);
+	char title[160];
+	sprintf_s(title, "%s install check: %d thing%s to fix", Branding::ProductName, issues, issues == 1 ? "" : "s");
+	std::string body;
+	for (const InstallCheck::Result& r : InstallCheck::Results()) {
+		if (r.level == InstallCheck::Level::Info || r.group == "twin") continue;
+		body += "- " + r.title + "\n";
+		if (!r.fix.empty()) body += "   " + r.fix + "\n";
+	}
+	char tail[200];
+	sprintf_s(tail, "Details and a ready bug report: press %s, then Help > Install check.", DikToName(TheSettingManager->SettingsMain.Menu.KeyEnable));
+	body += tail;
+
+	const ImVec2 screen = ImGui::GetIO().DisplaySize;
+	ImFont* font = ImGui::GetFont();
+	const float base = ImGui::GetFontSize();
+	const float titleSize = base * 1.3f, bodySize = base;
+	const float pad = base * 0.7f;
+	const float width = ImMin(screen.x - 2.0f * base, base * 60.0f);
+	const float wrap = width - 2.0f * pad;
+	const ImVec2 titleDim = font->CalcTextSizeA(titleSize, FLT_MAX, wrap, title);
+	const ImVec2 bodyDim = font->CalcTextSizeA(bodySize, FLT_MAX, wrap, body.c_str());
+	const float height = pad * 2.0f + titleDim.y + base * 0.4f + bodyDim.y;
+	// At the top; in game under the old-DLL banner when that one shows (at the main menu that one is in the middle)
+	const ImVec2 at((screen.x - width) * 0.5f, base + (!mainMenu && !Paths::TwinDll.empty() ? base * 7.0f : 0.0f));
+
+	ImDrawList* front = ImGui::GetForegroundDrawList();
+	front->AddRectFilled(at, ImVec2(at.x + width, at.y + height), problem ? IM_COL32(60, 12, 8, 230) : IM_COL32(50, 36, 6, 230), base * 0.4f);
+	front->AddRect(at, ImVec2(at.x + width, at.y + height), problem ? IM_COL32(255, 90, 60, 255) : IM_COL32(255, 190, 60, 255), base * 0.4f, 0, 2.0f);
+	ImVec2 text(at.x + pad, at.y + pad);
+	front->AddText(font, titleSize, ImVec2(text.x + 1, text.y + 1), IM_COL32(0, 0, 0, 220), title, nullptr, wrap);
+	front->AddText(font, titleSize, text, IM_COL32(255, 220, 90, 255), title, nullptr, wrap);
+	text.y += titleDim.y + base * 0.4f;
+	front->AddText(font, bodySize, ImVec2(text.x + 1, text.y + 1), IM_COL32(0, 0, 0, 220), body.c_str(), nullptr, wrap);
+	front->AddText(font, bodySize, text, IM_COL32(255, 255, 255, 255), body.c_str(), nullptr, wrap);
+}
+
+static void DrawInstallCheckWindow() {
+	if (!gMenu.installCheckOpen) return;
+	ImGui::SetNextWindowSize(ImVec2(640.0f, 420.0f), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin(Branding::InstallCheckTitle, &gMenu.installCheckOpen)) {
+		static const ImVec4 kProblemRed(1.0f, 0.35f, 0.3f, 1.0f), kAmber(1.0f, 0.75f, 0.2f, 1.0f);
+		ImGui::TextWrapped("What %s found when the game started: files left from New Vegas Reloaded, missing files, the settings "
+			"file and the graphics setup. Problems and warnings come first, each with what to do.", Branding::ProductName);
+		ImGui::Spacing();
+		if (ImGui::Button("Copy bug report")) CopyBugReport();
+		ImGui::SameLine();
+		if (gMenu.reportCopiedAt >= 0.0 && ImGui::GetTime() - gMenu.reportCopiedAt < 4.0)
+			ImGui::TextColored(MenuSkin::Heading(0.25f), "Copied: paste it into your report and attach the log file it names.");
+		else
+			ImGui::TextDisabled("version, GPU, DXVK, log file name, these results and your changed settings");
+		ImGui::Separator();
+		if (InstallCheck::Results().empty()) ImGui::TextUnformatted("Nothing found.");
+		for (const InstallCheck::Result& r : InstallCheck::Results()) {
+			const bool info = r.level == InstallCheck::Level::Info;
+			const ImVec4 colour = r.level == InstallCheck::Level::Problem ? kProblemRed : info ? ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled) : kAmber;
+			ImGui::PushStyleColor(ImGuiCol_Text, colour);
+			ImGui::TextWrapped("%s  %s", r.level == InstallCheck::Level::Problem ? "PROBLEM" : info ? "info" : "warning", r.title.c_str());
+			ImGui::PopStyleColor();
+			if (!r.fix.empty()) {
+				ImGui::Indent();
+				ImGui::TextWrapped("%s", r.fix.c_str());
+				ImGui::Unindent();
+			}
+			ImGui::Spacing();
+		}
+	}
+	ImGui::End();
+}
+
 // A small dim marker in the top-right corner while the F10 GPU/CPU profiler is running, so it is not
 // left on by accident. Drawn on the foreground list, so it needs no window and shows with the menu closed.
 static void RenderProfilerIndicator() {
@@ -3100,9 +3255,15 @@ static void DrawViewMenu() {
 	ImGui::EndMenu();
 }
 
-// Help: the About window (credits)
+// Help: the install check and the bug report (2026-11-03), the About window (credits)
 static void DrawHelpMenu() {
 	if (!ImGui::BeginMenu("Help")) return;
+	ImGui::MenuItem("Install check", nullptr, &gMenu.installCheckOpen);
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("What the start-up check found: old or missing files, the settings file, DXVK.");
+	if (ImGui::MenuItem("Copy bug report")) CopyBugReport();
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Copies the version, GPU, DXVK, the log file's name, the install check and every setting you changed.\nPaste it into your report and attach that log file.");
+	ImGui::Separator();
 	ImGui::MenuItem("About Vegas Shaders", nullptr, &MenuTools::AboutOpen);
 	ImGui::EndMenu();
 }
@@ -3188,6 +3349,23 @@ static float UnsavedMarkerWidth() {
 	return ImGui::GetFontSize() * 0.44f + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize("Unsaved").x;
 }
 
+// 2026-11-03 (the user: "the save button always visible again", as before the wave 4 menu rewrite): a Save button on the menu
+// bar, which never scrolls away; amber while there are unsaved changes. File > Save does the same.
+static float SaveButtonWidth() {
+	return ImGui::CalcTextSize("Save").x + ImGui::GetStyle().FramePadding.x * 2.0f;
+}
+
+static void DrawSaveButton(bool unsaved) {
+	if (unsaved) {
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(kWarnAmber.x * 0.55f, kWarnAmber.y * 0.55f, kWarnAmber.z * 0.55f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(kWarnAmber.x * 0.75f, kWarnAmber.y * 0.75f, kWarnAmber.z * 0.75f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonActive, kWarnAmber);
+	}
+	if (ImGui::Button("Save##menubar")) SaveSettingsNow();
+	if (unsaved) ImGui::PopStyleColor(3);
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip(unsaved ? "Save the changed settings to VegasShaders.toml" : "Nothing changed since the last save");
+}
+
 static void DrawMenuBar() {
 	if (gMenu.fxModifier < 0) gMenu.fxModifier = (int)TheSettingManager->SettingsMain.Menu.MasterSwitchModifier;
 	if (!ImGui::BeginMenuBar()) return;
@@ -3196,21 +3374,24 @@ static void DrawMenuBar() {
 	DrawToolsMenu();
 	DrawHelpMenu();
 
-	// Right end: the unsaved marker (when there is room) and the two global switches
+	// Right end: the unsaved marker (when there is room), the Save button and the two global switches
 	const bool unsaved = TheSettingManager->hasUnsavedChanges;
 	const float gap = ImGui::GetStyle().ItemSpacing.x * 2.0f;
 	const float switchesW = GlobalSwitchesWidth();
+	const float saveW = SaveButtonWidth() + gap;
 	const float markerW = unsaved ? UnsavedMarkerWidth() + gap : 0.0f;
 	ImGui::SameLine();
 	const float rightEdge = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x;
 	const float menusEnd = ImGui::GetCursorPosX() + gap;
-	const bool roomForMarker = unsaved && rightEdge - switchesW - markerW >= menusEnd;
-	const float start = rightEdge - switchesW - (roomForMarker ? markerW : 0.0f);
+	const bool roomForMarker = unsaved && rightEdge - switchesW - saveW - markerW >= menusEnd;
+	const float start = rightEdge - switchesW - saveW - (roomForMarker ? markerW : 0.0f);
 	if (start > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(start);
 	if (roomForMarker) {
 		DrawUnsavedMarker();
 		ImGui::SameLine(0.0f, gap);
 	}
+	DrawSaveButton(unsaved);
+	ImGui::SameLine(0.0f, gap);
 	DrawGlobalSwitches();
 	ImGui::EndMenuBar();
 }
@@ -3244,6 +3425,19 @@ static void DrawStatusBar() {
 	if (maxAsked != MaxQuality::Active) {
 		sprintf_s(text, "Save + restart to turn Max Quality %s", maxAsked ? "on" : "off");
 		StatusItem(&kWarnAmber, text);
+	}
+	if (!Paths::TwinDll.empty()) {	// 2026-11-03: an old NewVegasReloaded.dll next to this one (RenderTwinDllWarning)
+		static const ImVec4 kTwinRed(1.0f, 0.3f, 0.25f, 1.0f);
+		StatusItem(&kTwinRed, "Old NewVegasReloaded.dll installed: delete it");
+		if (ImGui::IsItemHovered()) WrappedTooltip(("Both plugins load and both replace the game's shaders (white or broken objects). Delete or move " + Paths::TwinDll + ", then restart.").c_str());
+	}
+	if (const int issues = InstallIssueCount()) {	// 2026-11-03: the install self-check (InstallCheck.h)
+		const bool problem = InstallCheck::Count(InstallCheck::Level::Problem) > (Paths::TwinDll.empty() ? 0 : 1);
+		static const ImVec4 kProblemRed(1.0f, 0.35f, 0.3f, 1.0f);
+		sprintf_s(text, "Install check: %d to fix", issues);
+		StatusItem(problem ? &kProblemRed : &kWarnAmber, text);
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click for the details (Help > Install check).");
+		if (ImGui::IsItemClicked()) gMenu.installCheckOpen = true;
 	}
 	if (!Paths::OldFilesNotices().empty()) {	// 2026-11-02: files from the old New Vegas Reloaded places (Paths.h)
 		const size_t count = Paths::OldFilesNotices().size();
@@ -3333,9 +3527,13 @@ static void DrawTwoPanels() {
 static void DrawMenuFrame() {
 	if (InterfaceManager->IsActive(Menu::MenuType::kMenuType_Main)) {	// the game's main menu: only the hint
 		RenderMainMenuToast();
+		RenderTwinDllWarning(true);
+		RenderInstallNotice(true);
 		return;
 	}
 	RenderProfilerIndicator();
+	RenderTwinDllWarning(false);
+	RenderInstallNotice(false);
 	if (!gOverlay.open) return;
 
 	gMenu.devOptions = TheSettingManager->GetSettingI("Main.Menu.Developer", "DeveloperOptions") != 0;	// UNOFFICIAL 2026-10-25
@@ -3364,4 +3562,5 @@ static void DrawMenuFrame() {
 	}
 	if (!drawn) return;
 	MenuTools::DrawWindows(gMenu.step);
+	DrawInstallCheckWindow();
 }

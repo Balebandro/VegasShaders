@@ -93,7 +93,16 @@ float DLShadow(float i, float3 position, float att, float4 uv4) {
     float shadow = DL_Grid.w;
     [branch] if (sTile.z > 0.0f) {
         const float4 sLight = tex2Dlod(NVR_LampTable, float4(x + 1.0f / LIGHT_COMMON_TEXELS, tileY, 0.0f, 0.0f));
-        shadow = PointShadowCube(sTile, sLight, sTile.w, position, ShadowDecodeNormal(tex2Dlod(DL_Normals, uv4).rg), att POINT_SHADOW_RT_ARG(-1.0f));
+#if POINT_SHADOW_RT && DL_SHADOW_PASS
+        // UNOFFICIAL 2026-11-03 (rtfwd) the lamp's traced shadow where the RT lamp trace has it (the table's tile row + 1, .y: ManyLamps.h PutTiles,
+        // the cube slot the trace knows it by, -1 none), as the forward shaders take it; the atlas where it has none (was always the atlas: RT lamp
+        // shadows did nothing on the deferred pixels, most of an interior). The shadow passes only (a pixel's first 16 lamps, its strongest): the
+        // lighting pass's own lookups (lamps past the 16th) have no temp registers left for the traced read (X4505), they keep the atlas.
+        const float rtId = tex2Dlod(NVR_LampTable, float4((i + 0.5f) / LIGHT_COMMON_TEXELS, (DL_Table.y + 1.5f) / DL_Table.x, 0.0f, 0.0f)).y;
+#else
+        const float rtId = -1.0f;
+#endif
+        shadow = PointShadowCube(sTile, sLight, sTile.w, position, ShadowDecodeNormal(tex2Dlod(DL_Normals, uv4).rg), att POINT_SHADOW_RT_ARG(rtId));
     }
     return shadow;
 }
@@ -157,13 +166,16 @@ float4 main(PS_IN IN) : COLOR0 {
             [branch] if (shadow > 0.0f) {
                 const float4 m = tex2Dlod(DL_Material, uv4);
                 const float3 N = ShadowDecodeNormal(float2(m.g, (m.a - 1.01f) / 0.49f - 1.0f));
-                const float3 lit = DL_Debug.x > 0.5f ? color * LampAtt(att) : getPointLightLightingAtt(toLamp, att, color, -ray, N,
+                const float3 lit = DL_Debug.x > 0.5f && DL_Debug.x < 1.5f ? color * LampAtt(att) : getPointLightLightingAtt(toLamp, att, color, -ray, N,
                     tex2Dlod(DL_Albedo, uv4).rgb, m.b, saturate((m.r - floor(m.r)) / 0.49f));
                 light += lit * shadow;
             }
         }
     }
     // the inputs as the pass sees them (written over the frame, blend off: DeferredLamps::Apply)
+    // (2026-11-03 rtspec) DebugView 7: the lamps' light ALONE over the frame (the game's ambient, emittance and other light left out), in the
+    // frame's encoding: the direct lamp light to set beside the reference path tracer's PTDebugView 3 (with PTReplace: the same post chain)
+    [branch] if (DL_Debug.x > 6.5f) return float4(DL_Fwd.w > 0.5f ? light * keep : pow(max(light * keep, 0.0f), DL_Table.w), 1.0f);
     [branch] if (DL_Debug.x > 1.5f) {
         const float3 cell = floor(position / 64.0f);
         const float3 N = ShadowDecodeNormal(float2(material0.g, (material0.a - 1.01f) / 0.49f - 1.0f));

@@ -33,6 +33,8 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 many;          // x reservoirs (rest rays, 1-4), y history frames (1-64), z spatial radius (0-2), w 1 = the history is valid
 	vec4 reproject[4];  // rows: scene-space point -> the previous trace's clip space (x, y, -, w = view z), PointShadowForward's matrix
 	vec4 many2;         // x frame number (random seed), y history depth tolerance (relative), z rest stride (1 every pixel, 2 one of each 2 x 2 in turn)
+	vec4 jitter;        // (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray
+	                    // through uv + this (the rebuilt point stays on the surface; the lookup's Reproject takes the same jitter off)
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;
@@ -122,7 +124,7 @@ void main() {
 	vec3 position = vec3(0.0), normal = vec3(0.0, 0.0, 1.0), origin = vec3(0.0);
 	float offset = 0.0;
 	if (valid) {
-		vec2 uv = (vec2(pixel) + 0.5) * p.size.zw;
+		vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.jitter.xy;
 		position = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * viewZ;
 		vec3 n = imageLoad(normalImage, pixel).xyz * 2.0 - 1.0;
 		normal = normalize(normalize(p.right.xyz) * n.x + normalize(p.up.xyz) * n.y + normalize(p.forward.xyz) * n.z);

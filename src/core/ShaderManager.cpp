@@ -789,6 +789,7 @@ void ShaderManager::ReloadShaders() {
 		for (NiD3DPixelShaderEx* s : pixel) { s->DisposeShader(); LoadShader(s); ps++; }
 	}
 	Logger::Log("RELOAD SHADERS: %u vertex and %u pixel shaders loaded again from their .hlsl", vs, ps);
+	RtCore::Restart("reloadshaders: it starts again with the Compute\\Rt .spv files as they are now");	// UNOFFICIAL 2026-11-02 (warm slot RT iterations)
 	timer.LogTime("ShaderManager::ReloadShaders");
 }
 

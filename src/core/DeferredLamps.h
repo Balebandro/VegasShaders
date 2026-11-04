@@ -226,23 +226,23 @@ namespace DeferredLamps {
 		IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr; IDirect3DVertexDeclaration9* decl = nullptr;
 		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; DWORD fvf = 0;
 		d->GetVertexShader(&vs); d->GetPixelShader(&ps); d->GetVertexDeclaration(&decl); d->GetFVF(&fvf); d->GetStreamSource(0, &vb, &vbOffset, &vbStride);
-		static const DWORD kStages[] = { 0, 1, 3, 4, 5, 8, 9, 10, 11, 12 };
-		IDirect3DBaseTexture9* tex[10] = {};
-		for (int s = 0; s < 10; s++) d->GetTexture(kStages[s], &tex[s]);
-		// every constant the pass sets, saved and put back (c0-c9, c32-c36, c135, c168, c180-c189, c191, c205, c211, c215, c223)
-		struct Range { UINT reg, count; float v[16][4]; } saved[] = { { 0, 11 }, { 32, 5 }, { 135, 1 }, { 168, 1 }, { 180, 10 }, { 191, 1 }, { 205, 1 }, { 211, 1 }, { 215, 1 }, { 223, 1 } };
+		static const DWORD kStages[] = { 0, 1, 3, 4, 5, 8, 9, 10, 11, 12, 15 };	// 15: (2026-11-03 rtfwd) the RT lamp trace's result
+		IDirect3DBaseTexture9* tex[11] = {};
+		for (int s = 0; s < 11; s++) d->GetTexture(kStages[s], &tex[s]);
+		// every constant the pass sets, saved and put back (c0-c9, c32-c36, c135, c168, c180-c189, c191, c205, c206-c209, c211, c215-c217, c223)
+		struct Range { UINT reg, count; float v[16][4]; } saved[] = { { 0, 11 }, { 32, 5 }, { 135, 1 }, { 168, 1 }, { 180, 10 }, { 191, 1 }, { 205, 1 }, { 206, 4 }, { 211, 1 }, { 215, 3 }, { 223, 1 } };
 		for (Range& r : saved) d->GetPixelShaderConstantF(r.reg, &r.v[0][0], r.count);
 		static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHATESTENABLE, D3DRS_CULLMODE, D3DRS_STENCILENABLE,
 			D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_COLORWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_SRCBLEND, D3DRS_DESTBLEND,
 			D3DRS_BLENDOP, D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_FOGENABLE };
-		const bool add = linear && DebugView < 2;	// the debug views of the inputs write over the frame
+		const bool add = linear && DebugView < 2;	// the debug views of the inputs write over the frame (2026-11-03: and 7, the lamps alone)
 		const DWORD want[] = { D3DZB_FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, FALSE, FALSE, 0x7, add ? (DWORD)TRUE : (DWORD)FALSE, D3DBLEND_ONE, D3DBLEND_ONE,
 			D3DBLENDOP_ADD, FALSE, FALSE };
 		DWORD savedRS[sizeof(kRS) / sizeof(kRS[0])];
 		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) { if (FAILED(d->GetRenderState(kRS[i], &savedRS[i]))) savedRS[i] = want[i]; if (savedRS[i] != want[i]) d->SetRenderState(kRS[i], want[i]); }
 		static const D3DSAMPLERSTATETYPE kSS[] = { D3DSAMP_MINFILTER, D3DSAMP_MAGFILTER, D3DSAMP_MIPFILTER, D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_SRGBTEXTURE };
-		DWORD savedSS[10][sizeof(kSS) / sizeof(kSS[0])];
-		for (int s = 0; s < 10; s++) {
+		DWORD savedSS[11][sizeof(kSS) / sizeof(kSS[0])];
+		for (int s = 0; s < 11; s++) {
 			const bool linearFilter = kStages[s] == 8;	// the atlas: linear (PointShadowForward::Bind)
 			const DWORD wantS[] = { linearFilter ? (DWORD)D3DTEXF_LINEAR : (DWORD)D3DTEXF_POINT, linearFilter ? (DWORD)D3DTEXF_LINEAR : (DWORD)D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, FALSE };
 			for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) { d->GetSamplerState(kStages[s], kSS[i], &savedSS[s][i]); if (savedSS[s][i] != wantS[i]) d->SetSamplerState(kStages[s], kSS[i], wantS[i]); }
@@ -266,7 +266,22 @@ namespace DeferredLamps {
 		d->SetPixelShaderConstantF(180, shadowK[0], 10);
 		const float one[4] = { 1.0f, 0.0f, 0.0f, 0.0f }, zero[4] = {};
 		d->SetPixelShaderConstantF(211, one, 1);	// NVR_SpecFade: full (no per-draw fade in the pass)
-		d->SetPixelShaderConstantF(215, zero, 1);	// NVR_PointShadowRT: the atlas (no traced lookups in C1)
+		// UNOFFICIAL 2026-11-03 (rtfwd) RT lamp shadows: the traced result where a lamp has one (DeferredLamps.hlsl DLShadow reads each lamp's
+		// trace id from the table), as RtLampShadows::SetForPass gives the forward draws, without its upload cache (the constants are put back
+		// below); the draw slots -1 (the pass names its lamps itself). Was c215 = 0: the atlas only, so RT lamp shadows changed almost nothing
+		// indoors once the deferred pass lit most of the picture (a tester: "RT shadows don't work").
+		if (RtLampShadows::CompiledIn) {
+			float rc[7][4] = {};
+			memcpy(rc, RtLampShadows::Reproject, sizeof(RtLampShadows::Reproject));
+			memcpy(rc[4], RtLampShadows::RtConstant, sizeof(RtLampShadows::RtConstant));
+			rc[4][0] = RtLampShadows::Mode;
+			for (int k = 0; k < 4; k++) rc[5][k] = -1.0f;
+			rc[6][0] = rc[6][1] = -1.0f; rc[6][2] = RtLampShadows::DebugLamp; rc[6][3] = RtLampShadows::PackingInverse();
+			d->SetPixelShaderConstantF(206, &rc[0][0], 4);
+			d->SetPixelShaderConstantF(215, &rc[4][0], 3);
+			d->SetTexture(15, RtLampShadows::Stage15Texture());
+		}
+		else d->SetPixelShaderConstantF(215, zero, 1);	// NVR_PointShadowRT: the atlas
 		const D3DXMATRIX& iv = TheRenderManager->InvViewMatrix;
 		const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
 		const float tanX = fabsf(TheRenderManager->InvProjMatrix._11), tanY = fabsf(TheRenderManager->InvProjMatrix._22);
@@ -299,7 +314,7 @@ namespace DeferredLamps {
 		bool vis = false;
 		// UNOFFICIAL 2026-11-01 PrecisionBias (DeferredLamps.hlsl DLShadow): the shadow lookup's push off the surface per unit of distance
 		const float bias = (std::max)(TheSettingManager->GetSettingF(kSection, "PrecisionBias"), 0.0f) * 0.001f;
-		if (DebugView < 2 && EnsureShadowPass(t.Width, t.Height)) {
+		if ((DebugView < 2 || DebugView == 7) && EnsureShadowPass(t.Width, t.Height)) {
 			static GpuTimer shadowTimer("Deferred lamp shadows");
 			GpuProfileScope shadowGpu(shadowTimer, d);
 			d->SetPixelShader(ShadowPass->ShaderHandle);
@@ -325,7 +340,7 @@ namespace DeferredLamps {
 		d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
 		StatPasses++;
 
-		for (int s = 0; s < 10; s++) {
+		for (int s = 0; s < 11; s++) {
 			for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) d->SetSamplerState(kStages[s], kSS[i], savedSS[s][i]);
 			d->SetTexture(kStages[s], tex[s]); if (tex[s]) tex[s]->Release();
 		}

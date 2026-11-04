@@ -54,6 +54,10 @@ public:
 	std::map<std::string_view, ShaderTemplate> Templates() {
 		if (!Decided) {
 			Decided = true;
+			// 2026-11-03: looked up here too -- the shader precompile asks for these templates before GameCommon.cpp's check runs, so the
+			// route was always decided as if VPS were absent (harmless with OverrideVanillaPlusSkin on, the default; off, VPS was never used).
+			// VanillaPlusSkin.dll is loaded by then (xNVSE loads the plugins by name, before this one).
+			if (GetModuleHandleA("VanillaPlusSkin.dll")) bVPSLoaded = true;
 			UseVPS = bVPSLoaded && !TheSettingManager->GetSettingI("Shaders.Skin.Main", "OverrideVanillaPlusSkin");
 			if (UseVPS && (GetFileAttributesA((std::string(ShadersPath) + "SkinVPSTemplate.hlsl").c_str()) == INVALID_FILE_ATTRIBUTES ||
 				GetFileAttributesA((std::string(ShadersPath) + "Includes\\SkinVPS.hlsl").c_str()) == INVALID_FILE_ATTRIBUTES)) {

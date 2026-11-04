@@ -699,6 +699,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	OnePassDepth::BeginFrame(TheRenderManager->device);	// UNOFFICIAL 2026-10-26 LampsDepthFirst
 	PassSums::BeginFrame(PassSums::ModeFromSettings());	// UNOFFICIAL ExactPassSums, and 2026-10-21 LampSums (the extra lamp passes summed in linear light)
 	ClothWind::BeginFrame(Tes ? Tes->sky : nullptr, TheShaderManager->GameState.isExterior);	// UNOFFICIAL cloth wind
+	PipboyFit::BeginFrame();	// UNOFFICIAL 2026-11-03 PipboyFit
 	PlantWind::BeginFrame(Tes ? Tes->sky : nullptr, TheShaderManager->GameState.isExterior);	// UNOFFICIAL 2026-10-20 plant wind (after the cloth: it uses its bookkeeping)
 #if NVR_TEST_TOOLS
 	LampPassTest::BeginFrame();	// UNOFFICIAL, diagnostic: LampPassTestSkip
@@ -1754,6 +1755,21 @@ namespace MaterialRulesDraw {
 	static void AfterBind() {
 		if (Active) TheRenderManager->device->SetPixelShaderConstantF(197, Current, 3);
 	}
+}
+
+// UNOFFICIAL 2026-11-03 (core/RtCore.cpp: the RT scene's materials, the reference path tracer's off-screen hits): the material rule's
+// roughness (the middle of its range; < 0 = the rule gives none) and metal (full = Strength, off = 0, guess / mask = -1: not known
+// without the texture) for a mesh, from the same table the object shaders use. False: no rule.
+bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal) {
+	*roughness = -1.0f; *metal = -1.0f;
+	if (!MaterialRulesDraw::Loaded) MaterialRulesDraw::Load();
+	const int index = geometry ? MaterialRulesDraw::RuleFor(geometry, false) : 0;
+	if (!index) return false;
+	const MaterialRules::Rule& rule = MaterialRulesDraw::Table.Get(index);
+	if (rule.RoughMin >= 0.0f && rule.RoughMax >= 0.0f) *roughness = 0.5f * (rule.RoughMin + rule.RoughMax);
+	if (rule.Metal == MaterialRules::MetalFull) *metal = rule.Strength;
+	else if (rule.Metal == MaterialRules::MetalOff) *metal = 0.0f;
+	return true;
 }
 
 // UNOFFICIAL 2026-10-14 _rmaos maps ([Shaders.PBR.Rmaos], Object.hlsl RMAOS): before each object, its diffuse texture's
@@ -2857,8 +2873,10 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 		if (reflections && clouds->HideGameCloudsInReflection > 0.0f) clouds->CaptureReflection(TheRenderManager->device);
 	}
 
-	if (VertexShader)
-		VertexShader->SetupShader(VertexShader2);
+	// 2026-11-03: only shaders NVR made are set up (ShaderRecord.h ShaderOwnership: Real Time Reflections' own env shaders stay its own)
+	if (VertexShader) {
+		if (ShaderOwnership::MaySetUp(VertexShader, "vertex")) VertexShader->SetupShader(VertexShader2);
+	}
 	else
 		Logger::Log("Error getting vertex shader for pass %s", Pointers::Functions::GetPassDescription(PassIndex));
 	// UNOFFICIAL cloth wind: which objects drew with a vanilla vertex shader (they must not get cloth: see ClothWind.h SAFETY)
@@ -2866,7 +2884,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	ClothWind::NoteShaders(ClothWind::PassGeometry ? ClothWind::PassGeometry : Geometry, VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup &&
 		ClothWind::CapableName(VertexShader->Name), VertexShader ? VertexShader->Name : nullptr);
 	if (PixelShader) {
-		PixelShader->SetupShader(ForcePixelConstants ? nullptr : PixelShader2);
+		if (ShaderOwnership::MaySetUp(PixelShader, "pixel")) PixelShader->SetupShader(ForcePixelConstants ? nullptr : PixelShader2);
 		ForcePixelConstants = false;
 	} else
 		Logger::Log("Error getting pixel shader for pass %s", Pointers::Functions::GetPassDescription(PassIndex));
@@ -3332,7 +3350,8 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	}
 	PassSums::BeforePass(Pass, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL ExactPassSums
 	ClothWind::ForGeometry(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, false, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL cloth wind
-	if (HiddenObjectCulling::Before(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) { ClothWind::AfterDraw(TheRenderManager->device); return; }	// UNOFFICIAL HiddenObjectCulling
+	PipboyFit::ForGeometry(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-11-03 PipboyFit
+	if (HiddenObjectCulling::Before(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) { PipboyFit::AfterDraw(); ClothWind::AfterDraw(TheRenderManager->device); return; }	// UNOFFICIAL HiddenObjectCulling
 	ReflectionProbe::OnObject(Pass, true);
 	MaterialRulesDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL material rules
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps

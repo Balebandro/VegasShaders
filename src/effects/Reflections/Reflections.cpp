@@ -136,7 +136,14 @@ namespace {
 
 	UINT RtWidth() { return MaxQuality::Reduced(TheRenderManager->width, 2); }
 	UINT RtHeight() { return MaxQuality::Reduced(TheRenderManager->height, 2); }
-	bool RtUserWants() { return RtEffect && RtEffect->Enabled && RtEffect->Settings.RtEnabled && DxvkCompute::PassesOn(); }
+	// UNOFFICIAL 2026-11-03 RT reflections at RenderScale < 1 (docs/next/RT-RENDERSCALE.md "RT reflections plan"): the grid the helper
+	// traces this frame: the whole half-size images in a native frame, their top-left RenderScale rect in a rect frame (RtTrace sets it).
+	UINT RtTraceWidth = 0, RtTraceHeight = 0;
+	// The RT passes' rule instead of DxvkCompute::PassesOn: the NVR DXVK passes on and there. PassesOn is false inside a rect frame by
+	// design (the other Vulkan passes draw whole targets); RT reflections' own passes (RayGen, Resolve, the sky panorama) keep to the rect,
+	// and Temporal, the blurs and the composite run as their rect-aware D3D9 techniques there. In a native frame the same as PassesOn.
+	bool RtPassesWanted() { return TheSettingManager->SettingsMain.Main.NvrDxvkPasses && DxvkCompute::Available(); }
+	bool RtUserWants() { return RtEffect && RtEffect->Enabled && RtEffect->Settings.RtEnabled && RtPassesWanted(); }
 	void RtUserSetup() {
 		RtImageDir = RtCore::AddImage("NVR RT reflections direction", RtWidth(), RtHeight(), NVR_EXT_SHARED_RG32F);
 		RtImageRay = RtCore::AddImage("NVR RT reflections ray", RtWidth(), RtHeight(), NVR_EXT_SHARED_RG32F);
@@ -166,7 +173,8 @@ namespace {
 		if (tex) images[count++] = albedo;
 		if (glow) images[count++] = glowAtlas;
 		const int shader = alpha ? (glow ? RtShaderAlphaTexGlow : tex ? RtShaderAlphaTex : RtShaderAlpha) : (glow ? RtShaderTexGlow : tex ? RtShaderTex : RtShader);
-		if (!RtCore::AddPass(shader, images, count, 0xC, &RtPending, sizeof(RtPending), (RtWidth() + 7) / 8, (RtHeight() + 7) / 8)) return;
+		const UINT gridW = RtTraceWidth ? RtTraceWidth : RtWidth(), gridH = RtTraceHeight ? RtTraceHeight : RtHeight();	// (2026-11-03: the rect in rect frames)
+		if (!RtCore::AddPass(shader, images, count, 0xC, &RtPending, sizeof(RtPending), (gridW + 7) / 8, (gridH + 7) / 8)) return;
 		RtRecorded = RtCore::CopyOut(RtImageHit, rt.HitSurface) && RtCore::CopyOut(RtImageShade, rt.ShadeSurface);
 	}
 	const RtCore::User RtUser = { "RT reflections", RtUserWants, RtUserSetup, RtUserRecord, 1 };	// Point 1: only through RtCore::Exchange (RtTrace)
@@ -198,7 +206,7 @@ void ReflectionsEffect::RtRegister() {
 // Only on the Vulkan trace (ExtRender) with the RT core's helper up. Everything else (the setting off, D3D9 passes, a GPU without
 // RT, a pipeline refused) leaves the trace as it was. SplitTest runs the two in-game passes without rays and without the helper.
 bool ReflectionsEffect::RtWanted() const {
-	return Settings.RtEnabled && !ExtFailed && !rtTraceFailed && DxvkCompute::PassesOn() && (RtCoreClient::Ready() || Settings.RtSplitTest);
+	return Settings.RtEnabled && !ExtFailed && !rtTraceFailed && RtPassesWanted() && (RtCoreClient::Ready() || Settings.RtSplitTest);	// (2026-11-03: rect frames too)
 }
 
 float ReflectionsEffect::RtSunAmount() const {
@@ -239,6 +247,9 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 	// SplitTest (no helper): RayGen casts no ray, so Resolve must give the normal trace's picture exactly (the split checked on any GPU).
 	rtRays = RtCoreClient::Ready();
 	weaponFrame = rtRays && Settings.RtWeapon > 0.0f;	// UNOFFICIAL 2026-10-30 (dropped again below if this frame falls back to the normal trace)
+	// UNOFFICIAL 2026-11-03 RenderScale < 1: no weapon rays in a rect frame: the composite there is the D3D9 one, which never shades the
+	// weapon (its reflection would only be traced and blurred into its surroundings).
+	if (RenderRect::Active()) weaponFrame = false;
 	waterFrame = rtRays && Settings.RtWater && !TheShaderManager->GameState.isUnderwater;	// UNOFFICIAL 2026-10-31 (the same)
 	if (rtRays && Settings.RtHitLamps) RtGatherLamps(Settings.RtDistance); else RtLampCount = 0;	// UNOFFICIAL 2026-10-29 (before RayGen: both passes read them)
 	if (!ExtRender(Device, Rt.MarchSurface, Rt.MarchSurface, 8, false, Rt.MarchSurface)) return false;
@@ -252,7 +263,11 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		const float reach = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarObjectLOD") != 0 ||
 			TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarLandLOD") != 0 ?
 			(std::max)(Settings.RtDistance, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FarRadius")) : Settings.RtDistance;
-		RtPending.size = D3DXVECTOR4((float)RtWidth(), (float)RtHeight(), reach, Settings.RtSunShadows ? 1.0f : 0.0f);
+		// UNOFFICIAL 2026-11-03 RenderScale < 1: in a rect frame the helper traces the top-left rect of the half-size images (RenderRect::
+		// Width / Height of them, the part the D3D9 passes' ApplyViewport draws); RayGen wrote "no ray" past it.
+		RtTraceWidth = RenderRect::Width(RtWidth());
+		RtTraceHeight = RenderRect::Height(RtHeight());
+		RtPending.size = D3DXVECTOR4((float)RtTraceWidth, (float)RtTraceHeight, reach, Settings.RtSunShadows ? 1.0f : 0.0f);
 		RtPending.forward = D3DXVECTOR4(view._13, view._23, view._33, 0.0f);
 		RtPending.right = D3DXVECTOR4(view._11 / proj._11, view._21 / proj._11, view._31 / proj._11, 1.0f / WeaponFovScale());	// w: the weapon's
 		RtPending.up = D3DXVECTOR4(view._12 / proj._22, view._22 / proj._22, view._32 / proj._22, 0.0f);
@@ -262,6 +277,30 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		D3DXVec3Normalize(&toSun, &toSun);
 		RtPending.sun = D3DXVECTOR4(toSun.x, toSun.y, toSun.z, RtSunAmount() > 0.0f ? 1.0f : 0.0f);
 		RtPending.layout = D3DXVECTOR4(Constants.Layout.x, Constants.Layout.y, 1.0f / TheRenderManager->width, 1.0f / TheRenderManager->height);
+		if (RenderRect::Active()) {
+			// UNOFFICIAL 2026-11-03 RenderScale < 1: the helper rebuilds each surface at uv = (pixel + 0.5) x layout.xy - 0.5 x (layout.xy -
+			// layout.zw), RayGen's pixel centre as a texture coordinate; divided by the rect's scale, that is the screen point it shows
+			// (rectToScreen), what its camera rays want. Plus the depth's jitter (TAAEffect::DepthJitterUV, screen uv: a depth texel lies on
+			// the ray through uv + jitter; 1 / scale bigger on screen than at RenderScale 1). The constants are full (496 of 512 bytes, up.w
+			// alone free), so it rides in forward as a shear: the helper's point is forward + right (2u - 1) - up (2v - 1), and u + jx, v + jy
+			// add 2 jx right - 2 jy up. Rect frames only (RenderScale 1 untouched, as RT AO's).
+			RtPending.layout.x /= RenderRect::ScaleX;
+			RtPending.layout.z /= RenderRect::ScaleX;
+			RtPending.layout.y /= RenderRect::ScaleY;
+			RtPending.layout.w /= RenderRect::ScaleY;
+			if (TAAEffect* taa = TheShaderManager->Effects.TAA) {
+				const D3DXVECTOR2 j = taa->DepthJitterUV();
+				RtPending.forward.x += 2.0f * j.x * RtPending.right.x - 2.0f * j.y * RtPending.up.x;
+				RtPending.forward.y += 2.0f * j.x * RtPending.right.y - 2.0f * j.y * RtPending.up.y;
+				RtPending.forward.z += 2.0f * j.x * RtPending.right.z - 2.0f * j.y * RtPending.up.z;
+			}
+			static bool logged = false;
+			if (!logged) {
+				logged = true;
+				Logger::Log("UNOFFICIAL Reflections: RT traced in the RenderScale rect: %ux%u of %ux%u (RayGen, the helper, Resolve and the sky panorama as Vulkan passes, the rest D3D9).",
+					RtTraceWidth, RtTraceHeight, RtWidth(), RtHeight());
+			}
+		}
 		// forward.w: the lamp count (integer part; RtGatherLamps ran before RayGen, ExtRender 8 uploads the same lamps for Resolve) +
 		// RoughReach (fraction part, below 1: a rough ray's reach share at roughness 1).
 		RtPending.forward.w = (float)RtLampCount + std::clamp(Settings.RtRoughReach, 0.0f, 0.99f);
@@ -565,6 +604,8 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		rtWaterView = view;
 		rtWaterInvView = invView;
 		rtWaterProj = TheRenderManager->projMatrix;
+		rtWaterScaleX = RenderRect::Active() ? RenderRect::ScaleX : 1.0f;	// UNOFFICIAL 2026-11-03 (Buffer's drawn part this frame)
+		rtWaterScaleY = RenderRect::Active() ? RenderRect::ScaleY : 1.0f;
 	}
 
 	haveHistory = temporal;
@@ -599,8 +640,18 @@ void ReflectionsEffect::UpdateWaterConstants() {
 			toView.m[3][j] = (float)(move[0] * rtWaterView.m[0][j] + move[1] * rtWaterView.m[1][j] + move[2] * rtWaterView.m[2][j]);
 		toView.m[3][3] = 1.0f;
 		D3DXMatrixMultiply(&Constants.WaterReproject, &toView, &rtWaterProj);
+		// UNOFFICIAL 2026-11-03 RenderScale < 1: a rect frame traced the water into the top-left of Buffer. The water shader takes
+		// uv = clip.xy / w x (0.5, -0.5) + 0.5; pre-scaled here so that uv comes out as s x uv (as RT lamp shadows' lookup): column x' =
+		// s x + (s - 1) w, y' = s y - (s - 1) w. Its inside test then reads TESR_RTWaterData.w (the scale) as the edge. Native: unchanged.
+		if (rtWaterScaleX < 1.0f || rtWaterScaleY < 1.0f) {
+			D3DXMATRIX& m = Constants.WaterReproject;
+			for (int r = 0; r < 4; r++) {
+				m.m[r][0] = rtWaterScaleX * m.m[r][0] + (rtWaterScaleX - 1.0f) * m.m[r][3];
+				m.m[r][1] = rtWaterScaleY * m.m[r][1] - (rtWaterScaleY - 1.0f) * m.m[r][3];
+			}
+		}
 	}
-	Constants.WaterData = D3DXVECTOR4(valid ? 1.0f : 0.0f, valid && Settings.RtWaterSkipPlanar ? 1.0f : 0.0f, 1.0f, 0.0f);
+	Constants.WaterData = D3DXVECTOR4(valid ? 1.0f : 0.0f, valid && Settings.RtWaterSkipPlanar ? 1.0f : 0.0f, 1.0f, valid ? rtWaterScaleX : 1.0f);
 }
 
 // UNOFFICIAL 2026-10-31 SkyPanorama ([Shaders.Reflections.RT], docs/next/FORK-RT-REFLECTIONS.md "Sky at a miss"): the sky as seen,
@@ -609,7 +660,9 @@ void ReflectionsEffect::UpdateWaterConstants() {
 // after it this frame read it on t_cloudSky (material2.y 2).
 void ReflectionsEffect::RenderSkyPano(IDirect3DDevice9* Device) {
 	panoReady = false;
-	if (!Settings.RtSkyPanorama || panoFailed || !TheShaderManager->GameState.isExterior || !DxvkCompute::PassesOn() || ExtFailed) return;
+	// (2026-11-03 RenderScale < 1: also in rect frames while the RT trace runs, its only reader there; ToScreen keeps to the rect)
+	if (!Settings.RtSkyPanorama || panoFailed || !TheShaderManager->GameState.isExterior || ExtFailed ||
+		!(DxvkCompute::PassesOn() || (RenderRect::Active() && RtWanted()))) return;
 	if (!pano[0]) {
 		for (int i = 0; i < 2; i++)
 			if (FAILED(Device->CreateTexture(128, 128, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &pano[i], NULL)) ||
@@ -725,6 +778,7 @@ namespace {
 		D3DXVECTOR4	depthConstants, cameraData, cameraPosition, sky, flags;
 		D3DXVECTOR4	material2;	// UNOFFICIAL 2026-10-30 x 1: TESR_MaterialBuffer's roughness for the floor guess
 		D3DXVECTOR4	weapon;		// UNOFFICIAL 2026-10-30 x on, y WeaponFovScale, z strength, w roughness without material data
+		D3DXVECTOR4	renderScale;	// UNOFFICIAL 2026-11-03 TESR_RenderScale: xy the rect frame's scale, zw 1 / xy; 1 in a native frame
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -975,6 +1029,10 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	const bool weaponOn = weaponFrame && RtWanted();
 	uniforms.weapon = D3DXVECTOR4(weaponOn ? 1.0f : 0.0f, WeaponFovScale(), Settings.RtWeapon * (TheShaderManager->GameState.isExterior ? Settings.ReflectivityExterior : Settings.ReflectivityInterior),
 		Settings.RtWeaponRoughness);
+	// UNOFFICIAL 2026-11-03 RT reflections at RenderScale < 1: in a rect frame the passes drawn here (RayGen, Resolve, the panorama)
+	// keep to its top-left part, as the .fx's techniques do with TESR_RenderScale.
+	uniforms.renderScale = RenderRect::Active() ? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY) :
+		D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
@@ -1061,7 +1119,7 @@ std::string ReflectionsEffect::RtStatusText() const {
 	if (!Enabled) return "Reflections off";
 	if (!Settings.RtEnabled) return "Reflections on, RT off ([Shaders.Reflections.RT] Enabled false): the screen-space trace alone";
 	const char* why = ExtFailed ? "its Vulkan passes failed (D3D9 fallback, no RT)" : rtTraceFailed ? "an RT pass or image could not be made (logged): the normal trace" :
-		!DxvkCompute::PassesOn() ? "the Vulkan passes are off this frame (NvrDxvkPasses off, or a RenderScale frame drawn small): the normal trace" :
+		!RtPassesWanted() ? "the NVR DXVK passes are off (NvrDxvkPasses off, or no NVR DXVK): the normal trace" :
 		!RtCoreClient::Ready() && !Settings.RtSplitTest ? "the RT core is not running (no helper, or it is still starting): the normal trace" : nullptr;
 	char t[500];
 	sprintf_s(t, "Reflections on, RT on: %s | last frame: %s | frames traced with RT %u, frames the helper traced nothing %u | MaxRoughness %.2f, Distance %.0f, "

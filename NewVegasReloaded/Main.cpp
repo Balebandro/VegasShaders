@@ -7,6 +7,7 @@
 #include "../src/NewVegas/Managers.h"
 #include "../src/core/EffectSelfTest.h"
 void HdrOutputNoteDesktop();	// in Render.cpp (UNOFFICIAL 2026-10-29)
+#include "../src/core/InstallCheck.h"	// 2026-11-03: the install self-check (old DLL / folders / textures / presets), shown on screen
 #include "../src/core/SessionLog.h"	// UNOFFICIAL 2026-11-01: session header, game events, exit summary
 #include "../src/core/IOWorker2.h"	// UNOFFICIAL 2026-10-20 (EXPERIMENTAL, off by default): a second loading thread for model / texture tasks
 
@@ -140,9 +141,12 @@ extern "C" {
 			GetModuleFileNameA(module, self, MAX_PATH);
 			const char* selfName = strrchr(self, '\\') ? strrchr(self, '\\') + 1 : self;
 			const std::string other = Paths::ModuleDir() + (_stricmp(selfName, Paths::DllName) == 0 ? Paths::OldDllName : Paths::DllName);
-			if (GetFileAttributesA(other.c_str()) != INVALID_FILE_ATTRIBUTES)
+			if (GetFileAttributesA(other.c_str()) != INVALID_FILE_ATTRIBUTES) {
 				Logger::Log("[ERROR] PATHS: %s is also in the plugins folder; two copies of the plugin may load. Keep only %s.", other.c_str(), Paths::DllName);
+				Paths::TwinDll = other;	// 2026-11-03: the large warning on the main menu and in game (ImGuiManager RenderTwinDllWarning)
+			}
 		}
+		InstallCheck::OnPluginLoad(nvse->Version, nvse->GameVersion);
 		SessionLog::OnPluginLoad(nvse->Version, nvse->GameVersion, kPluginVersion);	// UNOFFICIAL 2026-11-01: the session header (SessionLog.h)
 
 		CommandManager::Initialize(nvse);

@@ -19,7 +19,7 @@ vec3 RtHitColour(vec3 hitW, vec4 hitData, vec4 shade, vec3 worldR, float roughne
     uint hitFlags = uint(hitData.y + 0.5);
     vec3 hitV = WorldToViewDir(hitW);   // camera-relative: a direction transform is the whole move
     vec2 at = ToScreen(hitV);
-    bool inView = hitV.z > nearZ && all(greaterThan(at, vec2(0.0))) && all(lessThan(at, vec2(1.0)));
+    bool inView = hitV.z > nearZ && all(greaterThan(at, vec2(0.0))) && all(lessThan(at, cb.renderScale.xy));   // (2026-11-03: the drawn part)
     if (inView && abs(readDepthLod(at) - hitV.z) < max(hitV.z * RtTolerance, 8.0) && !IsWeapon(at)) {
         source = vec2(1.0, 0.0);
         return linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);

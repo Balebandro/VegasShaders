@@ -1,4 +1,5 @@
 #include "AmbientLight.h"
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-03 PTReplace (Replacing)
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../BounceLight/BounceLightMath.h"
 #include "../../core/FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
@@ -486,6 +487,7 @@ void AmbientLightEffect::RenderGrid(IDirect3DDevice9* Device, bool sun, bool scr
 }
 
 bool AmbientLightEffect::ShouldRender() {
+	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own indirect light
 	return Enabled && Effect && !TheShaderManager->GameState.isUnderwater;
 }
 
@@ -821,10 +823,16 @@ bool AmbientLightEffect::ExtOn() const {
 	return !ExtFailed && DxvkCompute::PassesOn() && TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight && !DxvkCompute::KeptOnD3D9(Name);
 }
 
+// UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md, phase 1): ExtOn's rule in a rect frame, where PassesOn is
+// false by design; only the RT estimate (ExtDraw's ExtEstimateRT) uses it: a pass that reads and writes each texel where it is.
+bool AmbientLightEffect::ExtOnRect() const {
+	return !ExtFailed && RenderRect::Active() && RtAmbient::PassesWanted() && TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight && !DxvkCompute::KeptOnD3D9(Name);
+}
+
 // One pass as a Vulkan pass into Targets (1-4 of one size, as the D3D9 pass's render targets 0..n-1) over Viewport (at 0, 0: the D3D9
 // pass's), Textures in the shader's binding order (what the D3D9 pass has on those stages). False: not drawn (the D3D9 pass runs).
 bool AmbientLightEffect::ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Targets, UINT TargetCount, IDirect3DBaseTexture9* const* Textures, UINT Variant, const D3DVIEWPORT9& Viewport) {
-	if (!ExtOn() || Shader >= ExtShaderCount || !TargetCount || TargetCount > NVR_EXT_MAX_TARGETS || Viewport.X || Viewport.Y || !Viewport.Width || !Viewport.Height) return false;
+	if (!(ExtOn() || (Shader == ExtEstimateRT && ExtOnRect())) || Shader >= ExtShaderCount || !TargetCount || TargetCount > NVR_EXT_MAX_TARGETS || Viewport.X || Viewport.Y || !Viewport.Width || !Viewport.Height) return false;
 	const ALExtShader& info = ALExtShaders[Shader];
 	if (DxvkCompute::KeptOnD3D9(info.Spv)) return false;	// UNOFFICIAL 2026-10-26 test: NvrDxvkKeepD3D9 can name one pass (e.g. AmbientLightAccumulate)
 	ExtPass& pass = extPasses[Shader][TargetCount - 1];
@@ -1052,6 +1060,23 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	AmbientOcclusionEffect* rtAO = TheShaderManager->Effects.AmbientOcclusion;
 	IDirect3DTexture9* rtGI = !giOn && rtAO && RtAmbient::Ready() ? rtAO->RtGI() : nullptr;
 	Constants.Data.z = giOn ? giStrength : rtGI ? RtAmbient::Current.GIStrength : 0.0f;
+	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (AmbientLight.fx.hlsl NVR_ALGI; docs/next/RT-PATH-TRACING.md section 16): with
+	// [Main.Main.Performance] NvrDxvkAmbientLight off (its default since 2026-11-01) every pass below is D3D9, and the RT bounce light
+	// used to reach the picture only through the Vulkan twins (RT estimate, GI accumulate, GI apply), so RT GI changed nothing. Now the
+	// D3D9 Estimate puts the traced bounce (denoised when the shared RT denoiser is on, as the RT estimate takes it) into its rgb, the D3D9
+	// Accumulate keeps it from frame to frame and the D3D9 Apply adds it x the surface colour x GIStrength: the same maths. The occlusion
+	// stays the D3D9 Estimate's own. No RT GI this frame (the default): NVR_ALGI is 0 and every pass is exactly as before.
+	IDirect3DTexture9* giD3D9Texture = nullptr;
+	if (rtGI && !ExtOn()) {
+		IDirect3DTexture9* clean = rtAO->RtDenoisedGI(Device);
+		giD3D9Texture = clean ? clean : rtGI;
+	}
+	D3DXHANDLE giHandle = ParameterHandle(paramGI, "NVR_ALGI");
+	if (giD3D9Texture && !giHandle) giD3D9Texture = nullptr;	// an older AmbientLight.fx.hlsl: nothing to switch
+	if (giHandle) {
+		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f, 0.0f);	// z: set for Apply (below)
+		Effect->SetVector(giHandle, &giFlags);
+	}
 	Effect->SetTechnique(technique);
 	SetCT();
 	Effect->SetVector(layoutHandle, &layout);
@@ -1165,6 +1190,41 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// RR denoises the frame (Upscaler::RayReconstructionWantsRaw): no blur X / Y (Accumulate and Apply read buffer 0, the estimate as it
 	// is) and Accumulate keeps no history (share 0: it passes the estimate through into the targets Apply reads). Set by the RT estimate.
 	bool rrRaw = false;
+	// UNOFFICIAL 2026-11-03 (RT AO at RenderScale < 1; docs/next/RT-RENDERSCALE.md, phase 1) the RT estimate below as one helper: the Vulkan
+	// passes' Estimate (ExtOn) and, in rect frames, the one Vulkan pass inside the rect-aware D3D9 passes (ExtOnRect). True: drawn.
+	auto estimateRT = [&](IDirect3DSurface9* const* targets) -> bool {
+		bool drawn = false;
+		static bool rtChecked = false, rtFile = false;
+		if (!rtChecked) { rtChecked = true; rtFile = DxvkCompute::HasSpirv("AmbientLightEstimateRT"); }
+		AmbientOcclusionEffect* ao = TheShaderManager->Effects.AmbientOcclusion;
+		IDirect3DTexture9* rtRaw = !giLightReady && rtFile && ao && RtAmbient::Ready() ? ao->RtRaw() : nullptr;
+		if (rtRaw) {
+			static GpuTimer rtTimer("  Ambient light RT estimate (half)");
+			GpuProfileScope rtGpu(rtTimer, Device);
+			// (rt-ao-gi) variant bit 8: the bounce light (3rd texture) into rgb; without GI the 3rd is a stand-in, not read.
+			// (2026-10-29) the AO visibility through the shared RT denoiser when on (.x; screen size, read by uv)
+			IDirect3DTexture9* rtVis = ao->RtDenoised(Device);
+			IDirect3DTexture9* rtGIClean = rtGI ? ao->RtDenoisedGI(Device) : nullptr;	// (2026-10-29) RGB, half
+			IDirect3DTexture9* rtGIUsed = rtGIClean ? rtGIClean : rtGI;
+			IDirect3DBaseTexture9* rtTextures[] = { prepTexture, rtVis ? rtVis : rtRaw, rtGIUsed ? (IDirect3DBaseTexture9*)rtGIUsed : (IDirect3DBaseTexture9*)rtRaw };
+			drawn = ExtDraw(ExtEstimateRT, targets, 1, rtTextures, (UINT)RtAmbient::Current.DebugView | (rtGI ? 0x100u : 0u), reduced);
+			if (drawn && rtGI) giDrawn = true;	// ComputeGI's accumulate and apply take the bounce light from here
+			// UNOFFICIAL 2026-10-30 DLSS RR (rrRaw above): Accumulate's history share 0 from here on (Estimate has read
+			// NVR_ALTemporal already; the passes after it read only .x's share from it, and .y / .z stay)
+			if (drawn && Upscaler::RayReconstructionWantsRaw()) {
+				rrRaw = true;
+				if (temporalHandle) {
+					D3DXVECTOR4 temporalData(0.0f, 0.0f, 0.0f, 0.0f);
+					Effect->GetVector(temporalHandle, &temporalData);
+					temporalData.x = 0.0f;
+					Effect->SetVector(temporalHandle, &temporalData);
+				}
+				static bool logged = false;
+				if (!logged) { logged = true; Logger::Log("UNOFFICIAL DLSS RR: AmbientLight: its own denoiser is skipped (RR denoises the raw signal)"); }
+			}
+		}
+		return drawn;
+	};
 	HRESULT result = Effect->Begin(&passes, 0);
 	if (SUCCEEDED(result)) {
 		for (UINT p = 0; p < 8 && SUCCEEDED(result); ++p) {
@@ -1202,6 +1262,21 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				p == 5 ? statsSurface : p == 6 ? balanceSurface[balanceWrite] : bufferSurface[p == 2 ? 1 : 0];
 			// UNOFFICIAL 2026-10-25 (NVR DXVK) NvrDxvkPasses: pass p as a Vulkan pass, into the same target(s), with what the D3D9 pass has on
 			// the stages its shader reads (bound below); not drawn: the D3D9 pass.
+			// UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md, phase 1): in a rect frame the Vulkan passes are
+			// off (the D3D9 passes below keep to the rect); the RT estimate alone runs as one (ExtOnRect: the same NvrDxvkAmbientLight rule),
+			// in Estimate's place: a whole-target draw writes each texel in the rect layout (the trace covered the rect, the half-size prep
+			// and NVR_RTAORaw share it). Not drawn: the D3D9 Estimate.
+			if (p == 1 && !ExtOn() && ExtOnRect()) {
+				IDirect3DSurface9* targets[2] = { destination, occlusionHistorySurface[writeIndex] };
+				bool drawn;
+				{
+					GpuProfileScope gpu(passTimers[p], Device);
+					drawn = estimateRT(targets);
+				}
+				static bool logged = false;
+				if (drawn && !logged) { logged = true; Logger::Log("UNOFFICIAL RT AO: AmbientLight's RT estimate runs inside its D3D9 passes (RenderScale rect frame)."); }
+				if (drawn) continue;
+			}
 			if (ExtOn()) {
 				IDirect3DBaseTexture9* depth = ExtFileTexture("TESR_DepthBuffer");
 				IDirect3DBaseTexture9* normals = ExtFileTexture("TESR_NormalsBuffer");
@@ -1237,35 +1312,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 						// UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT]: the occlusion from the RT helper's rays
 						// (AmbientLightEstimateRT.frag; core/RtAmbient.h), the blurs and Accumulate after it as after Estimate (the denoiser).
 						// ComputeGI keeps the screen search (its light needs it). Variant = the RT DebugView.
-						static bool rtChecked = false, rtFile = false;
-						if (!rtChecked) { rtChecked = true; rtFile = DxvkCompute::HasSpirv("AmbientLightEstimateRT"); }
-						AmbientOcclusionEffect* ao = TheShaderManager->Effects.AmbientOcclusion;
-						IDirect3DTexture9* rtRaw = !giLightReady && rtFile && ao && RtAmbient::Ready() ? ao->RtRaw() : nullptr;
-						if (rtRaw) {
-							static GpuTimer rtTimer("  Ambient light RT estimate (half)");
-							GpuProfileScope rtGpu(rtTimer, Device);
-							// (rt-ao-gi) variant bit 8: the bounce light (3rd texture) into rgb; without GI the 3rd is a stand-in, not read.
-							// (2026-10-29) the AO visibility through the shared RT denoiser when on (.x; screen size, read by uv)
-							IDirect3DTexture9* rtVis = ao->RtDenoised(Device);
-							IDirect3DTexture9* rtGIClean = rtGI ? ao->RtDenoisedGI(Device) : nullptr;	// (2026-10-29) RGB, half
-							IDirect3DTexture9* rtGIUsed = rtGIClean ? rtGIClean : rtGI;
-							IDirect3DBaseTexture9* rtTextures[] = { prepTexture, rtVis ? rtVis : rtRaw, rtGIUsed ? (IDirect3DBaseTexture9*)rtGIUsed : (IDirect3DBaseTexture9*)rtRaw };
-							drawn = ExtDraw(ExtEstimateRT, targets, 1, rtTextures, (UINT)RtAmbient::Current.DebugView | (rtGI ? 0x100u : 0u), reduced);
-							if (drawn && rtGI) giDrawn = true;	// ComputeGI's accumulate and apply take the bounce light from here
-							// UNOFFICIAL 2026-10-30 DLSS RR (rrRaw above): Accumulate's history share 0 from here on (Estimate has read
-							// NVR_ALTemporal already; the passes after it read only .x's share from it, and .y / .z stay)
-							if (drawn && Upscaler::RayReconstructionWantsRaw()) {
-								rrRaw = true;
-								if (temporalHandle) {
-									D3DXVECTOR4 temporalData(0.0f, 0.0f, 0.0f, 0.0f);
-									Effect->GetVector(temporalHandle, &temporalData);
-									temporalData.x = 0.0f;
-									Effect->SetVector(temporalHandle, &temporalData);
-								}
-								static bool logged = false;
-								if (!logged) { logged = true; Logger::Log("UNOFFICIAL DLSS RR: AmbientLight: its own denoiser is skipped (RR denoises the raw signal)"); }
-							}
-						}
+						drawn = estimateRT(targets);
 						if (!drawn && giLightReady) drawn = giDrawn = ExtDraw((ExtShader)(ExtGIEstimate0 + giQuality), targets, 1, textures, 0, reduced);	// (ComputeGI)
 						if (!drawn) drawn = ExtDraw(ExtEstimate, targets, 1, textures, 0, reduced);	// the first 2
 					}
@@ -1315,9 +1362,25 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			// UNOFFICIAL: the occlusion's history is Accumulate's second target.
 			if (SUCCEEDED(result)) result = Device->SetRenderTarget(1, p == 4 ? occlusionHistorySurface[writeIndex] : nullptr);
 			if (SUCCEEDED(result)) result = Device->SetViewport(apply ? &original : p == 5 ? &statsViewport : p == 6 ? &balanceViewport : &reduced);
+			// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (above): Apply adds the bounce light when this frame's bounce history holds it:
+			// the D3D9 Accumulate's (giD3D9Texture) or, with the Vulkan passes on, their GI accumulate's when this D3D9 Apply runs in place
+			// of the Vulkan one (AlbedoBuffer on: before, the bounce was dropped there). Set before BeginPass, which commits it.
+			const bool giApply = apply && giHandle && giTest == 0 && (giD3D9Texture || giDrawn);
+			if (apply && giHandle) {
+				D3DXVECTOR4 giFlags(0.0f, 0.0f, 0.0f, 0.0f);
+				Effect->GetVector(giHandle, &giFlags);
+				giFlags.z = giApply ? 1.0f : 0.0f;
+				Effect->SetVector(giHandle, &giFlags);
+			}
+			if (giApply && !giD3D9Logged) {
+				giD3D9Logged = true;
+				Logger::Log("UNOFFICIAL RT AO: the GI bounce light is applied by AmbientLight's D3D9 passes (%s).", giD3D9Texture ? "estimate, accumulate and apply" : "apply, after the Vulkan accumulate");
+			}
 			if (SUCCEEDED(result)) result = Effect->BeginPass(p);
 			if (FAILED(result)) break;
 			if (p > 0) Device->SetTexture(5, prepTexture);
+			if (giApply) Device->SetTexture(5, historyTexture[writeIndex]);	// UNOFFICIAL 2026-11-03 NVR_ALGIHistory (Apply does not read the prep)
+			if (p == 1 && giD3D9Texture) Device->SetTexture(7, giD3D9Texture);	// UNOFFICIAL 2026-11-03 NVR_ALRTGI (Estimate does not read s7 otherwise)
 			Device->SetTexture(15, TheTextureManager->DepthTextureViewModel);	// NVR_ALViewModel (Prepare, Apply)
 			const bool applyLike = p == 5 || p == 7;	// the balance samples read what Apply reads
 			if (p == 2) Device->SetTexture(6, bufferTexture[0]);

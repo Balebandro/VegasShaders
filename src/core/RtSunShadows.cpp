@@ -5,6 +5,7 @@
 #include "RtCore.h"
 #include "RtDenoise.h"
 #include "DxvkCompute.h"
+#include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1: the trace over the frame's top-left rect (docs/next/RT-RENDERSCALE.md)
 #include "GpuProfiler.h"
 
 namespace {
@@ -150,9 +151,24 @@ namespace {
 
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
+		// (2026-11-03) RenderScale < 1 (FSR / DLSS with LowResEffects): the frame is the top-left RenderRect part of the screen-size
+		// depth, normals and shadow buffer. The trace covers only that part: the shader's size / full are the rect's (its uv = pixel /
+		// rect size is then the screen's, the depth is read in the rect), the result goes to the same top-left part of the full-size
+		// visibility texture, which the combine copies texel for texel into the rect-layout shadow buffer. (Before: the full grid's
+		// uv read rect pixels as screen points: wrong positions, round 20's "RT barely changes the picture at RenderScale 0.67".)
+		// Off: the rect is the whole screen, exactly as before. Not yet rect-aware: SunAngle's denoiser and Penumbra.
+		const UINT rw = RenderRect::Width(fw), rh = RenderRect::Height(fh);
+		static int stateLogs = 0;
+		if (stateLogs < 3 && (frames % 120) == 5) {
+			stateLogs++;
+			Logger::Log("UNOFFICIAL NVR DXVK: RT sun shadows Record: RenderRect %s (scale %.2f x %.2f, in use %d), traced grid %ux%u of %ux%u.", RenderRect::On ? "ON" : "off",
+				RenderRect::ScaleX, RenderRect::ScaleY, RenderRect::InUse(TheFrameRateManager->FrameNumber) ? 1 : 0, (std::max)(1u, rw / scale), (std::max)(1u, rh / scale), w, h);
+		}
+		const UINT tw = (std::max)(1u, rw / scale), th = (std::max)(1u, rh / scale);
 		PassConstants c = {};
-		c.size[0] = (float)w; c.size[1] = (float)h; c.size[2] = 1.0f / w; c.size[3] = 1.0f / h;
-		c.full[0] = (float)fw; c.full[1] = (float)fh;	// depth / normals are read at full size
+		c.size[0] = (float)tw; c.size[1] = (float)th; c.size[2] = 1.0f / tw; c.size[3] = 1.0f / th;
+		c.full[0] = (float)rw; c.full[1] = (float)rh;	// depth / normals are read at full size (in the rect)
+		if (TAAEffect* taa = TheShaderManager->Effects.TAA) { const D3DXVECTOR2 j = taa->DepthJitterUV(); c.full[2] = j.x; c.full[3] = j.y; }	// (2026-11-03)
 		// SunShadows.glsl toWorld(): the view matrix's columns are right (0), up (1) and forward (2)
 		c.forward[0] = view._13; c.forward[1] = view._23; c.forward[2] = view._33; c.forward[3] = cameraData->y;
 		c.right[0] = view._11 / proj._11; c.right[1] = view._21 / proj._11; c.right[2] = view._31 / proj._11;
@@ -202,17 +218,22 @@ namespace {
 		if ((S.debugView == 7 || (S.debugView == 8 && glowAtlas >= 0)) && albedoAtlas >= 0 && atlas >= 0 && hitDebugShader >= 0) {	// the hit textures check (RtHitDebug.comp)
 			if (S.debugView == 8) c.range[3] = 4.0f;	// 2026-10-30: the glow atlas (GlowTextures)
 			const int images[4] = { imageVisibility, atlas, albedoAtlas, glowAtlas >= 0 ? glowAtlas : albedoAtlas };
-			if (!RtCore::AddPass(hitDebugShader, images, 4, 0x1, &c, sizeof(c), (w + 7) / 8, (h + 7) / 8)) return;
+			if (!RtCore::AddPass(hitDebugShader, images, 4, 0x1, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 		}
 		else {
 			const int images[6] = { imageDepth, imageNormals, imageVisibility, c.alpha[0] > 0.0f && atlas >= 0 ? atlas : imageVisibility,	// [3]: binding 5
 				cloudsInTrace ? imageCloud : imageNormals,	// [4]: binding 6, the clouds' shadow map (a stand-in with cloud.x 0)
 				c.alpha[3] > 0.0f ? imageHit : imageVisibility };	// [5]: binding 7, the blocker distances (a stand-in, not written, with alpha.w 0)
-			if (!RtCore::AddPass(shader, images, 6, 0x4, &c, sizeof(c), (w + 7) / 8, (h + 7) / 8)) { cloudsInTrace = false; return; }
+			if (!RtCore::AddPass(shader, images, 6, 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) { cloudsInTrace = false; return; }
 		}
-		tracedThisFrame = RtCore::CopyOut(imageVisibility, visibilitySurface, w, h);
+		tracedThisFrame = RtCore::CopyOut(imageVisibility, visibilitySurface, tw, th);
+		static int rectLogs = 0;
+		if (tracedThisFrame && RenderRect::On && rectLogs < 2) {
+			rectLogs++;
+			Logger::Log("UNOFFICIAL NVR DXVK: RT sun shadows traced in the RenderScale rect: %ux%u of %ux%u (scale %.2f x %.2f).", tw, th, w, h, RenderRect::ScaleX, RenderRect::ScaleY);
+		}
 		if (tracedThisFrame) lastTracedFrame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;	// UNOFFICIAL 2026-11-01
-		if (tracedThisFrame && c.alpha[3] > 0.0f) hitThisFrame = RtCore::CopyOut(imageHit, hitSurface, w, h);
+		if (tracedThisFrame && c.alpha[3] > 0.0f) hitThisFrame = RtCore::CopyOut(imageHit, hitSurface, tw, th);
 		if (tracedThisFrame && frames++ == 0)
 			Logger::Log("UNOFFICIAL NVR DXVK: RT sun shadows traced (%ux%u, Mode %d: %s, range %.0f, DebugView %d).", w, h, S.mode,
 				S.mode == 1 ? "replace the cascades inside the range" : "combine with the cascades", S.range, S.debugView);

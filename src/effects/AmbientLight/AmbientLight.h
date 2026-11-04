@@ -23,6 +23,7 @@ public:
 	bool				buffersTried = false;
 	CachedHandle		paramLayout, paramFlags, paramTemporal, paramReproject, paramReach;
 	CachedHandle		paramSunFarFlags;	// UNOFFICIAL 2026-10-19 SunFar (NVR_SunFarFlags)
+	CachedHandle		paramGI;			// UNOFFICIAL 2026-11-03 NVR_ALGI: the RT bounce light in the D3D9 passes (Render)
 	CachedHandle		paramScene;					// UNOFFICIAL 2026-10-18 (ambfix): NVR_ALScene, the scene's own light
 	CachedHandle		techSky;					// UNOFFICIAL 2026-10-20 (skyamb) Skylighting: technique AmbientLightSky
 	D3DXVECTOR4			sceneLight = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 1.0f);	// the light every surface gets (linear; Render)
@@ -76,6 +77,7 @@ public:
 	// UNOFFICIAL 2026-10-31 AlbedoBuffer ([Shaders.AmbientLight.Main] AlbedoBuffer, live): the bounce's surface colour from TESR_AlbedoBuffer where written
 	bool				albedoBuffer = false;
 	bool				albedoLogged = false;
+	bool				giD3D9Logged = false;	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes: logged once
 	// UNOFFICIAL 2026-10-21 (alrocks; the occlusion cut off hard along low-poly rocks' triangle edges): NormalSmoothing (half-resolution
 	// texels the normal is averaged over after Prepare, 0 off) and HorizonBias (degrees above the tangent plane each horizon starts, 0 off); NVR_ALEdges.
 	int					normalSmoothing = 36;
@@ -195,6 +197,7 @@ public:
 	ExtUniformBuffer	extUniforms;
 	CachedHandle		extHandles[38];
 	bool	ExtOn() const;
+	bool	ExtOnRect() const;	// UNOFFICIAL 2026-11-03: ExtOn's rule in a RenderScale rect frame (the RT estimate only)
 	bool	ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Targets, UINT TargetCount, IDirect3DBaseTexture9* const* Textures, UINT Variant, const D3DVIEWPORT9& Viewport);
 
 	// UNOFFICIAL 2026-10-27 (NVR DXVK, deep/fork2-ssgi) [Shaders.AmbientLight.Main] ComputeGI: needs NVR DXVK with NvrDxvkPasses on (does

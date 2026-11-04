@@ -16,6 +16,7 @@ static void PrepareNewShader(ShaderEx* Shader, const char* GameName, const char*
 	for (int variant = ShaderRecordType::Default; variant <= ShaderRecordType::Interior; variant++)
 		Shader->ShaderProg[variant] = NULL;
 	Shader->ShaderHandleBackup = Shader->ShaderHandle;
+	ShaderOwnership::Mark(Shader);	// 2026-11-03: NVR's fields in this object are now its own (ShaderRecord.h ShaderOwnership)
 	Shader->SetName(GameName);
 
 	if (!strcmp(GameName, NoiseA)) {

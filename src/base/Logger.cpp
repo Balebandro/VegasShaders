@@ -209,6 +209,12 @@ void Logger::PushRecent(const char* Line, size_t Length) {
 		s_recentLines.pop_front();
 }
 
+std::string Logger::Scrub(const std::string& text) {
+	BuildScrubberOnce();
+	std::string out;
+	return s_scrubber.Apply(text.c_str(), text.size(), out) ? out : text;
+}
+
 void Logger::GetRecentLines(std::deque<std::string>& OutLines) {
 	std::lock_guard<std::mutex> guard(s_recentMutex);
 	OutLines.assign(s_recentLines.begin(), s_recentLines.end()); // copy out; the caller never renders while holding the lock

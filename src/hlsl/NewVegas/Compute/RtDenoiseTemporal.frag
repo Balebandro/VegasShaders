@@ -23,6 +23,8 @@ layout(push_constant) uniform Push {
     vec4 params;         // x max history frames, y depth tolerance (relative), z 1 / width, w 1 / height
     vec4 backbone;       // x 1: subtract the object motion (t_motion), y 1: the shared disocclusion mask restarts (t_backbone),
                          // z (RGB pass only), w 1: half size (the mask over the pixel's 2 x 2 full-size ones)
+    vec4 rect;           // (2026-11-03) RenderScale < 1: xy this frame's RenderRect scale (the signal is in the top-left xy part),
+                         // zw last frame's (its history's part); 1 when off
     uint samplerIndex;   // the point-clamp sampler (written by the binding)
     uint pad[3];
 } pc;
@@ -31,6 +33,9 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
 void main() {
+    // (2026-11-03) the screen point of this texel (the rect's uv / its scale); past the rect nothing (a = 0: the a-trous passes skip it)
+    const vec2 s = uv / pc.rect.xy;
+    if (s.x > 1.0 || s.y > 1.0) { o_color = vec4(0.0); return; }
     const float value = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
     const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
     vec4 result = vec4(value, value * value, 1.0, viewZ);
@@ -41,13 +46,13 @@ void main() {
         : textureLod(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).b > 0.5);
     if (pc.move.w < 0.5 && viewZ > 0.0 && !fresh) {
         // this pixel last frame: camera-relative now, + the camera's move = camera-relative then (- the surface's own move: B1)
-        vec3 p = (pc.forward.xyz + pc.right.xyz * (2.0 * uv.x - 1.0) - pc.up.xyz * (2.0 * uv.y - 1.0)) * viewZ + pc.move.xyz;
+        vec3 p = (pc.forward.xyz + pc.right.xyz * (2.0 * s.x - 1.0) - pc.up.xyz * (2.0 * s.y - 1.0)) * viewZ + pc.move.xyz;
         if (pc.backbone.x > 0.5) p -= textureLod(sampler2D(t_motion, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb;
         const vec4 clip = pc.prevViewProj * vec4(p, 1.0);
         if (clip.w > 0.0) {
             const vec2 prevUv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
             if (all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)))) {
-                const vec4 history = textureLod(sampler2D(t_history, NVR_SAMPLER(pc.samplerIndex)), prevUv, 0.0);
+                const vec4 history = textureLod(sampler2D(t_history, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
                 // the same surface: last frame's depth there matches this point's depth as seen from last frame
                 if (abs(history.a - clip.w) <= pc.params.y * max(clip.w, 1.0) && history.b > 0.0) {
                     const float length = min(history.b + 1.0, pc.params.x);
