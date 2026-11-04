@@ -18,7 +18,7 @@ layout(push_constant) uniform Push {
     vec4 right;          // xyz right / P00
     vec4 up;             // xyz up / P11
     vec4 move;           // xyz this frame's camera position - last frame's (world units)
-    vec4 params;         // xy the trace grid's size
+    vec4 params;         // xy the trace grid's size, zw (2026-11-04) the RenderRect scale (the grid is the top-left rect; 1 when off)
     uint samplerIndex;
     uint pad[3];
 } pc;
@@ -33,13 +33,18 @@ vec2 PrevUv(vec3 p) {
 
 void main() {
     o_color = vec4(0.0, 0.0, 0.0, 528.0);   // no shift (dx = dy = 0)
+    // UNOFFICIAL 2026-11-04 RT GI at RenderScale < 1 (docs/next/RT-RENDERSCALE.md, phase 2): the frame is the top-left params.zw part of the
+    // grid; its depth and motion are read at the texel (uv), the point rebuilt at its screen point s = uv / scale. Past the rect: no shift.
+    const vec2 scale = pc.params.z > 0.0 && pc.params.w > 0.0 ? pc.params.zw : vec2(1.0);
+    const vec2 s = uv / scale;
+    if (s.x > 1.0 || s.y > 1.0) return;
     const float d01 = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
     if (!(d01 > 0.0 && d01 < 0.9999)) return;
     const vec3 own = textureLod(sampler2D(t_motion, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb;
     if (!(dot(own, own) > 1.0e-4) || any(isnan(own))) return;
-    const vec3 p = (pc.forward.xyz + pc.right.xyz * (2.0 * uv.x - 1.0) - pc.up.xyz * (2.0 * uv.y - 1.0)) * (d01 * pc.forward.w) + pc.move.xyz;
+    const vec3 p = (pc.forward.xyz + pc.right.xyz * (2.0 * s.x - 1.0) - pc.up.xyz * (2.0 * s.y - 1.0)) * (d01 * pc.forward.w) + pc.move.xyz;
     const vec2 camera = PrevUv(p), both = PrevUv(p - own);
     if (camera.x < -0.5 || both.x < -0.5) return;
-    const vec2 shift = clamp(round((both - camera) * pc.params.xy), vec2(-15.0), vec2(15.0));
+    const vec2 shift = clamp(round((both - camera) * pc.params.xy), vec2(-15.0), vec2(15.0));   // (screen uv x the rect grid: its texels)
     o_color.a = (shift.x + 16.0) + 32.0 * (shift.y + 16.0);
 }

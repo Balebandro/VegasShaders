@@ -2,6 +2,7 @@
 // and the name of the leaves node of a SpeedTree.
 
 #include "../../core/GpuProfiler.h"
+#include "../../core/SessionLog.h"	// 2026-11-04: CRASH lines' stage
 
 // The game's own shadow render, which the hooked call site used to reach directly.
 static constexpr UInt32 kGameRenderShadowMaps = 0x871A50;
@@ -18,7 +19,10 @@ void __fastcall RenderShadowMapHook(void* apThis) {
 		}
 	}
 
-	TheShadowManager->RenderShadowMaps();
+	{
+		SessionLog::StageScope stage("shadow maps");
+		TheShadowManager->RenderShadowMaps();
+	}
 
 	// Then the call this hook replaced, timed so its share of the frame is visible.
 	static GpuTimer gameShadowTimer("Game call 0x871A50");

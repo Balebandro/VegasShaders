@@ -4,7 +4,7 @@ Source of this spec: the rewritten shaders (wave 3 buffers, branch claude/rw3-bu
 
 ## 1. Purpose
 
-Exposure is NVR's automatic brightness correction. It measures how bright the frame is (through the AvgLuma result) and darkens or brightens the whole picture toward a pivot brightness, so that a dark interior, a bright exterior at noon or a night scene do not stay at the same level. The picture settles gradually; the correction is one multiplication of the frame's linear colour, so colours keep their hue.
+Exposure is Vegas Shaders' automatic brightness correction. It measures how bright the frame is (through the AvgLuma result) and darkens or brightens the whole picture toward a pivot brightness, so that a dark interior, a bright exterior at noon or a night scene do not stay at the same level. The picture settles gradually; the correction is one multiplication of the frame's linear colour, so colours keep their hue.
 
 ## 2. When it runs
 

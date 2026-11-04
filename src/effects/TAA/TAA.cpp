@@ -110,7 +110,7 @@ void TAAEffect::UpdateSettings() {
 			logged = (int)after;
 			SettingManager::Configuration::ConfigNode old;
 			const bool oldOff = TheSettingManager->Config.FillNode(&old, "Shaders.TAA.FSR", "LowResEffects") && !old.BoolValue;
-			Logger::Log("UNOFFICIAL TAA: below RenderScale 1 NVR's effects run %s%s", after ? "AFTER the upscale ([Shaders.TAA.FSR] EffectsAfterUpscale, a developer test)" :
+			Logger::Log("UNOFFICIAL TAA: below RenderScale 1 Vegas Shaders' effects run %s%s", after ? "AFTER the upscale ([Shaders.TAA.FSR] EffectsAfterUpscale, a developer test)" :
 				"before FSR / DLSS (in the small frame; FSR / DLSS average their noise)",
 				oldOff && !after ? " -- the old LowResEffects = false in your settings is no longer read" : "");
 		}
@@ -307,7 +307,7 @@ bool TAAEffect::ExtDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 
 	IDirect3DBaseTexture9* outputInputs[TAATextureCount] = { source, history[write], depth, viewModel, motion };
 	const bool shown = Settings.DebugView > 0 ? draw(1, resolveInputs, &RenderTarget) : draw(2, outputInputs, &RenderTarget);
-	if (shown && ++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as a Vulkan pass.", Name);
+	if (shown && ++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as a Vulkan pass.", Name);
 	return shown;
 }
 

@@ -107,7 +107,8 @@ VtxVaryings main(VtxAttrs pa) {
     }
     
     final_c.rgb = lerp(final_c.rgb, final_c.rgb * Cinematic.w, cine_k); // apply brightness from Cinematic
-    final_c.rgb = tonemap(final_c.rgb * TESR_HDRData.y); // exposure & tonemap using provided tonemapper
+    // exposure, local exposure and the night colour shift (2026-11-04, both off by default) & tonemap
+    final_c.rgb = tonemap(nightShift(localExposure(final_c.rgb * TESR_HDRData.y, pa.f_texcoord_1.xy, TESR_HDRData.y)));
     // UNOFFICIAL HueSafeClip: the tonemappers (DICE, the default, among them) bring the brightness into range but can leave
     // one channel above what the 8-bit target holds; it was cut there, which shifts the hue (lit orange turned yellow,
     // red turned pink). Such a colour now loses saturation toward its own brightness, just enough for its brightest

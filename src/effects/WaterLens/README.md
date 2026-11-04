@@ -14,7 +14,7 @@ When the player leaves water, the screen briefly looks as if seen through the su
 - **Fade state (the real gate):** the effect draws only while its strength value is above zero. That value is the setting `Amount` multiplied by a fade value from 0 to 1 (see Behaviour details, fade). Outside a fade the value is zero and the pass is skipped entirely.
 - **Underwater:** while the player is underwater the fade value is forced to zero at once, so nothing draws. Leaving water starts a fade from full strength.
 - **Location, weather, time of day and menus:** there are no extra rules. The effect is not gated by interior or exterior, night, weather or the menu. Any fade in progress plays in all of these.
-- **Renderer:** the D3D9 path always draws. The Vulkan path draws instead when the key `NvrDxvkPasses` in `[_Main.Main.Performance]` (default on) is on, the NVR DXVK extension is present, and no render rect is active (render-scale frames use the D3D9 path). If the Vulkan pass fails, the effect falls back to its D3D9 technique for the rest of the session.
+- **Renderer:** the D3D9 path always draws. The Vulkan path draws instead when the key `NvrDxvkPasses` in `[_Main.Main.Performance]` (default on) is on, the Vegas Shaders DXVK extension is present, and no render rect is active (render-scale frames use the D3D9 path). If the Vulkan pass fails, the effect falls back to its D3D9 technique for the rest of the session.
 - **Frame order:** the effect is in the lens group of the post-process chain. Order of the relevant steps, earlier first: TAA (if on), rain, snow, legacy bloom, heat haze, volumetric smoke, barrel haze, coloring, LUT (if after tonemapping), depth of field, motion blur, then **WaterLens**, then the low-high-frequency effect (LowHF), dither buster, SMAA, FXAA, sharpening, cinema, image adjust, body camera, sky dither, debug, cover map. The effect reads the image as it stands at its position in the chain. It can be the last effect in the chain, in which case it writes straight to the game's target.
 
 ## 3. Inputs
@@ -110,9 +110,9 @@ Neither path needs extra render targets or a second frame copy.
 
 ## 7. Vulkan path
 
-**Files.** `src/hlsl/NewVegas/Compute/WaterLens.frag` (the source) and `src/hlsl/NewVegas/Compute/WaterLens.spv` (the compiled pass, loaded from the NVR DXVK shader folder at run time as `Shaders\VegasShaders\Compute\WaterLens.spv`). The source includes `Common.glsl` for the shared sampler table. There is no compile-time variant (it is not in `variants.txt`) and no SM6 build; the generic `WaterLens.spv` is the only pass.
+**Files.** `src/hlsl/NewVegas/Compute/WaterLens.frag` (the source) and `src/hlsl/NewVegas/Compute/WaterLens.spv` (the compiled pass, loaded from the Vegas Shaders DXVK shader folder at run time as `Shaders\VegasShaders\Compute\WaterLens.spv`). The source includes `Common.glsl` for the shared sampler table. There is no compile-time variant (it is not in `variants.txt`) and no SM6 build; the generic `WaterLens.spv` is the only pass.
 
-**Selection.** The C++ uses the Vulkan path when the NVR DXVK extension is present, `NvrDxvkPasses` is on, no render rect is active, the effect is not named in `NvrDxvkKeepD3D9`, and the technique index is 0. Otherwise (any of those false) the D3D9 technique draws. After a failure the effect stays on D3D9 for the session and the log says so. The pass is made from the `WaterLens` shader name, with two texture bindings and two sampler bindings, and a push block of 48 bytes.
+**Selection.** The C++ uses the Vulkan path when the Vegas Shaders DXVK extension is present, `NvrDxvkPasses` is on, no render rect is active, the effect is not named in `NvrDxvkKeepD3D9`, and the technique index is 0. Otherwise (any of those false) the D3D9 technique draws. After a failure the effect stays on D3D9 for the session and the log says so. The pass is made from the `WaterLens` shader name, with two texture bindings and two sampler bindings, and a push block of 48 bytes.
 
 **Bindings.**
 - Set 1, binding 0: the rendered frame (`TESR_RenderedBuffer` equivalent), sampled.

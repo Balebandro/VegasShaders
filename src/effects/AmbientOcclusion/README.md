@@ -148,9 +148,9 @@ Cost: estimate at half size (five sample pairs), two blurs of twelve taps, a com
 
 ## 9. Open questions
 
-1. RT ambient occlusion: [Shaders.AmbientOcclusion.RT] is not in the D3D9 effect; the RT passes are the kept Vulkan files. Not specified here. Decide whether the new D3D9 file needs its own RT techniques.
+1. RT ambient occlusion: [Shaders.AmbientOcclusion.RT] is not in the D3D9 effect; the RT passes are the kept Vulkan files. Not specified here. Decide whether the new D3D9 file needs its own RT techniques. At RenderScale < 1 (FSR / DLSS LowResEffects) the RT AO, sky and GI traces cover the frame's top-left rect (RtRecord: the trace grid = RenderRect::Width/Height of the half grid; the GI reuse history restarts on a scale or rect <-> native change), the RT estimate runs inside the rect-aware D3D9 passes and the GI bounce reaches the picture through AmbientLight's D3D9 GI path; details and measurements in docs/next/RT-RENDERSCALE.md (phase 1 AO 2026-11-03, phase 2 GI 2026-11-04).
 2. Skylighting v1 and v2: both are kept (the C++ selects by Version). v1 darkens the whole pixel. Whether v1 should stay is open.
-3. Vulkan AO passes: not written (section 7). Needed for the NVR DXVK path and for the batch compile to succeed again.
+3. Vulkan AO passes: not written (section 7). Needed for the Vegas Shaders DXVK path and for the batch compile to succeed again.
 4. The ortho map's height units and the transform's z scale (section 6) need checking against ShadowsExteriors' map.
 5. Samples is read but unused (the kernel is fixed at five).
 6. The sun mask is read in its R channel only.

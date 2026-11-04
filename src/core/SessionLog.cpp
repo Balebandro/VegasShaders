@@ -205,26 +205,130 @@ namespace {
 		WindowStart = now;
 	}
 
-	LPTOP_LEVEL_EXCEPTION_FILTER PreviousFilter = nullptr;
-	LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
-		static volatile LONG entered = 0;
-		if (InterlockedExchange(&entered, 1) == 0 && info && info->ExceptionRecord) {
-			const EXCEPTION_RECORD* r = info->ExceptionRecord;
-			char module[MAX_PATH] = "?";
-			HMODULE handle = nullptr;
-			UINT_PTR offset = 0;
-			if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)r->ExceptionAddress, &handle) && handle) {
-				char path[MAX_PATH] = {};
-				GetModuleFileNameA(handle, path, MAX_PATH);
-				const char* base = strrchr(path, '\\');
-				strcpy_s(module, base ? base + 1 : path);
-				offset = (UINT_PTR)r->ExceptionAddress - (UINT_PTR)handle;
-			}
-			Logger::LogUnbuffered("CRASH: exception %08lX at %s+%lX (thread %lu) after %s | last cell %s | last setting change %s | address space %.0f MB | frame time worst %.1f ms",
-				r->ExceptionCode, module, (unsigned long)offset, GetCurrentThreadId(), Uptime(Seconds() - StartSeconds).c_str(), LastCell.c_str(),
-				LastChange.c_str(), AddressSpaceMB(), WorstEver);
+	// ---- CRASH lines ------------------------------------------------------------------------------------------------------------
+	// 2026-11-04: armed at plugin load (ArmCrashReport); before, only once the player was in a cell. A crash logger loaded before us
+	// (xNVSE loads plugins by name: CrashLogger.dll comes first) set its filter first, so ours runs first and hands on to it. One set
+	// after ours is found in game and put under ours (OnFrame). Players send one file: the log.
+	LPTOP_LEVEL_EXCEPTION_FILTER LoadPrevious = nullptr;	// the filter before ours at plugin load
+	LPTOP_LEVEL_EXCEPTION_FILTER LatePrevious = nullptr;	// one that replaced ours later and was put under ours again
+	DWORD MainThread = 0;
+	volatile LONG FilterDepth = 0;
+
+	// Whether address is just after a call instruction in an executable image: a return address. (No C++ objects here: __try.)
+	bool LooksLikeReturn(UINT_PTR address) {
+		if (address < 0x10000) return false;
+		MEMORY_BASIC_INFORMATION info;
+		if (!VirtualQuery((const void*)(address - 7), &info, sizeof(info)) || info.State != MEM_COMMIT || info.Type != MEM_IMAGE) return false;
+		if (!(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return false;
+		__try {
+			const unsigned char* b = (const unsigned char*)address;
+			auto callModRm = [](unsigned char m) { return (m & 0x38) == 0x10; };	// FF /2: call r/m32
+			if (b[-5] == 0xE8) return true;											// call rel32
+			if (b[-2] == 0xFF && callModRm(b[-1]) && ((b[-1] & 0xC0) == 0xC0 || ((b[-1] & 0xC0) == 0 && (b[-1] & 7) != 4 && (b[-1] & 7) != 5))) return true;	// reg, [reg]
+			if (b[-3] == 0xFF && callModRm(b[-2]) && (b[-2] & 0xC0) == 0x40 && (b[-2] & 7) != 4) return true;	// [reg+disp8]
+			if (b[-3] == 0xFF && callModRm(b[-2]) && (b[-2] & 0xC7) == 0x04) return true;	// [sib]
+			if (b[-4] == 0xFF && callModRm(b[-3]) && (b[-3] & 0xC7) == 0x44) return true;	// [sib+disp8]
+			if (b[-6] == 0xFF && callModRm(b[-5]) && ((b[-5] & 0xC7) == 0x05 || ((b[-5] & 0xC0) == 0x80 && (b[-5] & 7) != 4))) return true;	// [disp32], [reg+disp32]
+			if (b[-7] == 0xFF && callModRm(b[-6]) && (b[-6] & 0xC7) == 0x84) return true;	// [sib+disp32]
 		}
-		return PreviousFilter ? PreviousFilter(info) : EXCEPTION_CONTINUE_SEARCH;
+		__except (EXCEPTION_EXECUTE_HANDLER) {}
+		return false;
+	}
+
+	// Return addresses on the crashing thread's stack, from ESP up (16 KB at most, inside the stack): a scan, not an unwind (release
+	// code keeps no frame pointers), so a stale address can sit between real ones; the first few are nearly always the real callers.
+	unsigned ScanStack(const CONTEXT* context, UINT_PTR* out, unsigned max) {
+		unsigned found = 0;
+		__try {
+			const NT_TIB* tib = (const NT_TIB*)NtCurrentTeb();
+			const UINT_PTR top = (UINT_PTR)tib->StackBase, start = context->Esp;
+			for (UINT_PTR p = start; p + 4 <= top && p < start + 16384 && found < max; p += 4) {
+				const UINT_PTR value = *(const UINT_PTR*)p;
+				if (LooksLikeReturn(value) && (!found || out[found - 1] != value)) out[found++] = value;
+			}
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) {}
+		return found;
+	}
+
+	// "module.dll+1A2B" (the module's file name only), or the bare address outside every module
+	void ModuleText(UINT_PTR address, char* out, size_t size) {
+		HMODULE handle = nullptr;
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)address, &handle) && handle) {
+			char path[MAX_PATH] = {};
+			GetModuleFileNameA(handle, path, MAX_PATH);
+			const char* base = strrchr(path, '\\');
+			sprintf_s(out, size, "%s+%lX", base ? base + 1 : path, (unsigned long)(address - (UINT_PTR)handle));
+		}
+		else sprintf_s(out, size, "%08lX (in no module)", (unsigned long)address);
+	}
+
+	void ExceptionText(const EXCEPTION_RECORD* r, char* out, size_t size) {
+		switch (r->ExceptionCode) {
+		case EXCEPTION_ACCESS_VIOLATION:
+			if (r->NumberParameters >= 2) {
+				const ULONG_PTR kind = r->ExceptionInformation[0], at = r->ExceptionInformation[1];
+				sprintf_s(out, size, "access violation %s %08lX%s", kind == 0 ? "reading" : kind == 8 ? "executing" : "writing", (unsigned long)at,
+					at < 0x10000 ? " (a null pointer)" : "");
+			}
+			else strcpy_s(out, size, "access violation");
+			return;
+		case 0xE06D7363: sprintf_s(out, size, "C++ exception %s, not caught", SessionLog::CppExceptionType(r)); return;
+		case EXCEPTION_STACK_OVERFLOW: strcpy_s(out, size, "stack overflow (endless recursion?)"); return;
+		case EXCEPTION_INT_DIVIDE_BY_ZERO: strcpy_s(out, size, "integer division by zero"); return;
+		case EXCEPTION_ILLEGAL_INSTRUCTION: strcpy_s(out, size, "illegal instruction (one this processor does not have?)"); return;
+		case EXCEPTION_PRIV_INSTRUCTION: strcpy_s(out, size, "privileged instruction"); return;
+		case EXCEPTION_IN_PAGE_ERROR: strcpy_s(out, size, "in-page error (a file or the page file could not be read)"); return;
+		case EXCEPTION_BREAKPOINT: strcpy_s(out, size, "breakpoint"); return;
+		default: sprintf_s(out, size, "exception %08lX", (unsigned long)r->ExceptionCode); return;
+		}
+	}
+
+	void WriteCrash(EXCEPTION_POINTERS* info) {
+		const EXCEPTION_RECORD* r = info->ExceptionRecord;
+		char what[200], where[MAX_PATH + 32], stage[400] = "";
+		ExceptionText(r, what, sizeof(what));
+		ModuleText((UINT_PTR)r->ExceptionAddress, where, sizeof(where));
+		const unsigned depth = SessionLog::Stages::Depth < 8 ? SessionLog::Stages::Depth : 8;
+		for (unsigned i = 0; i < depth; i++) {
+			const char* s = SessionLog::Stages::Stack[i];
+			if (i) strcat_s(stage, " > ");
+			strncat_s(stage, s ? s : "?", _TRUNCATE);
+		}
+		const DWORD thread = GetCurrentThreadId();
+		Logger::LogUnbuffered("CRASH: %s at %s, on the %s thread (%lu) after %s | stage: %s | last cell %s | last setting change %s | address space %.0f MB | frame time worst %.1f ms",
+			what, where, thread == MainThread ? "main" : "a worker", (unsigned long)thread, Uptime(Seconds() - StartSeconds).c_str(),
+			depth ? stage : "(none marked)", LastCell.c_str(), LastChange.c_str(), AddressSpaceMB(), WorstEver);
+		if (const CONTEXT* c = info->ContextRecord) {
+			Logger::LogUnbuffered("CRASH registers: EAX=%08lX EBX=%08lX ECX=%08lX EDX=%08lX ESI=%08lX EDI=%08lX EBP=%08lX ESP=%08lX EIP=%08lX",
+				c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp, c->Eip);
+			UINT_PTR returns[20];
+			const unsigned count = ScanStack(c, returns, 20);
+			char line[2048] = "";
+			for (unsigned i = 0; i < count; i++) {
+				char entry[MAX_PATH + 32];
+				ModuleText(returns[i], entry, sizeof(entry));
+				if (i) strcat_s(line, ", ");
+				strncat_s(line, entry, _TRUNCATE);
+			}
+			Logger::LogUnbuffered("CRASH call stack (callers, newest first; a stack scan, so an old entry can appear): %s", count ? line : "(none found)");
+		}
+		Logger::LogUnbuffered("CRASH: please send this whole log file (Fallout New Vegas\\VegasShaders-Logs) with the report.");
+	}
+
+	LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
+		// A filter that replaced ours and then calls the one it replaced comes back here: on to the load-time one, no second report
+		if (InterlockedIncrement(&FilterDepth) > 1) {
+			const LONG result = LoadPrevious ? LoadPrevious(info) : EXCEPTION_CONTINUE_SEARCH;
+			InterlockedDecrement(&FilterDepth);
+			return result;
+		}
+		static volatile LONG entered = 0;
+		if (info && info->ExceptionRecord && InterlockedExchange(&entered, 1) == 0) WriteCrash(info);
+		const LPTOP_LEVEL_EXCEPTION_FILTER next = LatePrevious ? LatePrevious : LoadPrevious;
+		const LONG result = next ? next(info) : EXCEPTION_CONTINUE_SEARCH;
+		InterlockedDecrement(&FilterDepth);
+		return result;
 	}
 
 	// The game INI values the header lists (as the game read them, after NVR's own adjustments in ReadSettingHook)
@@ -325,6 +429,32 @@ void SessionLog::OnPluginLoad(unsigned nvseVersion, unsigned gameVersion, unsign
 		"release"
 #endif
 	);
+	// 2026-11-04 (two testers' "fatal error ... while loading plugin", the log stopped after its first line): the C++ runtime in use.
+	// Builds made with VS 2022 17.10+ crash inside an MSVCP140.dll older than 14.40 at the first std::mutex lock (the logger takes
+	// one after every line); _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR (NewVegasReloaded.vcxproj) builds the mutexes the old way, so any
+	// copy works now. An old copy in the game folder (left by some other mod) wins over Windows' own: this line says which one is in.
+	{
+		char path[MAX_PATH] = {};
+		const HMODULE runtime = GetModuleHandleA("msvcp140.dll");
+		if (runtime && GetModuleFileNameA(runtime, path, MAX_PATH)) {
+			char version[64] = "?";
+			DWORD handle = 0;
+			const DWORD size = GetFileVersionInfoSizeA(path, &handle);
+			std::vector<char> block(size ? size : 1);
+			VS_FIXEDFILEINFO* info = nullptr;
+			UINT length = 0;
+			if (size && GetFileVersionInfoA(path, handle, size, block.data()) && VerQueryValueA(block.data(), "\\", (void**)&info, &length) && info)
+				sprintf_s(version, "%u.%u.%u.%u", HIWORD(info->dwFileVersionMS), LOWORD(info->dwFileVersionMS), HIWORD(info->dwFileVersionLS), LOWORD(info->dwFileVersionLS));
+			// (a 32-bit game reads SysWOW64's copy, but Windows names it by the System32 path: either counts as Windows' own)
+			char system32[MAX_PATH] = {}, wow64[MAX_PATH] = {};
+			GetSystemDirectoryA(system32, MAX_PATH);
+			GetSystemWow64DirectoryA(wow64, MAX_PATH);
+			auto under = [&](const char* folder) { return folder[0] && _strnicmp(path, folder, strlen(folder)) == 0; };
+			const bool fromSystem = under(system32) || under(wow64);
+			Logger::Log("SESSION C++ runtime: MSVCP140 %s, %s%s", version, fromSystem ? "Windows' own copy" : "a copy outside Windows: ",
+				fromSystem ? "" : path);	// (the path passes the privacy scrubber: <GAME>\msvcp140.dll)
+		}
+	}
 	// both packed as major << 24 | minor << 16 | build << 4 | type (the game's 1.4.0.525 = 040020D1)
 	Logger::Log("SESSION xNVSE %u.%u.%u (%08X), game 1.%u.%u.%u (%08X)", nvseVersion >> 24, (nvseVersion >> 16) & 0xFF, (nvseVersion >> 4) & 0xFFF,
 		nvseVersion, gameVersion >> 24, (gameVersion >> 16) & 0xFF, (gameVersion >> 4) & 0xFFF, gameVersion);
@@ -371,6 +501,39 @@ void SessionLog::OnPluginLoad(unsigned nvseVersion, unsigned gameVersion, unsign
 	Logger::Log("SESSION CPU: %s, %u cores, %lu threads | RAM %.1f GB (%.1f GB free) | address space %.0f MB (%s)", cpu[0] ? cpu : "?", cores,
 		system.dwNumberOfProcessors, memory.ullTotalPhys / 1073741824.0, memory.ullAvailPhys / 1073741824.0, memory.ullTotalVirtual / 1048576.0,
 		memory.ullTotalVirtual > 3ull * 1073741824ull ? "4 GB patch / large address aware" : "NOT large address aware: 2 GB, expect out-of-memory crashes");
+}
+
+void SessionLog::ArmCrashReport() {
+	MainThread = GetCurrentThreadId();
+	LoadPrevious = SetUnhandledExceptionFilter(CrashFilter);
+	Logger::Log("SESSION crash report armed%s", LoadPrevious ? " (a crash handler set before ours, e.g. a crash logger's, still runs after it)" : "");
+}
+
+// A crash handler set after ours (a plugin loaded after this one, the game) is put under ours: ours on top again, handing on to it.
+// 2026-11-04: at xNVSE's PostLoad too (the bench's old-runtime run: another plugin crashed while the game read its INIs, after
+// PostLoad and before any cell, under the handler of a plugin loaded after ours, which then crashed in its own handler: no line).
+void SessionLog::ReassertCrashReport(const char* when) {
+	const LPTOP_LEVEL_EXCEPTION_FILTER current = SetUnhandledExceptionFilter(CrashFilter);
+	if (current == CrashFilter) return;
+	if (!LatePrevious || current != LatePrevious) LatePrevious = current;
+	Logger::Log("SESSION crash report: a crash handler was set after ours (%s); ours is on top again and hands crashes on to it", when);
+}
+
+// The decorated type name from the compiler's throw information (32-bit: plain pointers). No C++ objects here: __try.
+const char* SessionLog::CppExceptionType(const _EXCEPTION_RECORD* record) {
+	__try {
+		if (!record || record->NumberParameters < 3 || record->ExceptionInformation[0] != 0x19930520) return "?";
+		const DWORD* throwInfo = (const DWORD*)record->ExceptionInformation[2];
+		if (!throwInfo) return "?";
+		const DWORD* catchables = (const DWORD*)throwInfo[3];	// pCatchableTypeArray: count, then CatchableType*
+		if (!catchables || !catchables[0]) return "?";
+		const DWORD* catchable = (const DWORD*)catchables[1];	// the thrown type itself
+		const char* typeDescriptor = catchable ? (const char*)catchable[1] : nullptr;	// pType
+		return typeDescriptor ? typeDescriptor + 8 : "?";	// after the vftable and spare pointers: the decorated name
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return "?";
+	}
 }
 
 void SessionLog::OnSettingsLoaded() {
@@ -555,7 +718,7 @@ void SessionLog::OnDevice(IDirect3DDevice9* device) {
 		HIWORD(adapter.DriverVersion.HighPart), LOWORD(adapter.DriverVersion.HighPart), HIWORD(adapter.DriverVersion.LowPart), LOWORD(adapter.DriverVersion.LowPart));
 	const std::string d3d9 = FileVersion("d3d9.dll");
 	const char* runtime = TheRenderManager->D3D9RuntimeDescription();
-	Logger::Log("SESSION D3D9 runtime: %.*s, d3d9.dll %s | NVR DXVK extension: %s", (int)(strchr(runtime, '(') ? strchr(runtime, '(') - runtime : strlen(runtime)), runtime,
+	Logger::Log("SESSION D3D9 runtime: %.*s, d3d9.dll %s | Vegas Shaders DXVK extension: %s", (int)(strchr(runtime, '(') ? strchr(runtime, '(') - runtime : strlen(runtime)), runtime,
 		d3d9.empty() ? "(no version info)" : d3d9.c_str(), DxvkCompute::Available() ? DxvkCompute::Status() : "not there");
 	// 2026-11-03: the same facts for the install check and the bug report (InstallCheck.h)
 	std::string gpuWindows;
@@ -610,6 +773,7 @@ void SessionLog::NoteIni(const GameSetting* setting) {
 }
 
 void SessionLog::OnDeferredInit() {
+	StageScope stage("the session header at DeferredInit");
 	std::vector<std::string> ini;
 	for (size_t i = 0; i < sizeof(IniNames) / sizeof(IniNames[0]); i++)
 		if (!IniValues[i].empty()) { std::string name = IniNames[i]; ini.push_back(name.substr(0, name.find(':')) + "=" + IniValues[i]); }
@@ -701,11 +865,17 @@ void SessionLog::OnFrame() {
 		const bool on = TheSettingManager->GetSettingI("Main.Develop.Main", "FrameJournal") != 0;
 		if (on != FrameJournal::On) Logger::Log("FJ frame journal %s (%u of %u lines used)", on ? "ON" : "off", FrameJournal::Lines, FrameJournal::Cap);
 		FrameJournal::On = on;
+		// 2026-11-04 [Main.Develop.Main] CrashTest: a crash on purpose, to check the CRASH lines (inside the effects stage)
+		if (const int crash = TheSettingManager->GetSettingI("Main.Develop.Main", "CrashTest")) {
+			Logger::Log("SESSION CrashTest %d: crashing the game on purpose now", crash);
+			if (crash == 2) throw std::runtime_error("CrashTest");
+			*(volatile int*)nullptr = 0;
+		}
 		FlushChanges(false);
 		PeakAddressMB = (std::max)(PeakAddressMB, AddressSpaceMB());
-		if (!PreviousFilter && Player && Player->parentCell) {	// late, so a crash logger set up at load comes first and is chained
-			static bool installed = false;
-			if (!installed) { installed = true; PreviousFilter = SetUnhandledExceptionFilter(CrashFilter); }
+		if (Player && Player->parentCell) {	// in game, once more: a crash handler set since PostLoad goes under ours
+			static bool checked = false;
+			if (!checked) { checked = true; SessionLog::ReassertCrashReport("in game"); }
 		}
 	}
 

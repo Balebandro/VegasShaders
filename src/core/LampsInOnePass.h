@@ -152,7 +152,7 @@ namespace LampsInOnePass {
 		ApplyGlow(Applied && AppliedImm == (UInt8)ManyLamps::CompareImm);	// last frame's limit (a frame late after a switch)
 		if (!GpuTimer::Enabled) { GlowDraws = GlowRebound = GlowCacheStale = GlowLost = 0; GlowFrames = 0; }
 		else if (GlowDraws && ++GlowFrames >= 600) {
-			Logger::Log("UNOFFICIAL ManyLampsGlow (F10): per frame %.1f glow one-pass draws, s4 not their glow map before NVR's bind %.1f (the game's cache showed it already: %.1f), "
+			Logger::Log("UNOFFICIAL ManyLampsGlow (F10): per frame %.1f glow one-pass draws, s4 not their glow map before Vegas Shaders' bind %.1f (the game's cache showed it already: %.1f), "
 				"s4 not the glow map after the draw %.2f", GlowDraws / (double)GlowFrames, GlowRebound / (double)GlowFrames, GlowCacheStale / (double)GlowFrames,
 				GlowLost / (double)GlowFrames);
 			GlowDraws = GlowRebound = GlowCacheStale = GlowLost = 0; GlowFrames = 0;

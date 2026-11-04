@@ -4,11 +4,11 @@ Source of this spec: the rewritten shader (wave 3 buffers, branch claude/rw3-buf
 
 ## 1. Purpose
 
-CombineDepth makes the picture's depth buffer that almost every NVR effect reads. The game's own depth (the world, and the first-person weapon and hands drawn in a separate depth pass) is turned into one linear depth per pixel, in game units, so that the effects can measure distances and rebuild positions without caring which pass the surface came from. The player sees nothing directly: its quality is what makes the other effects' results right (shadows, ambient occlusion, reflections, fog, depth of field and so on).
+CombineDepth makes the picture's depth buffer that almost every Vegas Shaders effect reads. The game's own depth (the world, and the first-person weapon and hands drawn in a separate depth pass) is turned into one linear depth per pixel, in game units, so that the effects can measure distances and rebuild positions without caring which pass the surface came from. The player sees nothing directly: its quality is what makes the other effects' results right (shadows, ambient occlusion, reflections, fog, depth of field and so on).
 
 ## 2. When it runs
 
-- Every frame where NVR's effects run: first step of the depth and normals stage in RenderEffectsPreTonemapping, before any other NVR post-process.
+- Every frame where Vegas Shaders' effects run: first step of the depth and normals stage in RenderEffectsPreTonemapping, before any other Vegas Shaders post-process.
 - Enabled: no settings section; on whenever the effect loaded. ShouldRender is the default (true).
 - Two ways it runs:
   - Separate (the default, MergedDepthNormals off): technique CombineDepth renders the depth target alone; then Normals renders the normals target from it.

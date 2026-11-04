@@ -416,7 +416,7 @@ namespace {
 				desc.pDebugName = which ? "RtTextureToAtlas" : "RtAlphaToAtlas";
 				if (FAILED(ext->CreateGraphicsPipeline(&desc, &pipeline))) pipeline = nullptr;
 			}
-			if (!pipeline) Logger::Log("UNOFFICIAL NVR DXVK: RT alpha-tested casters: the alpha pass could not be made (Compute\\RtAlphaToAtlas.spv; the DXVK log says why)");
+			if (!pipeline) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT alpha-tested casters: the alpha pass could not be made (Compute\\RtAlphaToAtlas.spv; the DXVK log says why)");
 		}
 		int slot = -1;
 		if (!alphaUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R16F, D3DPOOL_DEFAULT, &alphaUpload, nullptr);
@@ -477,7 +477,7 @@ namespace {
 	UInt32 (*MaskHook)(NiGeometry*, bool) = nullptr;
 
 	void Core::TurnOff(const char* why) {
-		Logger::Log("UNOFFICIAL NVR DXVK: ray tracing core off for this session: %s. The RT effects keep their usual paths.", why);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: ray tracing core off for this session: %s. The RT effects keep their usual paths.", why);
 		_snprintf_s(status, sizeof(status), _TRUNCATE, "off: %s", why);
 		Stop(nullptr);
 		state = Off;
@@ -489,7 +489,7 @@ namespace {
 		char message[sizeof(shared->message)];
 		memcpy(message, (const void*)shared->message, sizeof(message));
 		message[sizeof(message) - 1] = 0;
-		Logger::Log("UNOFFICIAL NVR DXVK: RT helper: %s", message);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper: %s", message);
 	}
 
 	DWORD WINAPI Core::WatchdogMain(void* self) {
@@ -520,23 +520,23 @@ namespace {
 
 	bool Core::Start() {
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
-		if (!ext || !DxvkCompute::Available()) { TurnOff("no NVR DXVK (native D3D9 or stock DXVK)"); return false; }
+		if (!ext || !DxvkCompute::Available()) { TurnOff("no Vegas Shaders DXVK (native D3D9 or stock DXVK)"); return false; }
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtShare), (void**)&share)) || !share) {
 			share = nullptr;
-			TurnOff("this NVR DXVK d3d9.dll cannot share images with another process (fork patch 1.7-dlss / 0026 needed)");
+			TurnOff("this Vegas Shaders DXVK d3d9.dll cannot share images with another process (fork patch 1.7-dlss / 0026 needed)");
 			return false;
 		}
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtRt), (void**)&rt)) || !rt) {
 			rt = nullptr;
-			TurnOff("this NVR DXVK d3d9.dll has no ray tracing core (fork patch 1.8-rt / 0028 needed)");
+			TurnOff("this Vegas Shaders DXVK d3d9.dll has no ray tracing core (fork patch 1.8-rt / 0028 needed)");
 			return false;
 		}
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtRtSkin), (void**)&rtSkin))) rtSkin = nullptr;
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtRtSeq), (void**)&rtSeq))) rtSeq = nullptr;
-		if (!rtSeq) Logger::Log("UNOFFICIAL NVR DXVK: RT: this d3d9.dll has no arena sequence check (fork patch 0034, 1.8-rt-seq); on some GPUs its "
-			"geometry copy can run before the geometry is converted (RTX GPU fault, 2026-10-30): update the NVR DXVK fork.");
+		if (!rtSeq) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT: this d3d9.dll has no arena sequence check (fork patch 0034, 1.8-rt-seq); on some GPUs its "
+			"geometry copy can run before the geometry is converted (RTX GPU fault, 2026-10-30): update the Vegas Shaders DXVK fork.");
 		actorsOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Actors") != 0;
-		if (actorsOn && !rtSkin) Logger::Log("UNOFFICIAL NVR DXVK: RT actors off: this d3d9.dll cannot pose skinned geometry (fork patch 0033, 1.8-rt-skin).");
+		if (actorsOn && !rtSkin) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT actors off: this d3d9.dll cannot pose skinned geometry (fork patch 0033, 1.8-rt-skin).");
 		NVR_EXT_SHARE_INFO info = {};
 		share->GetShareInfo(&info);
 		if (!info.Supported) { TurnOff("the Vulkan driver cannot share images and semaphores between processes"); return false; }
@@ -562,7 +562,7 @@ namespace {
 		hitTextures = TheSettingManager->GetSettingI("Main.Main.RayTracing", "HitTextures") != 0;
 		grassOn = alphaOn && TheSettingManager->GetSettingI("Main.Main.RayTracing", "Grass") != 0;	// 2026-10-30
 		if (!alphaOn && TheSettingManager->GetSettingI("Main.Main.RayTracing", "Grass") != 0)
-			Logger::Log("UNOFFICIAL NVR DXVK: RT grass off: it needs [Main.Main.RayTracing] AlphaTested (the tufts are alpha-tested cards).");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT grass off: it needs [Main.Main.RayTracing] AlphaTested (the tufts are alpha-tested cards).");
 		grassDraws.clear();
 		grassTufts.clear();
 		grassFrame = 0;
@@ -712,13 +712,13 @@ namespace {
 		pendingReleases.clear();
 		nextId = 1;
 		_snprintf_s(status, sizeof(status), _TRUNCATE, "starting on %s", info.DeviceName);
-		Logger::Log("UNOFFICIAL NVR DXVK: RT helper started (%ls): %u shared images (arena %ux%u), %u shaders, GPU %s.", exe.c_str(),
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper started (%ls): %u shared images (arena %ux%u), %u shaders, GPU %s.", exe.c_str(),
 			(unsigned)images.size(), imageDescs[0].Width, imageDescs[0].Height, (unsigned)shaders.size(), info.DeviceName);
 		return true;
 	}
 
 	void Core::Stop(const char* why) {
-		if (why && state != Idle && state != Off) Logger::Log("UNOFFICIAL NVR DXVK: RT helper stopped: %s.", why);
+		if (why && state != Idle && state != Off) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper stopped: %s.", why);
 		if (watchdog) {
 			InterlockedExchange(&watchStop, 1);
 			WaitForSingleObject(watchdog, 3000);
@@ -768,7 +768,7 @@ namespace {
 			if (helperState == NVR_RT_STATE_READY) {
 				state = Running;
 				_snprintf_s(status, sizeof(status), _TRUNCATE, "running");
-				Logger::Log("UNOFFICIAL NVR DXVK: RT helper ready after %llu ms; ray tracing from the next frame on.", (unsigned long long)(GetTickCount64() - startTick));
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper ready after %llu ms; ray tracing from the next frame on.", (unsigned long long)(GetTickCount64() - startTick));
 			}
 			else if (helperState == NVR_RT_STATE_FAILED || helperState == NVR_RT_STATE_EXITED) TurnOff("the helper gave up (its message is above)");
 			else if (InterlockedCompareExchange(&tripped, 0, 0)) TurnOff(tripReason);
@@ -1382,7 +1382,7 @@ namespace {
 			if ((alphaTested || textured) && info.Texels != 3u * (info.VertexCount + info.TriangleCount) + 2u * info.VertexCount) {
 				hitTextures = false;
 				alphaOn = false;	// a fork without 1.8-rt-uv (patch 0029): no texcoords staged, so no alpha-tested casters this session
-				Logger::Log("UNOFFICIAL NVR DXVK: RT alpha-tested casters off: this d3d9.dll does not stage texcoords (fork patch 0029, 1.8-rt-uv).");
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT alpha-tested casters off: this d3d9.dll does not stage texcoords (fork patch 0029, 1.8-rt-uv).");
 				return;
 			}
 			if (record->opCount >= NVR_RT_MAX_OPS || arenaUsed + info.Texels + 1 > arenaCapacity) { waiting++; return; }	// next frame (+1: the sequence texel)
@@ -1938,7 +1938,7 @@ namespace {
 		for (int i = 0; i < 100 && c.shared->consumedFrame + (int64_t)NVR_RT_FRAME_RING < (int64_t)n; i++) Sleep(1);
 		if (c.shared->consumedFrame + (int64_t)NVR_RT_FRAME_RING < (int64_t)n) {
 			static UInt32 skipped = 0;
-			if ((skipped++ % 300) == 0) Logger::Log("UNOFFICIAL NVR DXVK: RT helper behind (frame %llu, read up to %lld): this frame not traced (%u so far).",
+			if ((skipped++ % 300) == 0) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper behind (frame %llu, read up to %lld): this frame not traced (%u so far).",
 				(unsigned long long)n, (long long)c.shared->consumedFrame, skipped);
 			return false;
 		}

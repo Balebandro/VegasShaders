@@ -302,9 +302,9 @@ void DrawUI() {
 
 	ImGui::SetNextWindowSize(ImVec2(760.0f, 420.0f), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowPos(ImVec2(40.0f, 60.0f), ImGuiCond_FirstUseEver);
-	if (ImGui::Begin("NVR Pixel Inspector")) {
+	if (ImGui::Begin("Vegas Shaders Pixel Inspector")) {
 		if (Enabled) {
-			if (NeedsDxvk) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Needs NVR DXVK (the fork's d3d9.dll with extension 1.5-debug). Nothing is recorded.");
+			if (NeedsDxvk) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Needs Vegas Shaders DXVK (the fork's d3d9.dll with extension 1.5-debug). Nothing is recorded.");
 			else if (SetupFailed) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Could not be set up (see the log): nothing is recorded.");
 			int xy[2] = { PixelX, PixelY };
 			ImGui::SetNextItemWidth(200.0f);

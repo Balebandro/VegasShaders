@@ -220,7 +220,7 @@ void ShaderManager::PreStep_FrameQuad(ChainContext& ctx) {
 void ShaderManager::PreStep_SceneInProbes(ChainContext& ctx) {
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
 	// UNOFFICIAL 2026-10-26 pixel inspector (core\PixelInspector.h, off by default): the scene as the game drew it, before any NVR effect.
-	PixelInspector::CaptureIf("Scene in (HDR, before NVR)", RenderTarget);
+	PixelInspector::CaptureIf("Scene in (HDR, before Vegas Shaders)", RenderTarget);
 	Diagnostics::StageMark(Diagnostics::SceneMarkName, RenderTarget);	// UNOFFICIAL 2026-11-01: the flash detector's first stage (core/Diagnostics.h)
 }
 
@@ -1164,6 +1164,13 @@ void ShaderManager::PreStep_LumaExposureBloom(ChainContext& ctx) {
 			// (UNOFFICIAL GT7 adaptation, Mode 1: its technique 1; skipped only with both its strengths at 0, Exposure::IsIdentity.)
 			if (!(TheSettingManager->SettingsMain.Main.SkipIdentityExposure && Effects.Exposure->IsIdentity()))
 				{ Effects.Exposure->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, Effects.Exposure->Technique(), false, SourceSurface); PixelInspector::AfterFrame(Effects.Exposure); }
+		}
+		{
+			// 2026-11-04 local exposure (effects/LocalExposure, off by default): each neighbourhood's brightness, measured on the
+			// exposed image the tone mapper gets, into its 1/16 buffer (the tone mapper reads it; the image itself is not changed).
+			static GpuTimer localExposureTimer("  Local exposure");
+			GpuProfileScope gpuLocal(localExposureTimer, Device);
+			Effects.LocalExposure->RenderFrame(Device, RenderTarget);
 		}
 		{
 			GpuProfileScope gpuBloom(bloomTimer, Device);

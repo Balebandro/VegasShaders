@@ -151,6 +151,15 @@ public:
 	PBRStruct	Constants;
 	D3DXVECTOR4	HairData = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-01 TESR_HairData (SM3003.pso.hlsl, c147): x HairHighlight - 1, y 1 = the game's look
 
+	// 2026-11-04 dust on top surfaces (Includes/ObjectDust.hlsl) and micro-shadowing (Includes/Object.hlsl), both off by default
+	struct DustSettingsStruct { float Amount, Size, UpFrom, UpFull, Patchiness; D3DXVECTOR3 Color; bool Exteriors, Interiors; };
+	DustSettingsStruct DustSettings;
+	D3DXVECTOR4	DustData = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);		// TESR_DustData (c192): x amount (0 off), y 1 / size, z UpFrom, w UpFull
+	D3DXVECTOR4	DustColor = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// TESR_DustColor (c193): rgb linear colour, w Patchiness
+	D3DXVECTOR4	DustOrigin = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// TESR_DustOrigin (c195): the camera's world position
+	float		MicroShadowStrength = 0.0f;
+	D3DXVECTOR4	MicroShadow = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// TESR_MicroShadow (c194): x strength
+
 	// UNOFFICIAL [Shaders.PBR.Metal] (Object.hlsl getDerivedMetallic): metal guessed from the textures, with its own strength
 	// for the first-person model (BeginFirstPerson / EndFirstPerson round that pass) and for the world.
 	struct MetalSettingsStruct {

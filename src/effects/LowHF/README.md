@@ -60,7 +60,7 @@ Definitions used below:
 - Technique index 0 is the only technique. The D3D9 file declares it without a name (one pass). The C++ always asks for index 0; any other index draws nothing.
 - Pass: one full-screen pass. Vertex stage passes the position and texture coordinate through unchanged (full-screen quad, as the other effects use). Pixel stage: the shader described in section 6, output colour alpha set to 1.
 - Output: one colour target, the target the chain gives this effect. Same size and format as the input picture. The effect overwrites the target; it does not blend with what was there.
-- Vulkan: the pass is named LowHF (file LowHF.spv beside LowHF.frag). It is selected only when the NVR DXVK extension is present and NvrDxvkPasses is on, and only for technique index 0. If the Vulkan pass fails, the effect falls back to its D3D9 shader for the rest of the session (logged).
+- Vulkan: the pass is named LowHF (file LowHF.spv beside LowHF.frag). It is selected only when the Vegas Shaders DXVK extension is present and NvrDxvkPasses is on, and only for technique index 0. If the Vulkan pass fails, the effect falls back to its D3D9 shader for the rest of the session (logged).
 - The effect has no render target or texture of its own; it reads and writes only the chain's targets.
 
 ## 6. Behaviour details
@@ -92,7 +92,7 @@ Other behaviour:
 ## 7. Vulkan path
 
 - Files: src/hlsl/NewVegas/Compute/LowHF.frag (source) and LowHF.spv (compiled, the one loaded). The shader includes the shared Common shader file of the compute folder, and uses its sampler helper to pick the sampler by index.
-- Selection: src/effects/LowHF.cpp calls the Vulkan pass first when NVR DXVK is present, NvrDxvkPasses ([_Main.Main.Performance] NvrDxvkPasses, true in the defaults file) is on, and the effect is not named in the keep-on-D3D9 list (NvrDxvkKeepD3D9). It does so only for technique index 0. It uses the shared full-screen Vulkan pass helper with one colour target, the rendered picture as its only texture, and one sampler (LinearClamp, sampler push offset 16).
+- Selection: src/effects/LowHF.cpp calls the Vulkan pass first when Vegas Shaders DXVK is present, NvrDxvkPasses ([_Main.Main.Performance] NvrDxvkPasses, true in the defaults file) is on, and the effect is not named in the keep-on-D3D9 list (NvrDxvkKeepD3D9). It does so only for technique index 0. It uses the shared full-screen Vulkan pass helper with one colour target, the rendered picture as its only texture, and one sampler (LinearClamp, sampler push offset 16).
 - Push constant layout (32 bytes): offset 0 lowHFData (vec4, the four components of section 3); offset 16 samplerIndex (uint). The C++ fills lowHFData from the same constant the D3D9 path uses, and sets samplerIndex to the LinearClamp sampler's index.
 - Descriptor layout: set 1, binding 0: sampled 2D image (the rendered picture). The sampler is referenced by the push index, not by its own binding.
 - Vertex stage and full-screen triangle: the shared full-screen pass setup used by the other compute-folder passes.

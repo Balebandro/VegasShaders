@@ -343,7 +343,7 @@ namespace {
 				// Another mode: the helper is started again (FSR 2 in between). UNOFFICIAL 2026-10-30: also after the other mode turned
 				// itself off for the session (real DLSS on a GTX card gives up: the pass-through test can still run there).
 				if (state != Off) Stop(test ? "HelperTest turned on" : "HelperTest turned off");
-				else Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper: HelperTest turned %s: the helper is tried again in that mode.", test ? "on" : "off");
+				else Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper: HelperTest turned %s: the helper is tried again in that mode.", test ? "on" : "off");
 				state = Idle;
 			}
 			// UNOFFICIAL 2026-10-30 (DLAA stall report): the helper's start options; a change starts it again (FSR 2 in between)
@@ -360,7 +360,7 @@ namespace {
 			}
 			if (failTest != helperFailTest) {
 				if (state != Idle && state != Off) Stop("HelperFailTest changed");
-				else if (state == Off) Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper: HelperFailTest %d: the helper is tried again.", failTest);
+				else if (state == Off) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper: HelperFailTest %d: the helper is tried again.", failTest);
 				state = Idle;
 			}
 			helperCpuWait = cpuWait;
@@ -490,7 +490,7 @@ namespace {
 
 	// Off for the session: logged once with the reason. FSR 2 runs from now on.
 	bool DlssUpscaler::TurnOff(const char* why) {
-		Logger::Log("UNOFFICIAL NVR DXVK: [Shaders.TAA.DLSS] Enabled (%s): %s; FSR 2 is used instead for this session.",
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: [Shaders.TAA.DLSS] Enabled (%s): %s; FSR 2 is used instead for this session.",
 			passThrough ? "DLSS helper pass-through test" : "DLSS", why);
 		Stop(nullptr);
 		state = Off;
@@ -503,7 +503,7 @@ namespace {
 		char message[sizeof(shared->message)];
 		memcpy(message, (const void*)shared->message, sizeof(message));
 		message[sizeof(message) - 1] = 0;
-		Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper: %s", message);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper: %s", message);
 	}
 
 	DWORD WINAPI DlssUpscaler::WatchdogMain(void* self) {
@@ -535,10 +535,10 @@ namespace {
 
 	bool DlssUpscaler::Start(const Upscaler::Inputs& In) {
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
-		if (!ext || !DxvkCompute::Available()) return TurnOff("no NVR DXVK");
+		if (!ext || !DxvkCompute::Available()) return TurnOff("no Vegas Shaders DXVK");
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtShare), (void**)&share)) || !share) {
 			share = nullptr;
-			return TurnOff("this NVR DXVK d3d9.dll cannot share images with another process (fork patch 1.7-dlss or newer needed)");
+			return TurnOff("this Vegas Shaders DXVK d3d9.dll cannot share images with another process (fork patch 1.7-dlss or newer needed)");
 		}
 		NVR_EXT_SHARE_INFO info = {};
 		share->GetShareInfo(&info);
@@ -559,7 +559,7 @@ namespace {
 		// mode only with NVIDIA's RR runtime next to the helper (the pass-through test needs none). Without it DLSS SR starts as before.
 		bool withRr = rr.Wanted;
 		if (withRr && !passThrough && !FileExists(helperDir + L"\\nvngx_dlssd.dll")) {
-			if (!rrDllReported) Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction is off: nvngx_dlssd.dll (NVIDIA's Ray Reconstruction runtime) is not next to NvrDlssHelper.exe; DLSS SR runs.");
+			if (!rrDllReported) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction is off: nvngx_dlssd.dll (NVIDIA's Ray Reconstruction runtime) is not next to NvrDlssHelper.exe; DLSS SR runs.");
 			rrDllReported = true;
 			withRr = false;
 		}
@@ -583,7 +583,7 @@ namespace {
 			if (FAILED(hr)) {
 				if (i >= NVR_DLSS_IMAGE_COUNT_SR) {
 					// One of RR's guides: no RR for this start, DLSS SR starts with its own four images.
-					Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction is off: the shared image '%s' could not be made (fork CreateSharedImage: %s; the DXVK log says more); DLSS SR runs.",
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction is off: the shared image '%s' could not be made (fork CreateSharedImage: %s; the DXVK log says more); DLSS SR runs.",
 						descs[i].pDebugName, HrText(hr).c_str());
 					for (UInt32 j = NVR_DLSS_IMAGE_COUNT_SR; j < NVR_DLSS_IMAGE_COUNT; j++) DxvkCompute::Drop(images[j]);
 					imageCount = NVR_DLSS_IMAGE_COUNT_SR;
@@ -718,7 +718,7 @@ namespace {
 		handle = nullptr;
 		hr = outputReady->CreateHandle(&handle);
 		if (!give("'output ready' semaphore", hr, handle, shared->semOutputReady)) return TurnOff(why);
-		Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper: %u images%s and 2 semaphores given to the helper (process %lu).", imageCount,
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper: %u images%s and 2 semaphores given to the helper (process %lu).", imageCount,
 			maskReady ? " + the bias current colour mask" : "", GetProcessId(process));
 		MemoryBarrier();
 		shared->setupDone = 1;
@@ -743,10 +743,10 @@ namespace {
 		startTick = GetTickCount64();
 		state = Starting;
 		lastSerial = 0;
-		Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper started (%s, %ls): inputs %ux%u, display %ux%u, GPU %s; HelperWait %d (%s), HelperGpuPriority %d, "
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper started (%s, %ls): inputs %ux%u, display %ux%u, GPU %s; HelperWait %d (%s), HelperGpuPriority %d, "
 			"HelperExactInputs %d, WeaponMask %.2f (%s)%s; FSR 2 runs until it is ready.", passThrough ? "pass-through test" : "DLSS", exe.c_str(), inputWidth, inputHeight, displayWidth,
 			displayHeight, info.DeviceName, helperCpuWait ? 1 : 0, helperCpuWait ? "the helper waits on the CPU" : "the GPU waits", helperHighPriority ? 1 : 0,
-			helperExactInputs ? 1 : 0, weaponMask, maskReady ? "bias current colour mask made" : "no bias mask this start", helperFailTest == 1 ? ", HelperFailTest 1 (TEST: NVR ends the helper at its 120th frame)" :
+			helperExactInputs ? 1 : 0, weaponMask, maskReady ? "bias current colour mask made" : "no bias mask this start", helperFailTest == 1 ? ", HelperFailTest 1 (TEST: Vegas Shaders ends the helper at its 120th frame)" :
 			helperFailTest == 2 ? ", HelperFailTest 2 (TEST: the helper reports a failure at its 120th frame)" :
 			helperFailTest == 3 ? ", HelperFailTest 3 (TEST: the helper stops answering at its 120th frame)" : "");
 		return true;
@@ -755,7 +755,7 @@ namespace {
 	// Ends the helper and releases everything. Waits recorded on the GPU are released first (the helper finishes them, or the
 	// semaphore is signalled from the CPU), so the game's GPU queue never waits for a frame that will not come.
 	void DlssUpscaler::Stop(const char* why) {
-		if (why && state != Idle && state != Off) Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper stopped: %s.", why);
+		if (why && state != Idle && state != Off) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper stopped: %s.", why);
 		if (watchdog) {
 			InterlockedExchange(&watchStop, 1);
 			WaitForSingleObject(watchdog, 3000);
@@ -814,7 +814,7 @@ namespace {
 				dlssNeedsReset = true;
 				rrNeedsReset = true;	// UNOFFICIAL 2026-10-30 (RR)
 				reported = 0;
-				Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper ready after %llu ms (%s); it upscales from the next frame on.",
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper ready after %llu ms (%s); it upscales from the next frame on.",
 					(unsigned long long)(GetTickCount64() - startTick), passThrough ? "pass-through test: the picture is only stretched, with a marker" : "NVIDIA DLSS");
 			}
 			else if (helperState == NVR_DLSS_STATE_FAILED || helperState == NVR_DLSS_STATE_EXITED) TurnOff("the helper gave up (its message is above)");
@@ -863,7 +863,7 @@ namespace {
 	// The pass (Compute\DlssBiasMask.spv) once a session; the r16f texture and the shared image at every start. False: no mask (logged).
 	bool DlssUpscaler::MakeMask(const Upscaler::Inputs& In) {
 		auto no = [&](const char* why) {
-			Logger::Log("UNOFFICIAL NVR DXVK: DLSS: no bias current colour mask for the first-person weapon ([Shaders.TAA.DLSS] WeaponMask) this start: %s; "
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS: no bias current colour mask for the first-person weapon ([Shaders.TAA.DLSS] WeaponMask) this start: %s; "
 				"DLSS runs without it, as before.", why);
 			DxvkCompute::Drop(maskImage);
 			if (maskTex.Surface) { maskTex.Surface->Release(); maskTex.Surface = nullptr; }
@@ -918,14 +918,14 @@ namespace {
 		DxvkCompute::PreLoad(b, _countof(b));
 		const RECT render = { 0, 0, (LONG)In.RenderWidth, (LONG)In.RenderHeight };
 		if (FAILED(DxvkCompute::Extension()->Dispatch(&dispatch)) || FAILED(share->CopyToShared(maskImage, 0, 0, maskTex.Texture, &render))) {
-			Logger::Log("UNOFFICIAL NVR DXVK: DLSS: the bias current colour mask could not be made or copied to the helper; DLSS runs without it until "
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS: the bias current colour mask could not be made or copied to the helper; DLSS runs without it until "
 				"the helper starts again.");
 			maskReady = false;
 			return false;
 		}
 		if (!maskFirstLogged) {
 			maskFirstLogged = true;
-			Logger::Log("UNOFFICIAL NVR DXVK: DLSS gets the bias current colour mask: %s, FSR's reactive value elsewhere (logged once).",
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS gets the bias current colour mask: %s, FSR's reactive value elsewhere (logged once).",
 				In.ViewModel ? "the first-person weapon at WeaponMask" : "no weapon in this picture (RenderScale v1)");
 		}
 		return true;
@@ -944,7 +944,7 @@ namespace {
 		for (UInt32 i = 0; i < imageCount; i++) {
 			if (i == NVR_DLSS_IMAGE_OUTPUT) continue;
 			if (FAILED(share->CopyToShared(images[i], 0, 0, sources[i], &render))) {
-				Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction is off until the helper starts again: '%s' could not be copied to the helper (formats or sizes; the DXVK log says more); DLSS SR runs.",
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction is off until the helper starts again: '%s' could not be copied to the helper (formats or sizes; the DXVK log says more); DLSS SR runs.",
 					kImageNames[i]);
 				rrFailed = true;
 				return false;
@@ -1045,13 +1045,13 @@ namespace {
 		// UNOFFICIAL 2026-10-30 TEST ONLY (HelperFailTest 1): the helper process ended from here, as a crash would end it (the watchdog sees it,
 		// releases this frame's wait and NVR goes to FSR 2 for the session).
 		if (helperFailTest == 1 && runningFrames == 119 && process) {
-			Logger::Log("UNOFFICIAL NVR DXVK: DLSS helper: HelperFailTest 1: NVR ends the helper process now (test).");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper: HelperFailTest 1: Vegas Shaders ends the helper process now (test).");
 			TerminateProcess(process, 3);
 		}
 		if (!fsrFreed && ++runningFrames >= 600) {
 			fsrFreed = true;
 			Upscaler::Fsr2()->ReleaseResources();
-			Logger::Log("UNOFFICIAL NVR DXVK: DLSS has run 600 frames: FSR 2's own textures (its stand-in while the helper starts, about %u MB here) are freed; "
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS has run 600 frames: FSR 2's own textures (its stand-in while the helper starts, about %u MB here) are freed; "
 				"FSR 2 makes them again if DLSS stops.", (unsigned)(190.0 * In.DisplayWidth * In.DisplayHeight / (1920.0 * 1080.0)));
 		}
 
@@ -1066,7 +1066,7 @@ namespace {
 			char watched[512];
 			watch.Report(watched, sizeof(watched));
 			Logger::Log("DLSS HELPER (%s): %llu frames exchanged, last recorded %llu, back from the helper %llu; helper GPU %.3f ms avg (last %.3f), "
-				"helper response %.3f ms avg (max %.3f), %u overwritten, %u DLSS evaluations; NVR records %.3f ms CPU avg; %ux%u -> %ux%u %s%s%s",
+				"helper response %.3f ms avg (max %.3f), %u overwritten, %u DLSS evaluations; Vegas Shaders records %.3f ms CPU avg; %ux%u -> %ux%u %s%s%s",
 				mode, (unsigned long long)shared->framesSubmitted, (unsigned long long)n, (unsigned long long)done,
 				shared->gpuTimeUsAvg / 1000.0, shared->gpuTimeUsLast / 1000.0, shared->responseUsAvg / 1000.0, shared->responseUsMax / 1000.0,
 				shared->paramMismatches, shared->dlssEvaluated, recordCount ? recordUs / recordCount / 1000.0 : 0.0,
@@ -1112,12 +1112,12 @@ namespace {
 		const bool ready = running && shared->rrAvailable != 0;
 		if (ready && rrReported != 1) {
 			rrReported = 1;
-			Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction ready (%s).", passThrough ? "the helper's pass-through test" : "NVIDIA DLSS-D");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction ready (%s).", passThrough ? "the helper's pass-through test" : "NVIDIA DLSS-D");
 		}
 		else if (running && !ready && rrReported != 2) {
 			// The helper runs DLSS SR but not RR (NGX's SuperSamplingDenoising says no, or DLSS-D failed): the helper's message says why.
 			rrReported = 2;
-			Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction not available (the helper's message is above); DLSS SR runs.");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction not available (the helper's message is above); DLSS SR runs.");
 		}
 		return ready;
 	}
@@ -1132,7 +1132,7 @@ namespace {
 		if (missing || otherSize) {
 			if (!rrSkipLogged) {
 				rrSkipLogged = true;
-				Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction skipped a frame: %s (inputs %ux%u -> %ux%u, the helper's %ux%u -> %ux%u); "
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction skipped a frame: %s (inputs %ux%u -> %ux%u, the helper's %ux%u -> %ux%u); "
 					"DLSS SR runs that frame (logged once per helper start).", missing ? "an input is missing" : "the sizes are not the helper's",
 					In.InputWidth, In.InputHeight, In.DisplayWidth, In.DisplayHeight, inputWidth, inputHeight, displayWidth, displayHeight);
 			}

@@ -174,7 +174,7 @@ void NvrDepthWarningTick() {
 	static bool shown = false;
 	if (!NvrDepthMissingUnderDXVK || shown || !Player || !Player->parentCell || !InterfaceManager) return;
 	shown = true;
-	InterfaceManager->ShowMessage("NVR: no depth under this DXVK on NVIDIA. Add d3d9.customVendorId = 1002 to dxvk.conf (see the NVR log).");
+	InterfaceManager->ShowMessage("Vegas Shaders: no depth under this DXVK on NVIDIA. Add d3d9.customVendorId = 1002 to dxvk.conf (see the Vegas Shaders log).");
 }
 
 // True when the d3d9.dll the process loads has the ProductName "DXVK".
@@ -242,7 +242,7 @@ static void LogWindowsDisplayAdapters(const char* reportedName) {
 	Logger::Log("Windows display adapters: %s", adapters.c_str());
 	if (!reportedSeen)
 		Logger::Log("The game is told about a different GPU than Windows lists. DXVK does this on purpose (its hideNvidiaGpu "
-			"option shows NVIDIA cards as AMD Radeon RX 6700 XT); NVR does not depend on the name.");
+			"option shows NVIDIA cards as AMD Radeon RX 6700 XT); Vegas Shaders does not depend on the name.");
 }
 
 void RenderManager::Initialize() {
@@ -280,9 +280,9 @@ void RenderManager::Initialize() {
 		// Said once in the log here and once on screen in game (NvrDepthWarningTick); the old path stays as it was.
 		if (getDXVKPresent()) {
 			NvrDepthMissingUnderDXVK = true;
-			Logger::Log("WARNING: this d3d9.dll is DXVK without RESZ on an NVIDIA card: NVR gets NO world depth (ambient occlusion, fog, "
+			Logger::Log("WARNING: this d3d9.dll is DXVK without RESZ on an NVIDIA card: Vegas Shaders gets NO world depth (ambient occlusion, fog, "
 				"shadows, reflections and other depth effects will look wrong). Fix: add the line  d3d9.customVendorId = 1002  to dxvk.conf "
-				"next to d3d9.dll (DXVK then offers RESZ), or use NVR DXVK, which offers it on every GPU.");
+				"next to d3d9.dll (DXVK then offers RESZ), or use Vegas Shaders DXVK, which offers it on every GPU.");
 		}
 	}
 	else Logger::Log("ERROR: Cannot initialize the render manager. Graphics device not supported.");

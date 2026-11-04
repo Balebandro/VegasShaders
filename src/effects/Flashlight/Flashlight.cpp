@@ -20,9 +20,16 @@ void FlashlightEffect::RegisterConstants() {
 		{ "TESR_FlashLightColor", &Constants.Color },
 		{ "TESR_FlashLightTuning", &Constants.Tuning },
 		{ "TESR_FlashLightComposite", &Constants.Composite },
+		{ "TESR_FlashLightRT", &Constants.RtShadow },	// UNOFFICIAL 2026-11-04 (TechniqueThisFrame)
 	};
 	for (const Binding& binding : bindings) TheShaderManager->RegisterConstant(binding.name, binding.value);
 };
+
+// UNOFFICIAL 2026-11-04 RenderScale < 1 (docs/next/RT-RENDERSCALE.md): the traced flashlight shadow under a name, so the D3D9 shadow
+// pass can read it (s8). The texture is RtLampShadows' (made on the first trace; empty until then: TESR_FlashLightRT.x stays 0).
+void FlashlightEffect::RegisterTextures() {
+	TheTextureManager->RegisterTexture("TESR_RtFlashShadow", (IDirect3DBaseTexture9**)&RtLampShadows::FlashTexture);
+}
 
 void FlashlightEffect::UpdateSettings() {
 	const char* const mainSection = "Shaders.Flashlight.Main";
@@ -407,6 +414,11 @@ namespace {
 // UNOFFICIAL 2026-10-30 RT lamp shadows Flashlight: with a traced shadow this frame the shadowed technique runs (its NVR DXVK passes read
 // the trace, ExtRender), RenderShadows on or not; otherwise the technique UpdateConstants chose.
 int FlashlightEffect::TechniqueThisFrame() {
+	// UNOFFICIAL 2026-11-04 RenderScale < 1: in a rect frame the Vulkan passes do not run (DxvkCompute::PassesOn), so the D3D9 shadow pass
+	// draws; with a trace this frame it reads the traced shadow (rect layout in a rect frame, as its uv) instead of the spot shadow map,
+	// which is not drawn while the trace replaces it. Also in native frames where the D3D9 technique draws (NvrDxvkPasses off,
+	// NvrDxvkKeepD3D9 Flashlight: before, the same undrawn map); with the Vulkan passes on, native frames draw FlashlightShadowsRT as before.
+	Constants.RtShadow.x = RtLampShadows::FlashlightShadow() ? 1.0f : 0.0f;
 	if (!RtLampShadows::FlashlightShadow()) return selectedPass;
 	if (Settings.edgeFix > 0 && edgeFixShadowsIndex >= 0) return edgeFixShadowsIndex;
 	return selectedPass == 0 ? 1 : selectedPass;

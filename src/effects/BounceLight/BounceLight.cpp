@@ -443,7 +443,7 @@ bool BounceLightEffect::ExtPasses(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		}
 		if (!drawn) return false;
 	}
-	if (endPass < 5 && ++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as Vulkan passes.", Name);
+	if (endPass < 5 && ++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as Vulkan passes.", Name);
 	return true;
 }
 

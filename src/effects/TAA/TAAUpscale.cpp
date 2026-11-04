@@ -54,7 +54,7 @@ namespace {
 	};
 	const char* const SkipNames[SkipReasonCount] = {
 		"a second world scene in the same frame", "TAA is off ([Shaders.TAA.Status] Enabled)", "menu, overlay or loading (no player cell)",
-		"RenderScale failed earlier this session", "no NVR DXVK, or FSR failed", "no RESZ depth resolve (NVR DXVK with the RESZ patch, or dxvk.conf d3d9.customVendorId = 1002)",
+		"RenderScale failed earlier this session", "no Vegas Shaders DXVK fork, or FSR failed", "no RESZ depth resolve (the Vegas Shaders DXVK fork with the RESZ patch, or dxvk.conf d3d9.customVendorId = 1002)",
 		"the Pip-Boy is open", "no world camera, or an orthographic one", "the world camera's viewport is not the whole screen",
 		"a scissor is set (a gun scope's view)", "no world render target", "the game's MSAA is on (turn it off: FSR anti-aliases)",
 		"the world's targets are not the screen's size"
@@ -241,7 +241,7 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 		if (++DroppedInARow >= 3 && !V2Off) {
 			V2Off = true;
 			Logger::Log("UNOFFICIAL RenderScale v2: %u frames in a row were never upscaled (each was shown small, in the top-left corner); the effects run after the upscale "
-				"for this session: the world is upscaled right after it is drawn, before the weapon and NVR's effects.", DroppedInARow);
+				"for this session: the world is upscaled right after it is drawn, before the weapon and Vegas Shaders' effects.", DroppedInARow);
 		}
 	}
 	Up.Active = false;
@@ -341,7 +341,7 @@ bool TAAEffect::UpscaleEnsureResources() {
 		}
 		Up.InputFormat = Up.TargetFormat;
 		Up.HistoryValid = false;
-		Logger::Log("UNOFFICIAL NVR DXVK: RenderScale inputs made (%ux%u, about %u MB)", width, height, (UInt32)((UInt64)width * height * 20 / (1024 * 1024)));
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RenderScale inputs made (%ux%u, about %u MB)", width, height, (UInt32)((UInt64)width * height * 20 / (1024 * 1024)));
 	}
 	// The D3D9 composite first: it is also the fallback that makes a failed frame whole (UpscaleWorld).
 	if (!Up.CompositeTried) {
@@ -418,7 +418,7 @@ bool TAAEffect::UpscaleComposite(IDirect3DDevice9* Device, IDirect3DTexture9* fs
 
 bool TAAEffect::UpscaleCheckDrawn(IDirect3DDevice9* Device) {
 	auto fail = [this](const char* why) {
-		Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: RenderScale: %s; the world is drawn at native resolution for the rest of this session.", why);
+		Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: RenderScale: %s; the world is drawn at native resolution for the rest of this session.", why);
 		Up.Failed = true;
 		return false;
 	};
@@ -447,7 +447,7 @@ bool TAAEffect::UpscaleCheckDrawn(IDirect3DDevice9* Device) {
 
 bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
 	auto fail = [this](const char* why) {
-		Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: RenderScale: %s; the world is drawn at native resolution for the rest of this session.", why);
+		Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: RenderScale: %s; the world is drawn at native resolution for the rest of this session.", why);
 		Up.Failed = true;
 		return false;
 	};
@@ -694,7 +694,7 @@ void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 	TheShaderManager->RenderDepthAndNormals(GameSurface ? GameSurface : Up.Target);
 	if (ok && !Up.V2Logged) {
 		Up.V2Logged = true;
-		Logger::Log("UNOFFICIAL RenderScale v2: NVR's effects ran at %ux%u, upscaled after them (to %ux%u by %s).", Up.RenderWidth, Up.RenderHeight,
+		Logger::Log("UNOFFICIAL RenderScale v2: Vegas Shaders' effects ran at %ux%u, upscaled after them (to %ux%u by %s).", Up.RenderWidth, Up.RenderHeight,
 			Up.Width, Up.Height, Upscaler::Choose(FSRSettings.Upscaler)->Name());
 	}
 	UpscaleFinish(ok, true);
@@ -720,8 +720,8 @@ void TAAEffect::UpscaleFinish(bool ok, bool v2) {
 		Up.LoggedScale = FSRSettings.RenderScale;
 		Up.LoggedWidth = Up.RenderWidth;
 		Up.LoggedHeight = Up.RenderHeight;
-		if (v2) Logger::Log("UNOFFICIAL RenderScale v2: the first-person weapon and NVR's effects before tonemapping are drawn at that size too.");
-		Logger::Log("UNOFFICIAL NVR DXVK: RenderScale %.2f: the world scene is drawn at %ux%u (%.0f%% of the pixels) and upscaled by %s to %ux%u (%s input, jitter %d steps; "
+		if (v2) Logger::Log("UNOFFICIAL RenderScale v2: the first-person weapon and Vegas Shaders' effects before tonemapping are drawn at that size too.");
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RenderScale %.2f: the world scene is drawn at %ux%u (%.0f%% of the pixels) and upscaled by %s to %ux%u (%s input, jitter %d steps; "
 			"%u world passes drawn at that size this frame, %u at the whole screen).",
 			FSRSettings.RenderScale, Up.RenderWidth, Up.RenderHeight, 100.0 * Up.RenderWidth * Up.RenderHeight / ((double)Up.Width * Up.Height),
 			Upscaler::Choose(FSRSettings.Upscaler)->Name(), Up.Width, Up.Height, Up.Hdr ? "HDR" : "LDR", (int)Up.JitterPhases, Up.DrawsSmall, Up.DrawsFull);

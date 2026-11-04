@@ -46,6 +46,7 @@ All samplers use CLAMP addressing. The register numbers are fixed by the `.fx` d
 | s5 | `TESR_ShadowSpotlightBuffer0` | the spot light's shadow depth map, or the traced shadow in the traced variant | LINEAR |
 | s6 | `TESR_SpotLightTexture` | the cookie, resource `Effects\Flashlight.png` (repo file `resource/Textures/Effects/Flashlight.png`) | LINEAR with mips |
 | s7 | `TESR_VolumetricBuffer` | the FlashlightBeam half-resolution shaft | LINEAR, no mips |
+| s8 | `TESR_RtFlashShadow` | (2026-11-04) the RT lamp shadows' traced flashlight shadow (R32F, 1 lit / 0 blocked, screen space; rect layout in a rect frame), read by the D3D9 shadow pass only while `TESR_FlashLightRT.x` is 1 | LINEAR, no mips |
 
 Vulkan binding order is the same list without s3 (see section 7).
 
@@ -59,6 +60,7 @@ The `.fx` declares these; the C++ registers the first six by name. Registers are
 | `TESR_FlashLightPosition`, `TESR_FlashLightDirection`, `TESR_FlashLightColor` | vec4 each | registered by this effect; the shader does not read them (it uses the shared `TESR_SpotLight*` below) | registered by this effect |
 | `TESR_FlashLightTuning` | vec4 | x near fade distance (game units, 0 disables); y soft edge flag (1 = wrap lighting); z hotspot limit (0 disables); w cookie strength 0 to 1 | registered by this effect |
 | `TESR_FlashLightComposite` | vec4 | x source-is-linear flag (1 = linear HDR source, 0 = sRGB source to decode); y EdgeFix 2 flag (1 = the shaft also gets the edge treatment); z, w = 1 / half-resolution beam width and height | registered by this effect |
+| `TESR_FlashLightRT` | vec4 | (2026-11-04) x 1 = the D3D9 shadow pass reads `TESR_RtFlashShadow` instead of the shadow map (a rect frame with a traced shadow); yzw unused | registered by this effect, set in `TechniqueThisFrame` |
 | `TESR_SpotLightPosition` | vec4 | xyz light position in world units; w light radius in world units (the Distance setting) | shared, published by the effect's constants update |
 | `TESR_SpotLightDirection` | vec4 | xyz unit axis of the light; w outer cone angle in degrees (the Angle setting) | shared |
 | `TESR_SpotLightColor` | vec4 | rgb light colour (the ColorR, ColorG, ColorB settings); w dimmer (the Dimmer setting) | shared |
@@ -191,6 +193,7 @@ Pip-Boy light: while the flashlight is on, the game's Pip-Boy light node is cull
 Off state: when the light is off, the spot light constants are zeroed (position, direction, colour, beam parameters); the spot light's dimmer is set to 0 and shadows off.
 
 Render rects (RenderScale v2): the box blur passes read `TESR_RenderScale` and clear pixels outside the drawn part. The Vulkan version does not run in rect frames (section 7).
+Traced shadow in rect frames (2026-11-04, docs/next/RT-RENDERSCALE.md): there the D3D9 technique draws, and the traced shadow forces the shadow technique while the spot shadow map is not drawn; so the D3D9 `Shadows` pass reads the traced shadow (`TESR_RtFlashShadow`, s8, at its uv clamped to the rect) in place of the map lookup when `TESR_FlashLightRT.x` is 1. `TechniqueThisFrame` sets it: 1 in any frame with a trace (the D3D9 pass only draws in rect frames, or in native ones with `NvrDxvkPasses` off / `NvrDxvkKeepD3D9` Flashlight, where it used to read the undrawn map); with the Vulkan passes on, native frames draw `FlashlightShadowsRT` as before. Same reach and frame test.
 
 Reversed depth: this effect reads linear depth, not the projected depth, so reversed-depth projection does not change its maths. Not checked for every frame setting.
 
@@ -212,7 +215,7 @@ Files in `src/hlsl/NewVegas/Compute` with names starting `Flashlight` (15 files)
 - Compiled binaries `.spv` exist for each `.frag`; a new version must produce its own.
 
 Selection (`src/effects/Flashlight.cpp`, `ExtRender`), and the general rule in `src/core/EffectRecord.cpp` `EffectRecord::Render`:
-- Vulkan passes are used only when `[Main.Main.Performance]` `NvrDxvkPasses` is on, DXVK compute is available (the NVR DXVK build), the effect is not listed in `NvrDxvkKeepD3D9`, the technique has no SM6 build selected by `NvrSm6Shaders` (`Sm6Covers`), and no render rect is active (`DxvkCompute::PassesOn`, which returns false in rect frames).
+- Vulkan passes are used only when `[Main.Main.Performance]` `NvrDxvkPasses` is on, DXVK compute is available (the Vegas Shaders DXVK build), the effect is not listed in `NvrDxvkKeepD3D9`, the technique has no SM6 build selected by `NvrSm6Shaders` (`Sm6Covers`), and no render rect is active (`DxvkCompute::PassesOn`, which returns false in rect frames).
 - Otherwise, or when `ExtRender` returns false, the D3D9 passes run.
 - `ExtRender` returns false (for this frame) when the technique is not 0, 1, `EdgeFix` or `EdgeFixShadows`, when the clear flag is off, when a required constant is not registered, when a required texture is missing (depth, normals, cookie, shadow map when shadows are on, beam buffer when the beam is on), or when a pipeline cannot be created.
 - If a later pass fails after the first has drawn, the image is copied back from the source buffer so the D3D9 path starts from the image it would have had. A failing pipeline sets the effect's extension-failed flag for the session (logged).

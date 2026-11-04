@@ -69,7 +69,7 @@ static ID3D9NvrExtSampler* Sm6Sampler(NVR_EXT_FILTER filter, NVR_EXT_ADDRESS add
 }
 
 bool Sm6Pass::Fail(const char* Why) {
-	if (!Failed) Logger::Log("UNOFFICIAL NVR SM6: %s: %s; this pass keeps its D3D9 shader for the session", Key.c_str(), Why);
+	if (!Failed) Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s: %s; this pass keeps its D3D9 shader for the session", Key.c_str(), Why);
 	Failed = true;
 	return false;
 }
@@ -168,7 +168,7 @@ bool Sm6Pass::Prepare(EffectRecord* Effect, const char* Technique, UINT Pass) {
 	_snprintf_s(hash, sizeof(hash), _TRUNCATE, "%08x", Sm6Fnv32(variant));
 	const std::string base = Sm6Folder() + Key + "." + hash;
 	if (!LoadLayout((base + ".txt").c_str())) {
-		Logger::Log("UNOFFICIAL NVR SM6: %s: variant %s (%s)", Key.c_str(), hash, variant.c_str());
+		Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s: variant %s (%s)", Key.c_str(), hash, variant.c_str());
 		return false;
 	}
 
@@ -197,7 +197,7 @@ bool Sm6Pass::Prepare(EffectRecord* Effect, const char* Technique, UINT Pass) {
 	for (const Texture& t : Textures) {
 		NVR_EXT_BINDING_DESC b = {};
 		b.Set = 1; b.Binding = t.Binding; b.Type = NVR_EXT_BIND_SAMPLED_IMAGE; b.Slot = t.Binding; b.ViewType = t.View;
-		if (t.Binding >= DxvkCompute::Info().MaxSlots) return Fail("more textures than this NVR DXVK has slots");
+		if (t.Binding >= DxvkCompute::Info().MaxSlots) return Fail("more textures than this Vegas Shaders DXVK has slots");
 		bindings.push_back(b);
 	}
 	if (UboSize) {
@@ -212,7 +212,7 @@ bool Sm6Pass::Prepare(EffectRecord* Effect, const char* Technique, UINT Pass) {
 	}
 	// 32 bindings per pipeline up to extension 1.4; the 1.5-sm6 build (fork patch 0013, 0014 since the 10-27 renumbering) says 64 slots and takes 96
 	const UINT maxBindings = DxvkCompute::Info().MaxSlots >= 64 ? 96u : 32u;
-	if (bindings.size() > maxBindings) return Fail("more bindings than this NVR DXVK takes");
+	if (bindings.size() > maxBindings) return Fail("more bindings than this Vegas Shaders DXVK takes");
 	if (PushSize > DxvkCompute::Info().MaxPushBytes || PushSize < Samplers.size() * 4) return Fail("bad push size");
 	if (!TargetCount || TargetCount > NVR_EXT_MAX_TARGETS) return Fail("bad target count");
 
@@ -242,7 +242,7 @@ bool Sm6Pass::Prepare(EffectRecord* Effect, const char* Technique, UINT Pass) {
 	for (const Constant& c : Constants) if (c.Handle) fromEffect++;
 	int sampled = 0;
 	for (const Texture& t : Textures) if (t.Stage >= 0) sampled++;
-	Logger::Log("UNOFFICIAL NVR SM6: %s ready (variant %s %s): %u constants in %u bytes (%d from the effect), %u textures (%d on the D3D9 pass's stages), %u samplers, %u target(s)",
+	Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s ready (variant %s %s): %u constants in %u bytes (%d from the effect), %u textures (%d on the D3D9 pass's stages), %u samplers, %u target(s)",
 		Key.c_str(), hash, variant.c_str(), (UINT)Constants.size(), UboSize, fromEffect, (UINT)Textures.size(), sampled, (UINT)Samplers.size(), TargetCount);
 	return true;
 }
@@ -301,7 +301,7 @@ void Sm6Pass::FillConstants() {
 		if (!c.Default.empty()) { memcpy(dst, c.Default.data(), min(c.Size, (UINT)(c.Default.size() * sizeof(float)))); continue; }
 		if (std::find(Missing.begin(), Missing.end(), c.Name) == Missing.end()) {
 			Missing.push_back(c.Name);
-			Logger::Log("UNOFFICIAL NVR SM6: %s: constant %s has no value (not an effect parameter, not registered): 0", Key.c_str(), c.Name.c_str());
+			Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s: constant %s has no value (not an effect parameter, not registered): 0", Key.c_str(), c.Name.c_str());
 		}
 	}
 }
@@ -339,7 +339,7 @@ bool Sm6Pass::Draw(IDirect3DDevice9* Device, IDirect3DSurface9* const* Targets, 
 		for (size_t j = 0; !texture && j < Textures.size(); j++) if (textures[j] && Textures[j].View == Textures[i].View) texture = textures[j];
 		if (!texture) {
 			static bool said = false;
-			if (!said) Logger::Log("UNOFFICIAL NVR SM6: %s: no texture for %s this frame: D3D9 pass this frame", Key.c_str(), Textures[i].Name.c_str());
+			if (!said) Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s: no texture for %s this frame: D3D9 pass this frame", Key.c_str(), Textures[i].Name.c_str());
 			said = true;
 			return false;
 		}
@@ -362,7 +362,7 @@ bool Sm6Pass::Draw(IDirect3DDevice9* Device, IDirect3DSurface9* const* Targets, 
 	const bool drawn = Owner->ExtDrawTo(Pipeline, Targets, Count, resources.data(), (UINT)resources.size(), push.data(), PushSize, Viewport, Uv);
 	Owner->ExtFailed = wasFailed;	// (the effect's hand-ported passes are not this pass)
 	if (!drawn) return Fail("the draw was refused");
-	if (++Frames == 1) Logger::Log("UNOFFICIAL NVR SM6: %s runs from its SM6 build.", Key.c_str());
+	if (++Frames == 1) Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s runs from its SM6 build.", Key.c_str());
 	if (Frames == 120) {	// once: what the pass was fed (constants' first four values, textures), for checking against the D3D9 pass
 		std::string line;
 		for (const Constant& c : Constants) {
@@ -372,14 +372,14 @@ bool Sm6Pass::Draw(IDirect3DDevice9* Device, IDirect3DSurface9* const* Targets, 
 				c.Size > 12 ? v[3] : 0.0f, c.Handle ? "" : "*");
 			line += one;
 		}
-		Logger::Log("UNOFFICIAL NVR SM6: %s frame 120 constants (* = not from the effect):%s", Key.c_str(), line.c_str());
+		Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s frame 120 constants (* = not from the effect):%s", Key.c_str(), line.c_str());
 		line.clear();
 		for (size_t i = 0; i < Textures.size(); i++) {
 			char one[160];
 			_snprintf_s(one, sizeof(one), _TRUNCATE, " %s@s%d=%p", Textures[i].Name.c_str(), Textures[i].Stage, (void*)textures[i]);
 			line += one;
 		}
-		Logger::Log("UNOFFICIAL NVR SM6: %s frame 120 textures:%s", Key.c_str(), line.c_str());
+		Logger::Log("UNOFFICIAL Vegas Shaders SM6: %s frame 120 textures:%s", Key.c_str(), line.c_str());
 	}
 	return true;
 }

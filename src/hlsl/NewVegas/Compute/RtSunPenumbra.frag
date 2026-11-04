@@ -17,8 +17,9 @@ layout(set = 1, binding = 3) uniform texture2D t_normals;      // TESR_NormalsBu
 
 layout(push_constant) uniform Push {
     vec4 params;   // x tan(the sun's half-angle), y farZ, z the largest radius (traced pixels), w debug (1: radius / largest as grey, 2: a flat 0.25)
-    vec4 size;     // x 1 / width, y 1 / height, z height (traced), w projection[1][1]
-    vec4 extra;    // x the smallest radius that filters (pixels)
+    vec4 size;     // x 1 / width, y 1 / height (the textures), z the traced frame's height (traced pixels), w projection[1][1]
+    vec4 extra;    // x the smallest radius that filters (pixels); UNOFFICIAL 2026-11-04 RenderScale < 1: yz the rect's last texel centre
+                   // (uv), w 1 = a rect frame (the trace is the textures' top-left part: taps clamped to it, texels past it write 0)
     uint samplerIndex;
     uint pad[3];
 } pc;
@@ -27,6 +28,9 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
 const int kTaps = 16;
+
+// (2026-11-04) a tap's uv kept inside the traced rect in rect frames (past it: older frames' values); native frames unchanged
+vec2 inRect(vec2 t) { return pc.extra.w > 0.5 ? min(t, pc.extra.yz) : t; }
 
 // A Vogel (golden angle) disc: tap i of n at radius sqrt((i + 0.5) / n), turned by `turn`
 vec2 vogel(int i, float turn) {
@@ -44,16 +48,17 @@ void main() {
     for (int y = -1; y <= 1; y++)
         for (int x = -1; x <= 1; x++) {
             if (x == 0 && y == 0) continue;
-            const float v = textureLod(sampler2D(t_visibility, NVR_SAMPLER(pc.samplerIndex)), uv + vec2(x, y) * pc.size.xy, 0.0).r;
+            const float v = textureLod(sampler2D(t_visibility, NVR_SAMPLER(pc.samplerIndex)), inRect(uv + vec2(x, y) * pc.size.xy), 0.0).r;
             lo = min(lo, v); hi = max(hi, v);
         }
     center = clamp(center, lo, hi);
     const float d01 = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
     const float z = d01 * pc.params.y;
     const float zSlope = max(abs(dFdx(z)), abs(dFdy(z)));   // before any branch (derivatives need every pixel of the quad)
+    if (pc.extra.w > 0.5 && any(greaterThan(uv, pc.extra.yz + 0.5 * pc.size.xy))) { o_color = vec4(0.0); return; }   // (2026-11-04) past the rect
     if (!(d01 > 0.0 && d01 < 0.9999)) { o_color = vec4(center, 0.0, 0.0, 0.0); return; }
     const vec3 n = normalize(textureLod(sampler2D(t_normals, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).xyz * 2.0 - 1.0);
-    // the world size of one traced pixel at this depth
+    // the world size of one traced pixel at this depth (size.z: the traced frame's height, the rect's in a rect frame)
     const float pixelWorld = 2.0 * z / (pc.size.w * pc.size.z);
     const vec2 pixel = gl_FragCoord.xy;
     // interleaved gradient noise: a fixed turn per pixel (no frame term: the result is not averaged over frames after this)
@@ -64,7 +69,7 @@ void main() {
     const float own = textureLod(sampler2D(t_blocker, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
     if (own > 0.0) { blockers += own; found += 1.0; }
     for (int i = 0; i < kTaps; i++) {
-        const vec2 tapUv = uv + vogel(i, turn) * pc.params.z * pc.size.xy;
+        const vec2 tapUv = inRect(uv + vogel(i, turn) * pc.params.z * pc.size.xy);
         const float b = textureLod(sampler2D(t_blocker, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).r;
         if (b > 0.0) { blockers += b; found += 1.0; }
     }
@@ -78,7 +83,7 @@ void main() {
     float sum = center, weights = 1.0;
     for (int i = 0; i < kTaps; i++) {
         const vec2 o = vogel(i, turn + 1.3) * radius;
-        const vec2 tapUv = uv + o * pc.size.xy;
+        const vec2 tapUv = inRect(uv + o * pc.size.xy);
         const float td = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).r;
         if (!(td > 0.0 && td < 0.9999)) continue;
         const float tz = td * pc.params.y;

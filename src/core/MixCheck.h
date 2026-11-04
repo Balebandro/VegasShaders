@@ -292,7 +292,7 @@ namespace MixCheck {
 			D3DSURFACE_DESC depthDesc = {};
 			if (SUCCEEDED(d->GetDepthStencilSurface(&depth)) && depth) { depth->GetDesc(&depthDesc); depth->Release(); }
 			const bool on = TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkMixCheck") != 0;
-			Logger::Log("UNOFFICIAL NVR DXVK setup: %s; NvrDxvkPasses %s, NvrDxvkKeepD3D9 \"%s\"; reversed depth %s (from the game's depth clear %.1f; an "
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK setup: %s; NvrDxvkPasses %s, NvrDxvkKeepD3D9 \"%s\"; reversed depth %s (from the game's depth clear %.1f; an "
 				"InvertedDepth key in the toml is not read by this build); game depth buffer %ux%u multisample %u; exterior shadow maps MSAA %s; NvrDxvkMixCheck %s",
 				DxvkCompute::Status(), TheSettingManager->SettingsMain.Main.NvrDxvkPasses ? "on" : "off", TheSettingManager->SettingsMain.Main.NvrDxvkKeepD3D9,
 				TheRenderManager->IsReversedDepth() ? "yes" : "no", NiDX9Renderer::GetSingleton()->m_fZClear,

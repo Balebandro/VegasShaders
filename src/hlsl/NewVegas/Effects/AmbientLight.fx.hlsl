@@ -435,7 +435,9 @@ AccumulateOut Accumulate(VSOUT IN) {
 	float3 lowC = current.rgb, highC = current.rgb;	// UNOFFICIAL 2026-11-03 (NVR_ALGI.y) the bounce's range the same way
 	[unroll] for (int i = 0; i < 4; i++) {
 		float2 offset = (i < 2 ? float2(i * 2 - 1, 0.0f) : float2(0.0f, i * 2 - 5)) * NVR_ALLayout.zw;
-		float4 n = tex2Dlod(NVR_ALBuffer, float4(uv + offset, 0.0f, 0.0f));
+		// (UNOFFICIAL 2026-11-04 RT GI at RenderScale < 1, phase 2: the neighbours kept inside the rect: past it the buffer holds texels of
+		// an older frame's layout, which would widen the bounce's range there; native frames unchanged)
+		float4 n = tex2Dlod(NVR_ALBuffer, float4(clampToRectIfOn(uv + offset, NVR_ALLayout.zw), 0.0f, 0.0f));
 		low = min(low, n.a);
 		high = max(high, n.a);
 		lowC = min(lowC, n.rgb);

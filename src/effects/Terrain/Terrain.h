@@ -71,6 +71,7 @@ public:
 		D3DXVECTOR4		SkyData;      // x: skylight strength, y: sample directionality
 		D3DXVECTOR4		VariationData;	// UNOFFICIAL 2026-10-19 Terrain Variation (TESR_TerrainVariationData, c95): x lattice scale, y height influence, z StartDistance, w its fade
 		D3DXVECTOR4		VariationExtra;	// (TESR_TerrainVariationExtra, c96): x 1 = the normal maps vary too
+		D3DXVECTOR4		MacroData;		// 2026-11-04 macro variation (TESR_TerrainMacroData, c179): x strength, y 1 / size, z brightness, w tint
 		D3DXVECTOR4		LODBlend;		// UNOFFICIAL 2026-10-19 LOD Blending (TESR_LODBlendData, c97): x far land brightness, y its gamma, z 1 = near land without its vertex colours, w 1 = the far land adjusted
 	};
 	TerrainStruct	Constants;

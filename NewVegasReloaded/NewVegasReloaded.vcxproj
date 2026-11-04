@@ -65,7 +65,7 @@
       <WarningLevel>Level3</WarningLevel>
       <Optimization>Disabled</Optimization>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;_USE_MATH_DEFINES;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_WINDOWS;_USRDLL;_USE_MATH_DEFINES;_CRT_SECURE_NO_WARNINGS;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeaderFile>
       </PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>$(SolutionDir)\Core;$(SolutionDir)lib\imgui;$(SolutionDir)lib\imgui\backends;$(SolutionDir)lib\reshade;$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -95,7 +95,7 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;_USE_MATH_DEFINES;_CRT_SECURE_NO_WARNINGS;NEWVEGAS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;_USRDLL;_USE_MATH_DEFINES;_CRT_SECURE_NO_WARNINGS;NEWVEGAS;_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PrecompiledHeaderFile>
       </PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>$(SolutionDir)\Core;$(SolutionDir)lib\imgui;$(SolutionDir)lib\imgui\backends;$(SolutionDir)lib\reshade;$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -179,6 +179,7 @@
     <ClCompile Include="..\src\effects\Flashlight\Flashlight.cpp" />
     <ClCompile Include="..\src\effects\FlashlightBeam\FlashlightBeam.cpp" />
     <ClCompile Include="..\src\effects\DustMotes\DustMotes.cpp" />
+    <ClCompile Include="..\src\effects\LocalExposure\LocalExposure.cpp" />
     <ClCompile Include="..\src\effects\GodRays\GodRays.cpp" />
     <ClCompile Include="..\src\effects\Grass\Grass.cpp" />
     <ClCompile Include="..\src\effects\Particles\Particles.cpp" />
@@ -348,6 +349,7 @@
     <ClInclude Include="..\src\effects\Flashlight\Flashlight.h" />
     <ClInclude Include="..\src\effects\FlashlightBeam\FlashlightBeam.h" />
     <ClInclude Include="..\src\effects\DustMotes\DustMotes.h" />
+    <ClInclude Include="..\src\effects\LocalExposure\LocalExposure.h" />
     <ClInclude Include="..\src\effects\GodRays\GodRays.h" />
     <ClInclude Include="..\src\effects\Grass\Grass.h" />
     <ClInclude Include="..\src\effects\Particles\Particles.h" />

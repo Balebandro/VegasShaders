@@ -33,6 +33,8 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 many2;         // x frame number (random seed), y history depth tolerance (relative), w 1 = the motion image is this frame's
 	vec4 jitter;        // (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray
 	                    // through uv + this (the rebuilt point stays on the surface; the lookup's Reproject takes the same jitter off)
+	vec4 rect;          // UNOFFICIAL 2026-11-04 RenderScale < 1: xy the images' full size (reproject's uv is pre-scaled into the previous
+	                    // trace's rect of them; the history is used only at the same scale, so that rect is size.xy). Native: = size.xy
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;
@@ -216,7 +218,7 @@ void main() {
 		vec4 clip = p.reproject[0] * was.x + p.reproject[1] * was.y + p.reproject[2] * was.z + p.reproject[3];
 		if (clip.w > 1.0) {
 			vec2 prevUv = clip.xy / clip.w * vec2(0.5, -0.5) + 0.5;
-			ivec2 prev = ivec2(floor(prevUv * p.size.xy));
+			ivec2 prev = ivec2(floor(prevUv * p.rect.xy));   // (2026-11-04) the full size: prevUv is already in the rect's part
 			if (all(greaterThanEqual(prev, ivec2(0))) && prev.x < int(p.size.x) && prev.y < int(p.size.y)) {
 				vec4 ha = imageLoad(historyIn, prev), hb = imageLoad(historyIdsIn, prev);
 				if (abs(ha.w - clip.w) <= p.many2.y * clip.w) {

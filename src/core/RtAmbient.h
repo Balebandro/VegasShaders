@@ -184,16 +184,17 @@ namespace RtAmbient {
 	// UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md "RT AO / GI plan", phase 1): it does now. The trace
 	// covers the frame's top-left rect, and in rect frames the RT estimate runs as the one Vulkan pass inside AmbientOcclusion's (and
 	// AmbientLight's) rect-aware D3D9 passes. State 4 is gone (its text stays for the numbering); the GI bounce is not traced in rect
-	// frames (phase 2: its consumers are Vulkan passes that are off there).
+	// frames (phase 2: its consumers are Vulkan passes that are off there). (2026-11-04, phase 2: it is, over the same rect; AmbientLight's
+	// D3D9 GI path applies it there; AmbientOcclusion.cpp RtRecord.)
 	inline bool PassesWanted() { return TheSettingManager->SettingsMain.Main.NvrDxvkPasses && DxvkCompute::Available(); }
 	inline bool Ready() {
 		static int reported = -1;
 		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : !CoreReady() ? 2 : 3;
 		if (state != reported && (state != 0 || reported > 0)) {
-			const char* text[] = { "off", "on but the NVR DXVK passes are off ([Main.Main.Performance] NvrDxvkPasses): NVR's AO runs",
-				"on but the RT core is not running (see its log line: no NvrRtHelper, no fork 0028, or a GPU without ray tracing): NVR's AO runs",
+			const char* text[] = { "off", "on but the Vegas Shaders DXVK passes are off ([Main.Main.Performance] NvrDxvkPasses): Vegas Shaders' AO runs",
+				"on but the RT core is not running (see its log line: no NvrRtHelper, no fork 0028, or a GPU without ray tracing): Vegas Shaders' AO runs",
 				"running (ray-traced occlusion in place of the screen estimate)",
-				"on but not at RenderScale below 1 (FSR / DLSS with LowResEffects: frames drawn small, not supported yet): NVR's AO runs" };
+				"on but not at RenderScale below 1 (FSR / DLSS with LowResEffects: frames drawn small, not supported yet): Vegas Shaders' AO runs" };
 			Logger::Log("UNOFFICIAL RT AO: %s.", text[state]);
 		}
 		reported = state;

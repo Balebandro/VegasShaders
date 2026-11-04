@@ -919,7 +919,7 @@ namespace PointShadowForward {
 					const float reach = light->sourceLight->Spec.r;
 					const float gap = sqrtf(dx * dx + dy * dy + dz * dz) - bound.Radius - reach;
 					const float cx = lamp.x - b.position.x, cy = lamp.y - b.position.y, cz = lamp.z - b.position.z;
-					used += sprintf_s(text + used, sizeof(text) - used, " %c%p[slot %d, gap %.0f, reach %.0f, LOD %.2f, fade %.2f, faces out of view %02X (game %02X), %.0f from camera, NVR view test %s]",
+					used += sprintf_s(text + used, sizeof(text) - used, " %c%p[slot %d, gap %.0f, reach %.0f, LOD %.2f, fade %.2f, faces out of view %02X (game %02X), %.0f from camera, Vegas Shaders view test %s]",
 						sign, (const void*)light, slot, gap, reach, light->fLODDimmer, light->fFade, (unsigned)light->bIsEnabled,
 						GameCullMask.count(light) ? (unsigned)GameCullMask[light] : 0xFFFFu, sqrtf(cx * cx + cy * cy + cz * cz), LampReachesView(light) ? "in" : "out");
 				}
@@ -964,7 +964,7 @@ namespace PointShadowForward {
 			for (int p = 0; p < h.passes && used + 160 < sizeof(text); p++) {
 				const AimPass& a = h.pass[p];
 				used += sprintf_s(text + used, sizeof(text) - used, " | %s (%s) + %s (%s) %s, pass %04X, %d lights%s:", a.vs ? a.vs : "?",
-					a.vsNvr ? "NVR" : "game", a.ps ? a.ps : "?", a.psNvr ? "NVR" : "game", a.shadowed ? "forward shadows" : "NO forward shadows",
+					a.vsNvr ? "Vegas Shaders" : "game", a.ps ? a.ps : "?", a.psNvr ? "Vegas Shaders" : "game", a.shadowed ? "forward shadows" : "NO forward shadows",
 					(unsigned)a.passEnum, (int)a.numLights, a.shadowed && !a.strength ? " (strength 0: lookups skipped)" : "");
 				for (int k = 0; k < a.count && used + 40 < sizeof(text); k++) {
 					if (!a.point[k]) { used += sprintf_s(text + used, sizeof(text) - used, " %d:dir", (int)a.index[k]); continue; }

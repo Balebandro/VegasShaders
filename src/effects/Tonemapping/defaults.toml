@@ -16,6 +16,9 @@ TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, shou
 TonemapWhitePoint = 1.0               # White point Setting for Lottes, Reinhard (both), Uncharted. Adjust point that the image clips/exceeds max brightness. For Uchimura, adjusts Linear Section Length (soft clips whites)
 HighlightSaturation = 1.0             # Highlight saturation for VT Lottes, controls how saturated bright elements are as they approach the White Point. For Perceptual (11): where colours fade to white near the peak (1.0 = the reference, higher = colours stay saturated longer)
 PointLightMultiplier = 1.0            # Experimental - modifies the strength of all point lights
+NightShiftEnabled = false          # UNOFFICIAL (2026-11-04) Night colour shift: in the dark the eye sees with its rods, which lose colour and see blue-green best, so dim parts of the picture turn paler and cooler while lamps and lit areas keep their colour (the Purkinje shift; Red Dead Redemption 2 and Ghost of Tsushima do it at night). Off by default.
+NightShift = 0.0                   # [0.0-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how much by day (0: none; the dark corners of a sunny day are rarely dim enough for it).
+NightShiftLevel = 0.15             # [0.01-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how dark a spot must be before it shifts (in the tone mapper's input, after Exposure: 0.18 is a mid grey). The shift grows below this and is full at a tenth of it.
 
 
 [_Shaders.Tonemapping.Interiors]
@@ -35,6 +38,8 @@ TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, shou
 TonemapWhitePoint = 1.0               # White point Setting for Lottes, Reinhard (both), Uncharted. Adjust point that the image clips/exceeds max brightness. For Uchimura, adjusts Linear Section Length (soft clips whites)
 HighlightSaturation = 1.0             # Highlight saturation for VT Lottes, controls how saturated bright elements are as they approach the White Point. For Perceptual (11): where colours fade to white near the peak (1.0 = the reference, higher = colours stay saturated longer)
 PointLightMultiplier = 1.0            # Experimental - modifies the strength of all point lights
+NightShift = 0.25                  # [0.0-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how much indoors (dark rooms; lamp-lit parts keep their colour).
+NightShiftLevel = 0.15             # [0.01-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how dark a spot must be before it shifts (in the tone mapper's input, after Exposure: 0.18 is a mid grey). The shift grows below this and is full at a tenth of it.
 
 
 [_Shaders.Tonemapping.Night]
@@ -53,6 +58,8 @@ TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, shou
 TonemapWhitePoint = 1.0               # White point Setting for Lottes, Reinhard (both), Uncharted. Adjust point that the image clips/exceeds max brightness. For Uchimura, adjusts Linear Section Length (soft clips whites)
 HighlightSaturation = 1.0             # Highlight saturation for VT Lottes, controls how saturated bright elements are as they approach the White Point. For Perceptual (11): where colours fade to white near the peak (1.0 = the reference, higher = colours stay saturated longer)
 PointLightMultiplier = 1.0            # Experimental - modifies the strength of all point lights
+NightShift = 0.6                   # [0.0-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how much at night (1: the darkest parts lose all colour and take a moonlit blue).
+NightShiftLevel = 0.15             # [0.01-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how dark a spot must be before it shifts (in the tone mapper's input, after Exposure: 0.18 is a mid grey). The shift grows below this and is full at a tenth of it.
 
 
 [_Shaders.Tonemapping.Status]

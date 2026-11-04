@@ -42,6 +42,7 @@
 #include "Sandstorm/Sandstorm.h"
 #include "VolumetricLight/VolumetricLight.h"
 #include "DustMotes/DustMotes.h"	// UNOFFICIAL 2026-11-03 dust motes in lit air
+#include "LocalExposure/LocalExposure.h"	// 2026-11-04 local exposure (read by the tone mapper)
 #include "SkyDither/SkyDither.h"
 #include "Bodycam/Bodycam.h"
 #include "Reflections/Reflections.h"

@@ -13,6 +13,7 @@ void TerrainShaders::RegisterConstants() {
 	sm->RegisterConstant("TESR_TerrainExtraData", &Constants.ExtraData);
 	sm->RegisterConstant("TESR_TerrainSkyData", &Constants.SkyData);
 	sm->RegisterConstant("TESR_TerrainVariationData", &Constants.VariationData);	// UNOFFICIAL 2026-10-19
+	sm->RegisterConstant("TESR_TerrainMacroData", &Constants.MacroData);	// 2026-11-04 macro variation
 	sm->RegisterConstant("TESR_TerrainVariationExtra", &Constants.VariationExtra);
 	sm->RegisterConstant("TESR_LODBlendData", &Constants.LODBlend);	// UNOFFICIAL 2026-10-19 LOD Blending
 	sm->RegisterConstant("TESR_TerrainParallaxData", &ParallaxConstants.Data);
@@ -189,6 +190,12 @@ void TerrainShaders::UpdateSettings() {
 	Constants.VariationData.z = (std::max)(TheSettingManager->GetSettingF("Shaders.Terrain.Variation", "StartDistance"), 0.0f);
 	Constants.VariationData.w = (std::max)(TheSettingManager->GetSettingF("Shaders.Terrain.Variation", "StartFade"), 1.0f);
 	Constants.VariationExtra.x = TheSettingManager->GetSettingI("Shaders.Terrain.Variation", "NormalMaps") ? 1.0f : 0.0f;
+
+	// 2026-11-04 macro variation (Includes/TerrainMacro.hlsl): Enabled is compile time (TERRAIN_MACRO); these are live. Strength 0 skips it.
+	Constants.MacroData.x = std::clamp(TheSettingManager->GetSettingF("Shaders.Terrain.Macro", "Strength"), 0.0f, 2.0f);	// 2: diagnostic (the pattern as grey)
+	Constants.MacroData.y = 1.0f / (std::max)(TheSettingManager->GetSettingF("Shaders.Terrain.Macro", "Size"), 256.0f);
+	Constants.MacroData.z = std::clamp(TheSettingManager->GetSettingF("Shaders.Terrain.Macro", "Brightness"), 0.0f, 1.5f);	// stops
+	Constants.MacroData.w = std::clamp(TheSettingManager->GetSettingF("Shaders.Terrain.Macro", "Tint"), 0.0f, 1.0f);	// stops
 
 	// UNOFFICIAL 2026-10-19 LOD Blending (after Community Shaders' LOD Blending, GPL-3.0): the far land's colour (its LOD texture) by a
 	// gamma and a brightness so it matches the near land where they meet (TerrainLODTemplate, TerrainFadeTemplate), and the near land

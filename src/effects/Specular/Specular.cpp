@@ -234,7 +234,7 @@ bool SpecularEffect::FillUniforms(SpecularUniforms& u) {
 	if (!found) {
 		static bool reported = false;
 		if (!reported) {
-			Logger::Log("UNOFFICIAL NVR DXVK: Specular's constants are not all there; its D3D9 passes are used.");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: Specular's constants are not all there; its D3D9 passes are used.");
 			reported = true;
 		}
 	}

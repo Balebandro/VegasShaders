@@ -158,7 +158,7 @@ IDirect3DBaseTexture9* TextureManager::GetFileTexture(std::string TexturePath, T
 			static bool hinted = false;
 			if (!hinted) {
 				hinted = true;
-				Logger::Log("[ERROR] : NVR's texture files are missing or incomplete (Data\\Textures\\Effects, Water, Precipitations). "
+				Logger::Log("[ERROR] : Vegas Shaders' texture files are missing or incomplete (Data\\Textures\\Effects, Water, Precipitations). "
 					"Effects that use them will look wrong. Install the complete Vegas Shaders package, including its Textures folder.");
 			}
 		}

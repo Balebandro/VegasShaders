@@ -10,7 +10,7 @@ AvgLuma measures how bright the picture is, and where the focus of the depth of 
 
 - In RenderEffectsPreTonemapping, in the HDR block, after AO, ambient light and fog, before exposure. It measures the picture as it is at that point.
 - Only when avglumaRequired is set (Exposure sets it every frame), so in practice whenever Exposure is loaded.
-- Compute path: when AvgLumaCompute or the Exposure Histogram is on and NVR DXVK is present, and the frame is not in RenderScale v2 rect mode (a rect frame always takes the D3D9 pass). Otherwise the D3D9 pass.
+- Compute path: when AvgLumaCompute or the Exposure Histogram is on and Vegas Shaders DXVK is present, and the frame is not in RenderScale v2 rect mode (a rect frame always takes the D3D9 pass). Otherwise the D3D9 pass.
 
 ## 3. Inputs
 
@@ -33,9 +33,9 @@ AvgLuma measures how bright the picture is, and where the focus of the depth of 
 ## 4. Settings
 
 Unchanged:
-- [Main.Main.Performance] AvgLumaCompute (bool, false; UNOFFICIAL, needs NVR DXVK).
+- [Main.Main.Performance] AvgLumaCompute (bool, false; UNOFFICIAL, needs Vegas Shaders DXVK).
 - [Main.Main.Performance] AvgLumaComputeCheck (int, 0; test tool).
-- [Shaders.Exposure.Main] Histogram (bool, false; needs NVR DXVK), HistogramLowPercent (10), HistogramHighPercent (5).
+- [Shaders.Exposure.Main] Histogram (bool, false; needs Vegas Shaders DXVK), HistogramLowPercent (10), HistogramHighPercent (5).
 
 ## 5. Passes and outputs
 

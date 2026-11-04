@@ -45,6 +45,7 @@ public:
 		D3DXVECTOR4	Position, Direction, Color;
 		D3DXVECTOR4	Tuning;		// x near fade, y soft edges, z hotspot limit, w cookie strength
 		D3DXVECTOR4	Composite;	// x source buffer is already linear; UNOFFICIAL (EdgeFix): y 1 = also the beam's shaft, zw 1 / beam buffer size
+		D3DXVECTOR4	RtShadow;	// UNOFFICIAL 2026-11-04 TESR_FlashLightRT: x 1 = the D3D9 shadow pass reads the traced shadow (TESR_RtFlashShadow, a rect frame)
 	};
 	FlashlightStruct	Constants;
 
@@ -55,6 +56,7 @@ public:
 	int		TechniqueThisFrame();	// UNOFFICIAL 2026-10-30: selectedPass, or its shadowed technique while a traced shadow is there (RT lamp shadows Flashlight)
 
 	void	UpdateConstants();	void	RegisterConstants();
+	void	RegisterTextures() override;	// UNOFFICIAL 2026-11-04: TESR_RtFlashShadow (RT lamp shadows Flashlight's result, for the D3D9 shadow pass)
 	void	UpdateSettings();	bool	ShouldRender();
 
 	void	GetFlashlightViewProj();	void	PublishLightConstants(bool abActive);

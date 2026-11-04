@@ -156,7 +156,7 @@ namespace OnePassDepth {
 		Mode = OnDxvk == 1 ? want : 0;
 		if (want && OnDxvk == 0 && !LoggedNative) {
 			LoggedNative = true;
-			Logger::Log("UNOFFICIAL LampsDepthFirst: does nothing on native D3D9 (measured slower there: the extra draws cost the driver's main-thread time); needs DXVK (stock or NVR DXVK)");
+			Logger::Log("UNOFFICIAL LampsDepthFirst: does nothing on native D3D9 (measured slower there: the extra draws cost the driver's main-thread time); needs DXVK (stock or Vegas Shaders DXVK)");
 		}
 		MinLamps = TheSettingManager->GetSettingI("Main.Main.Misc", "LampsDepthFirstMinLamps");
 #if NVR_TEST_TOOLS

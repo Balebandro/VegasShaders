@@ -16,11 +16,11 @@ Community Shaders "True PBR" one:
 | Channel | Meaning | Used as |
 |---|---|---|
 | R | roughness | replaces the guess from the normal map's alpha (`getRoughness`) |
-| G | metal | only with `MetalFromMap` (default off: NVR's generated maps carry a guessed metal) |
+| G | metal | only with `MetalFromMap` (default off: Vegas Shaders' generated maps carry a guessed metal) |
 | B | ambient occlusion, white = none | darkens the ambient light (`RmaosAmbient`, times `Occlusion` and the weather's `AOScale`) |
 | A | specular level | non-metal reflectance F0 = 0.04 x A (`SpecularFromMap`, 2026-11-02) |
 
-Specular level: white (1) is the usual 0.04, so maps without a painted level (and NVR's generated maps, which write A = 1)
+Specular level: white (1) is the usual 0.04, so maps without a painted level (and Vegas Shaders' generated maps, which write A = 1)
 look exactly as before; darker values reflect less. It is set through `PBR_DIELECTRIC_F0`, which `Object.hlsl` defines before it
 includes `PBR.hlsl`; every other includer of `PBR.hlsl` (skin, terrain, water) gets the plain 0.04. Not applied in the 6-lamp
 interior shader (SLS2035, `NVR_SLOT_TIGHT`), which is at the instruction count the driver refuses. `SpecularFromMap = false`
@@ -31,4 +31,4 @@ roughness, metal, occlusion, or which objects have a map. MaterialAware reflecti
 scene's alpha (`core/ReflMaterial.h`).
 
 How to check it: an object with a hand-made map whose alpha is dark should show weaker sun and lamp highlights on its non-metal
-parts than before; with NVR's generated maps nothing changes.
+parts than before; with Vegas Shaders' generated maps nothing changes.

@@ -19,7 +19,7 @@ When the player is hit, a red, wet, blood-like film appears over the screen. The
 
 ## 3. Inputs
 
-Textures (sampler declaration order is the slot order; NVR binds by declaration):
+Textures (sampler declaration order is the slot order; Vegas Shaders binds by declaration):
 
 | Slot | Name | Contents | Filtering / addressing |
 |---|---|---|---|
@@ -87,7 +87,7 @@ Visual meaning: Intensity scales how far the picture is pushed toward the blood 
 ## 7. Vulkan path
 
 - Vulkan source: src/hlsl/NewVegas/Compute/BloodLens.frag (GLSL 450, a Vulkan version of the D3D9 blood shader, written line for line). Compiled binary: src/hlsl/NewVegas/Compute/BloodLens.spv, loaded at runtime from the deployed Shaders\VegasShaders\Compute\ folder under the name BloodLens.
-- Selection: the Vulkan path is used only when the effect's extension path is on, that is, [Main.Main.Performance] NvrDxvkPasses is on and the NVR DXVK extension is present. It is not used in RenderRect frames, when the effect is listed in NvrDxvkKeepD3D9, or when an SM6 build covers the pass (none exists for BloodLens; checked by name). When the Vulkan path cannot run (missing file texture, or a failed pipeline), the D3D9 pass is used for the frame, and after a pipeline failure for the rest of the session.
+- Selection: the Vulkan path is used only when the effect's extension path is on, that is, [Main.Main.Performance] NvrDxvkPasses is on and the Vegas Shaders DXVK extension is present. It is not used in RenderRect frames, when the effect is listed in NvrDxvkKeepD3D9, or when an SM6 build covers the pass (none exists for BloodLens; checked by name). When the Vulkan path cannot run (missing file texture, or a failed pipeline), the D3D9 pass is used for the frame, and after a pipeline failure for the rest of the session.
 - Technique: only technique index 0 is supported by the Vulkan path; any other index is refused and falls back.
 - Descriptor layout (set 1):
   - binding 0: sampled 2D image, the rendered frame (slot 0, the frame manager's rendered texture). Matches TESR_RenderedBuffer.

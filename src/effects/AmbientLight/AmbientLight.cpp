@@ -877,7 +877,7 @@ bool AmbientLightEffect::ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Tar
 	if (info.Gi) push.gi = D3DXVECTOR4(giThickness, 0.0f, giStrength, giThinOcclusion ? 1.0f : 0.0f);	// UNOFFICIAL 2026-10-27 ComputeGI (NVR_GI)
 	RECT viewport = { 0, 0, (LONG)Viewport.Width, (LONG)Viewport.Height };
 	if (!ExtDrawTo(pass.Pipeline, Targets, TargetCount, resources, count, &push, info.Gi ? sizeof(ALExtPushGI) : sizeof(ALExtPush), &viewport, ExtUv::TexelCentre)) return false;	// frameUV() adds the offset
-	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as Vulkan passes.", Name);
+	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as Vulkan passes.", Name);
 	return true;
 }
 
@@ -920,9 +920,9 @@ bool AmbientLightEffect::GIActive() {
 	if (state != giReported) {
 		giReported = state;
 		static const char* const says[] = { nullptr, "off for this session (it failed: see above); the usual passes run",
-			"needs NVR DXVK (the fork's d3d9.dll): nothing changes", "needs [Main.Main.Performance] NvrDxvkPasses on (AmbientLight's passes as Vulkan passes): nothing changes",
+			"needs the Vegas Shaders DXVK fork (the fork's d3d9.dll): nothing changes", "needs [Main.Main.Performance] NvrDxvkPasses on (AmbientLight's passes as Vulkan passes): nothing changes",
 			"shader files missing (see above): nothing changes", "on (Estimate with a visibility bitmask: one bounce of screen light)",
-			"off at RenderScale below 1 (FSR / DLSS with LowResEffects: NVR DXVK's passes do not run in frames drawn small): nothing changes" };
+			"off at RenderScale below 1 (FSR / DLSS with LowResEffects: the Vegas Shaders DXVK fork's passes do not run in frames drawn small): nothing changes" };
 		if (says[state]) Logger::Log("UNOFFICIAL AmbientLight: ComputeGI %s.", says[state]);
 	}
 	return state == 5;

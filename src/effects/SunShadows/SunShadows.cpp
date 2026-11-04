@@ -293,6 +293,6 @@ bool SunShadowsEffect::ExtPingPong(IDirect3DDevice9* Device, UINT techniqueIndex
 		if (!ExtDrawTo(pipelines[pipelineOf[kind]], &destination, 1, resources, _countof(resources), &push, sizeof(push), nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
 		source = last ? shadowTexture : scratchTexture[p & 1];
 	}
-	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as Vulkan passes (%u passes).", Name, description.Passes);
+	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as Vulkan passes (%u passes).", Name, description.Passes);
 	return true;
 }

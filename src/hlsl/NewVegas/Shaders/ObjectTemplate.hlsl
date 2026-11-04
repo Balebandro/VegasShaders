@@ -344,7 +344,19 @@
     #define SHADOW_CHARACTER_MAP_IN 1
 #endif
 #include "includes/Shadow.hlsl"
+// 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).
+#ifndef DUST_ON
+    #define DUST_ON 0
+#endif
+#if defined(PS) && DUST_ON
+#include "includes/ObjectDust.hlsl"
+#endif
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
+// UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl): the alpha test hashed under TAA / FSR / DLSS. Not in the slot-tight shader.
+#if defined(PS) && defined(ALPHA_HASH_ON) && !defined(NVR_SLOT_TIGHT)
+    #define OBJ_ALPHA_HASH 1
+    #include "includes/AlphaHash.hlsl"
+#endif
 // UNOFFICIAL 2026-10-24 SmoothObjectNormals (Includes/Shadow.hlsl, OBJECT_SMOOTH_NORMALS): the vertex normal in camera-relative world space
 // for the shadow lookups and the sky ambient, in place of the per-triangle derivative normal. The LIGHTS < 4 family carries it in its own
 // interpolator (TEXCOORD8; vs_3_0 has 12 outputs and ps_3_0 10 inputs: with PROJ_SHADOW every one is taken, so those variants keep the flat
@@ -642,7 +654,12 @@ struct VS_INPUT {
 // Pieces both pixel-shader layouts use. Macros, so the constants they read (Toggles, AmbientColor) can be declared per layout below.
 #ifdef PS
     // the game's alpha test against Toggles.w, skipped when the ambient's alpha marks the pass opaque
+    #ifdef OBJ_ALPHA_HASH
+        // UNOFFICIAL 2026-11-03 SmoothCutouts: alphaIn becomes 1 / -1 on a hashed draw (it is written out after: the fixed-function test agrees)
+        #define OBJ_ALPHA_TEST(alphaIn) alphaIn = AmbientColor.a >= 1 ? (alphaIn) : AlphaHash((alphaIn), alphaTestRef, OBJ_HASH_VPOS); clip(AmbientColor.a >= 1 ? 0 : ((alphaIn) - alphaTestRef))
+    #else
     #define OBJ_ALPHA_TEST(alphaIn) clip(AmbientColor.a >= 1 ? 0 : ((alphaIn) - alphaTestRef))
+    #endif
     #ifdef OBJ_TOGGLES
         #define OBJ_WITH_VCOLOR(c, vc) (useVertexColor <= 0 ? (c) : ((c) * (vc)))	// Toggles.x switches the vertex colour
         #define OBJ_WITH_FOG(c, f) (useFog <= 0.0 ? (c) : lerp((c), (f).rgb, (f).a))	// Toggles.y switches the fog
@@ -1161,7 +1178,15 @@ struct PS_OUTPUT {
 #endif
 
 
+#if defined(OBJ_ALPHA_HASH) && !defined(NVR_LAMP_SUMS)
+PS_OUTPUT main(PS_INPUT IN ALPHA_HASH_VPOS_PARAM) {	// UNOFFICIAL 2026-11-03 SmoothCutouts: the pixel, for the noise
+    #define OBJ_HASH_VPOS ALPHA_HASH_VPOS_VALUE
+#else
 PS_OUTPUT main(PS_INPUT IN) {
+    #if defined(OBJ_ALPHA_HASH)
+        #define OBJ_HASH_VPOS NVR_IN_VPOS	// LampSums has it already
+    #endif
+#endif
     #if SHADOW_CONTRAST_ON
         float3 scLost = 0.0f;	// UNOFFICIAL ShadowContrast: the light the lamps' shadows take here (SC_SPLIT)
     #endif
@@ -1311,6 +1336,11 @@ PS_OUTPUT main(PS_INPUT IN) {
             float3 faceNormal = ShadowFacingNormal(ShadowPlainNormal(float2(IN.lightDistSq.w, IN.lightDir.w), IN.vertexColor.a), IN.shadowWorldPos.xyz);	// UNOFFICIAL 2026-10-24
         #else
             float3 faceNormal = GetShadowGeometricNormal(IN.shadowWorldPos.xyz);
+        #endif
+        #if DUST_ON && !defined(HAIR) && !defined(DIFFUSE) && !defined(ONLY_SPECULAR) && !defined(ONLY_LIGHT)
+            // 2026-11-04 dust on top surfaces (Includes/ObjectDust.hlsl): on the decoded colour, before any lighting (skinned meshes are
+            // left out per draw: NVR_DustDraw)
+            surface.rgb = DustCover(surface.rgb, faceNormal, IN.shadowWorldPos.xyz, SHADOW_VS_PRESENT(IN.shadowWorldPos.w));
         #endif
         // Decline to projShade if a vanilla vertex shader ran: the interpolator is undefined.
         float sunVis = 1.0f;
@@ -1852,6 +1882,12 @@ float4 PSLightPosition[8] : register(c19);	// per lamp: xyz object space, w radi
 
 #if defined(MANY_LAMPS) && MANY_LAMPS_ON == 3
 PS_OUTPUT main(PS_INPUT IN, float2 mlVPos : VPOS) {	// UNOFFICIAL 2026-10-30 ClusteredLamps: the pixel's froxel
+    #if defined(OBJ_ALPHA_HASH)
+        #define OBJ_HASH_VPOS mlVPos
+    #endif
+#elif defined(OBJ_ALPHA_HASH)
+PS_OUTPUT main(PS_INPUT IN ALPHA_HASH_VPOS_PARAM) {	// UNOFFICIAL 2026-11-03 SmoothCutouts: the pixel, for the noise
+    #define OBJ_HASH_VPOS ALPHA_HASH_VPOS_VALUE
 #else
 PS_OUTPUT main(PS_INPUT IN) {
 #endif
@@ -2005,6 +2041,11 @@ PS_OUTPUT main(PS_INPUT IN) {
         float3 skyNormal = ptNormal;
     #else
         float3 skyNormal = OBJ_WORLD_NORMAL(SHADOW_WP_LOAD(IN));
+    #endif
+    #if DUST_ON && !defined(HAIR) && !defined(DIFFUSE) && !defined(ONLY_SPECULAR) && !defined(ONLY_LIGHT)
+        // 2026-11-04 dust on top surfaces, as in the LIGHTS < 4 variant (user: the dust came and went as the player moved: objects
+        // switch between the two variants as lamps come into reach, and this one had none)
+        baseColor.rgb = DustCover(baseColor.rgb, skyNormal, SHADOW_WP_LOAD(IN), SHADOW_WP_VALID(IN));
     #endif
 
     // The sun's and the lamps' light (includes/ManyLightsDirect.hlsl), then the ambient.

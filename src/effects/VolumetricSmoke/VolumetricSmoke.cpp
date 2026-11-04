@@ -216,6 +216,6 @@ bool VolumetricSmokeEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 	RECT area = Scissor;
 	if (!ExtDrawTo(extCompositePass.Pipeline, &output, 1, resources, _countof(resources), &push, sizeof(push), &area)) return false;
 	chain.Commit();
-	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as a Vulkan pass.", Name);
+	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as a Vulkan pass.", Name);
 	return true;
 }

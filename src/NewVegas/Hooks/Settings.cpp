@@ -13,7 +13,7 @@ void NvrMsaaWarningTick() {
 	static bool shown = false;
 	if (!GameMSAAWarned || shown || !Player || !Player->parentCell || !InterfaceManager) return;
 	shown = true;
-	InterfaceManager->ShowMessage("NVR: turn the game's anti-aliasing off (launcher options). With it on, NVR's shadows and effects get speckled.");
+	InterfaceManager->ShowMessage("Vegas Shaders: turn the game's anti-aliasing off (launcher options). With it on, Vegas Shaders' shadows and effects get speckled.");
 }
 
 // The game's INI read/write calls, hooked (Hooks.cpp attaches them). A read lets the game fill the value first and then adjusts the
@@ -87,9 +87,9 @@ bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSett
 		}
 		else if (Setting->iValue > 0) {
 			if (!GameMSAAWarned)
-				Logger::Log("WARNING: the game's own anti-aliasing is on (iMultiSample %d). NVR's effects read one depth sample per pixel, which with "
+				Logger::Log("WARNING: the game's own anti-aliasing is on (iMultiSample %d). Vegas Shaders' effects read one depth sample per pixel, which with "
 					"MSAA disagrees with the colour: speckled cloud shadows on grass, broken shadows round the player, patches on characters. Turn "
-					"Antialiasing off in the game's launcher (Options); NVR's TAA / FSR / DLSS smooth the edges instead.", Setting->iValue);
+					"Antialiasing off in the game's launcher (Options); Vegas Shaders' TAA / FSR / DLSS smooth the edges instead.", Setting->iValue);
 			GameMSAAWarned = Setting->iValue;
 		}
 	}
@@ -104,7 +104,7 @@ bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSett
 	// The launcher writes 0 whenever it sees DXVK's adapter name (it rewrote the user's FalloutPrefs.ini that way the same day), so it is
 	// read as 1 here. (Read once, at start, for the grass shader set; unlike iMultiSample nothing else reads it.)
 	else if (SameKey(key, "b30GrassVS:Grass") && !Setting->iValue) {
-		Logger::Log("UNOFFICIAL b30GrassVS was 0 in the game's INI (the launcher writes 0 under DXVK): read as 1, so NVR's grass shaders are used");
+		Logger::Log("UNOFFICIAL b30GrassVS was 0 in the game's INI (the launcher writes 0 under DXVK): read as 1, so Vegas Shaders' grass shaders are used");
 		Setting->iValue = 1;
 	}
 	SessionLog::NoteIni(Setting);	// UNOFFICIAL 2026-11-01: a few values for the session header (SessionLog.h)

@@ -34,7 +34,7 @@
 static const char* const IntroMovie = "NVRGameStudios.bik";
 static const char* const MainMenuMovie = "\\Data\\Video\\NVRMainMenu.bik";
 static const char* const MainMenuMusic = "NVRMainMenu";
-static char* TitleMenu = (char*)"New Vegas Reloaded - Settings";
+static char* TitleMenu = (char*)"Vegas Shaders - Settings";
 
 // Key names of the per-weather settings, in the game's own index order (TESWeather colour types, times of day, HDR values).
 static const char* const WeatherColorTypes[TESWeather::kNumColorTypes] = {

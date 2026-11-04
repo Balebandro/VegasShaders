@@ -185,7 +185,19 @@
 #endif
 #include "includes/Object.hlsl"	// shared code
 #include "includes/Shadow.hlsl"	// shared code
+// 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).
+#ifndef DUST_ON
+    #define DUST_ON 0
+#endif
+#if defined(PS) && DUST_ON
+#include "includes/ObjectDust.hlsl"
+#endif
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
+// UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl): the alpha test hashed under TAA / FSR / DLSS.
+#if defined(PS) && defined(ALPHA_HASH_ON) && defined(PAR_FULL) && defined(PAR_TOGGLES)
+    #define PAR_ALPHA_HASH 1
+    #include "includes/AlphaHash.hlsl"
+#endif
 
 // Forward sun shadows -- see ObjectTemplate.hlsl. PAR shaders do full sun lighting but had
 // no shadow term at all, so every parallax-material object rendered fully sunlit once the
@@ -578,7 +590,15 @@ float4 EmittanceColor : register(c2);	// glow or hair colour
 
 #define uvtile(t) (((t) * 0.04) - 0.02)	// 0..1 tile weight to a -0.02..0.02 uv nudge
 
+#if defined(PAR_ALPHA_HASH) && !defined(NVR_LAMP_SUMS)
+PS_OUTPUT main(PS_INPUT pin ALPHA_HASH_VPOS_PARAM)	// UNOFFICIAL 2026-11-03 SmoothCutouts: the pixel, for the noise
+    #define PAR_HASH_VPOS ALPHA_HASH_VPOS_VALUE
+#else
 PS_OUTPUT main(PS_INPUT pin)
+    #if defined(PAR_ALPHA_HASH)
+        #define PAR_HASH_VPOS pin.vpos	// LampSums has it already
+    #endif
+#endif
 {
     PS_OUTPUT po;
 
@@ -595,6 +615,9 @@ PS_OUTPUT main(PS_INPUT pin)
         float texAlpha = tex2D(BaseMap, pin.texc.xy).a;
     
         #ifdef PAR_TOGGLES
+            #ifdef PAR_ALPHA_HASH
+                texAlpha = AmbientColor.a >= 1 ? texAlpha : AlphaHash(texAlpha, alphaTestRef, PAR_HASH_VPOS);	// UNOFFICIAL 2026-11-03 SmoothCutouts: 1 / -1 on a hashed draw
+            #endif
             clip(AmbientColor.a >= 1 ? 0 : (texAlpha - alphaTestRef));
         #endif
     #endif
@@ -655,6 +678,10 @@ PS_OUTPUT main(PS_INPUT pin)
     float3 sunShadowNormal = ShadowFacingNormal(PAR_SMOOTH_NORMAL, pin.shadowWorldPos.xyz);
 #else
     float3 sunShadowNormal = GetShadowGeometricNormal(pin.shadowWorldPos.xyz);
+#endif
+#if DUST_ON && !defined(ONLY_LIGHT) && !defined(ONLY_SPECULAR) && !defined(NO_LIGHT)
+    // 2026-11-04 dust on top surfaces (Includes/ObjectDust.hlsl): rocks and cliffs, on the decoded colour, before any lighting
+    albedoPx.rgb = DustCover(albedoPx.rgb, sunShadowNormal, pin.shadowWorldPos.xyz, PAR_WP_PRESENT(pin.shadowWorldPos.w));
 #endif
     float shadowWorldPosValid = PAR_WP_PRESENT(pin.shadowWorldPos.w) ? 1.0f : 0.0f;
 

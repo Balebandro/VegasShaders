@@ -500,6 +500,50 @@ float3 GT7ToneMap(float3 color, float highlightSaturation)
 }
 // -----------------------------------------------------------------------------------------------
 
+// 2026-11-04 Night colour shift ([Shaders.Tonemapping.*] NightShiftEnabled, NightShift, NightShiftLevel), off by default.
+// In dim light the eye sees with its rods: no colour, and most sensitive to blue-green (507 nm, against 555 nm for the cones),
+// so at night reds go dark, blues stay visible and everything turns grey-blue (the Purkinje shift). Here, in the linear HDR
+// picture after Exposure and before the curve: a pixel below NightShiftLevel moves toward its rod brightness in a moonlit tint,
+// fully at a tenth of the level; brighter ones (lamps, lit areas) keep their colour, as the cones still see them.
+// x: strength (0: skipped), y: level.
+float4 TESR_ToneMappingNight : register(c33);
+
+float3 nightShift(float3 c)
+{
+    [branch] if (TESR_ToneMappingNight.x <= 0.0f) return c;
+    const float lum = luma(c);
+    // rod (scotopic) brightness from linear Rec.709: weighted toward green and blue, a grey gives the same brightness
+    const float rod = dot(max(c, 0.0f), float3(0.04f, 0.56f, 0.40f));
+    // the moonlit tint, its own luminance 1 (so a grey keeps its brightness)
+    const float3 tint = float3(0.847f, 1.010f, 1.357f);
+    const float mesopic = 1.0f - smoothstep(TESR_ToneMappingNight.y * 0.1f, TESR_ToneMappingNight.y, lum);
+    return lerp(c, rod * tint, TESR_ToneMappingNight.x * mesopic);
+}
+
+// 2026-11-04 local exposure ([Shaders.LocalExposure], effects/LocalExposure, off by default): each neighbourhood's exposure pulled
+// toward the view's mean, from the blurred log brightness Effects\LocalExposure.fx.hlsl measured before the tone mapper (decoded
+// as here, before Exposure: times `exposure` it is in c's units). A dark neighbourhood gains up to Shadows of its distance from
+// the mean (in stops), a bright one loses up to Highlights of it. EdgeGuard: where the pixel itself is more than a stop brighter
+// or darker than its neighbourhood (the sky's edge, a lamp), the correction fades, so the blur leaves no halo. At most 3 stops.
+float4 TESR_LocalExposureData : register(c34);	// x shadows, y highlights, z edge guard, w 1 = measured this frame (0: skipped)
+float4 TESR_LocalExposureBlur : register(c35);	// y: DebugView (1: the neighbourhood brightness as grey)
+sampler2D TESR_LocalExposureBuffer : register(s9) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+sampler2D TESR_LocalExposureMean : register(s10) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+
+float3 localExposure(float3 c, float2 uv, float exposure)
+{
+    [branch] if (TESR_LocalExposureData.w <= 0.0f) return c;
+    const float scale = log2(max(exposure, 1e-4f));
+    const float local = tex2Dlod(TESR_LocalExposureBuffer, float4(uv, 0.0f, 0.0f)).r + scale;	// log2, in c's units
+    [branch] if (TESR_LocalExposureBlur.y > 0.5f) return exp2(local).xxx;
+    const float mean = tex2Dlod(TESR_LocalExposureMean, float4(0.5f, 0.5f, 0.0f, 0.0f)).r + scale;
+    const float stops = mean - local;	// > 0: a neighbourhood darker than the view's mean
+    float shift = stops * (stops > 0.0f ? TESR_LocalExposureData.x : TESR_LocalExposureData.y);
+    const float own = log2(max(luma(c), 1e-4f)) - local;
+    shift *= exp2(-TESR_LocalExposureData.z * max(abs(own) - 1.0f, 0.0f));
+    return c * exp2(clamp(shift, -3.0f, 3.0f));
+}
+
 float3 tonemap(float3 hdr)
 {
     float mode = TESR_HDRData.x;

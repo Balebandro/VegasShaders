@@ -1,0 +1,3 @@
+# The shader files the LocalExposure effect loads (they stay where the game loads them from: src/hlsl/NewVegas mirrors
+# Data\Shaders\VegasShaders). Keep it up to date by hand. The tone mapper's half: Shaders\Includes\Tonemapping.hlsl.
+src/hlsl/NewVegas/Effects/LocalExposure.fx.hlsl

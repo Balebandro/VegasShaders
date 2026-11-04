@@ -21,7 +21,7 @@ Sharpening adds local edge contrast to the whole picture so that near surfaces l
 
 ## 3. Inputs
 
-### Textures (in slot order; NVR binds samplers by declaration order)
+### Textures (in slot order; Vegas Shaders binds samplers by declaration order)
 
 | Slot | Name | Holds | Filtering / addressing |
 |---|---|---|---|
@@ -83,7 +83,7 @@ All keys are read in `Sharpening.cpp`. There are no range comments in the toml f
 
 **Jitter (TAA).** No special handling. This effect runs after TAA's output, on the displayed picture, so the jitter does not reach it.
 
-**Reversed depth.** The depth texture is the NVR combined depth (linear, stored as depth over far distance), not the game's raw depth buffer, so reversed depth does not matter here. The only depth rule needed is "far = sky".
+**Reversed depth.** The depth texture is the Vegas Shaders combined depth (linear, stored as depth over far distance), not the game's raw depth buffer, so reversed depth does not matter here. The only depth rule needed is "far = sky".
 
 **HDR vs LDR.** LDR only. The chain picture is 8-bit. No HDR handling.
 
@@ -94,7 +94,7 @@ All keys are read in `Sharpening.cpp`. There are no range comments in the toml f
 ## 7. Vulkan path
 
 - **Files:** `src/hlsl/NewVegas/Compute/Sharpening.frag` (source; SPIR-V is `Sharpening.spv` in the same folder).
-- **Selection:** the C++ `SharpeningEffect::ExtRender` is the Vulkan entry. It is used only when NVR DXVK is loaded and `[Main.Main.Performance] NvrDxvkPasses` is on, and the frame is not a render-rectangle frame (`DxvkCompute::PassesOn`). Otherwise the D3D9 technique runs. If the pass fails to build or draw, it falls back to D3D9 for the rest of the session.
+- **Selection:** the C++ `SharpeningEffect::ExtRender` is the Vulkan entry. It is used only when Vegas Shaders DXVK is loaded and `[Main.Main.Performance] NvrDxvkPasses` is on, and the frame is not a render-rectangle frame (`DxvkCompute::PassesOn`). Otherwise the D3D9 technique runs. If the pass fails to build or draw, it falls back to D3D9 for the rest of the session.
 - **Technique:** only technique index 0 is handled; any other index returns "not drawn".
 - **Bindings (descriptor set 1):** binding 0 = the rendered picture (`t_rendered`), binding 1 = the combined depth (`t_depth`). Both are sampled 2D textures.
 - **Sampler:** one sampler, taken from the push block at offset 48 (linear, clamp).

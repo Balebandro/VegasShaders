@@ -6,7 +6,8 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/RtAmbient.h"
-#include "../../core/ManyLamps.h"	// UNOFFICIAL 2026-11-03 (rtspec) GIGameLamps: the game's lamp table
+#include "../../core/ManyLamps.h"
+#include "../PBR/PBR.h"	// UNOFFICIAL 2026-11-04 (rtgap) the game's light scale	// UNOFFICIAL 2026-11-03 (rtspec) GIGameLamps: the game's lamp table
 #include "../../core/RtCore.h"
 #include "../../core/RtDenoise.h"	// (2026-10-29) the shared RT denoiser	// (the RT core: AddUser / CopyIn / AddPass / CopyOut)	// UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT]
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT temporal pass is skipped)
@@ -246,7 +247,7 @@ namespace {
 	void MakePipelineRT(EffectRecord::ExtPass& pass, const char* spvName, UINT textureCount, UINT targets) {
 		if (pass.Tried) return;
 		pass.Tried = true;
-		if (!DxvkCompute::HasSpirv(spvName)) { Logger::Log("UNOFFICIAL RT AO: Compute\\%s.spv is missing; NVR's own pass runs.", spvName); return; }
+		if (!DxvkCompute::HasSpirv(spvName)) { Logger::Log("UNOFFICIAL RT AO: Compute\\%s.spv is missing; Vegas Shaders' own pass runs.", spvName); return; }
 		NVR_EXT_BINDING_DESC bindings[10] = {};
 		UINT count = 0;
 		for (UINT i = 0; i < textureCount; i++, count++) {
@@ -255,7 +256,7 @@ namespace {
 		bindings[count].Set = 2; bindings[count].Binding = 0; bindings[count].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[count].Slot = 0; count++;
 		for (UINT s = 0; s < 3; s++, count++) { bindings[count].Type = NVR_EXT_BIND_SAMPLER; bindings[count].Slot = s; bindings[count].PushOffset = 12 + 4 * s; }
 		pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(spvName, bindings, count, sizeof(AOPush), true, targets, NVR_EXT_BLEND_NONE, false);
-		if (!pass.Pipeline) Logger::Log("UNOFFICIAL RT AO: Compute\\%s.spv could not be made into a pass; NVR's own pass runs.", spvName);
+		if (!pass.Pipeline) Logger::Log("UNOFFICIAL RT AO: Compute\\%s.spv could not be made into a pass; Vegas Shaders' own pass runs.", spvName);
 	}
 
 	// Sub-pass timings (nested inside "Ambient occlusion") to direct further AO work; either path.
@@ -530,7 +531,9 @@ namespace {
 			for (const ManyLamps::ActiveLamp& a : ManyLamps::ActiveLamps) {
 				if (a.reach <= 0.0f) continue;
 				const D3DXVECTOR3 rel(a.pos[0] - eye.x, a.pos[1] - eye.y, a.pos[2] - eye.z);
-				table.push_back({ D3DXVECTOR4(rel.x, rel.y, rel.z, -a.reach), D3DXVECTOR4(a.colour[0], a.colour[1], a.colour[2], 0.0f),
+				PBRShaders* pbr = TheShaderManager->Shaders.PBR;	// (2026-11-04 rtgap) x the game's light scale, as its lamps
+				const float ls = pbr ? pbr->Constants.LinearScales.x : 1.0f;
+				table.push_back({ D3DXVECTOR4(rel.x, rel.y, rel.z, -a.reach), D3DXVECTOR4(a.colour[0] * ls, a.colour[1] * ls, a.colour[2] * ls, 0.0f),
 					(std::max)(D3DXVec3Length(&rel) - a.reach, 0.0f) });
 			}
 			std::sort(table.begin(), table.end(), [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
@@ -679,7 +682,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 			!ExtDrawTo(extInputRT.Pipeline, &rtInputSurface, 1, resources, count, &push, sizeof(push))) {
 			ExtFailed = wasFailed;
 			failed = true;
-			Logger::Log("UNOFFICIAL RT AO: the RT input pass failed to draw; NVR's own AO runs from now on.");
+			Logger::Log("UNOFFICIAL RT AO: the RT input pass failed to draw; Vegas Shaders' own AO runs from now on.");
 			return;
 		}
 	}
@@ -712,8 +715,24 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	AmbientLightEffect* al = TheShaderManager->Effects.AmbientLight;
 	// (2026-11-03) not in rect frames (RenderScale < 1): the bounce's consumers (AmbientLight's GI accumulate and apply) are Vulkan passes,
 	// off there, and its reservoirs and screen light are not rect-aware yet (phase 2 of the plan); the reuse history starts again after.
-	const bool gi = rt.GI && al && al->ShouldRender() && !RenderRect::On;
-	if (RenderRect::On) RtGIHistory = false;
+	// UNOFFICIAL 2026-11-04 RT GI at RenderScale < 1 (docs/next/RT-RENDERSCALE.md "RT AO / GI plan", phase 2): it is traced in rect frames
+	// now, over the same rect grid as the AO (projection.zw = traceW x traceH, so the trace's uv = texel / grid is the screen's and every
+	// image it writes or reads by texel, the input, the frame light, the reservoirs, the bounce out, is in the rect layout). Its consumer
+	// there is AmbientLight's D3D9 GI path (RT-PATH-TRACING.md section 16: Estimate / Accumulate / Apply, rect-aware like the rest of that
+	// .fx), with NvrDxvkAmbientLight on or off: in a rect frame its Vulkan passes are off (ExtOn) and only the RT estimate runs as one, which
+	// puts the bounce into rgb the same way. The reuse's reservoirs hold one frame's rect layout: a history made at another RenderRect scale
+	// (or rect vs native) holds other texels and starts again (as the AO's RtHistoryScale).
+	const bool gi = rt.GI && al && al->ShouldRender();
+	{
+		static float giHistoryScale[2] = { 1.0f, 1.0f };
+		if (giHistoryScale[0] != RtRectScaleX() || giHistoryScale[1] != RtRectScaleY() || RenderRect::ScaleChanged()) {
+			if (RtGIHistory) Logger::Log("UNOFFICIAL RT AO: GI reuse history reset (RenderScale rect %.2f x %.2f -> %.2f x %.2f).", giHistoryScale[0], giHistoryScale[1],
+				RtRectScaleX(), RtRectScaleY());
+			RtGIHistory = false;
+		}
+		giHistoryScale[0] = RtRectScaleX();
+		giHistoryScale[1] = RtRectScaleY();
+	}
 	if (gi) {
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		const bool sunUp = TheShaderManager->GameState.isExterior && shadows && shadows->Constants.ShadowFade.x < 1.0f;
@@ -722,7 +741,11 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		const D3DXVECTOR4& ambient = TheShaderManager->ShaderConst.sunAmbient;
 		auto lin = [](float v) { return powf((std::max)(v, 0.0f), 2.2f); };
 		c.sunDir = D3DXVECTOR4(sunDir.x, sunDir.y, sunDir.z, sunUp ? 1.0f : 0.0f);
-		c.sunColor = D3DXVECTOR4(lin(sunColor.x), lin(sunColor.y), lin(sunColor.z), 0.0f);
+		// UNOFFICIAL 2026-11-04 (rtgap) GIGameLamps: x the game's light scale, as its lit shaders light the sun (LIN_SCALE_LIGHT: 0.49 by day
+		// outdoors, 1 indoors / at night); the bounce hits were lit twice as strongly as the game lights the same surfaces by day
+		PBRShaders* pbr = TheShaderManager->Shaders.PBR;
+		const float lightScale = rt.GIGameLamps && pbr ? pbr->Constants.LinearScales.x : 1.0f;
+		c.sunColor = D3DXVECTOR4(lin(sunColor.x) * lightScale, lin(sunColor.y) * lightScale, lin(sunColor.z) * lightScale, 0.0f);
 		c.ambient = D3DXVECTOR4(lin(ambient.x), lin(ambient.y), lin(ambient.z), rt.GlowGI);	// (w: GlowGI, 2026-10-30)
 		// (2026-10-30) sunColor.w 1: the core's glow atlas is bound ([Main.Main.RayTracing] GlowTextures): GlowGI takes the glow map's colour
 		// at the hit (RtHit.glsl rtHitGlow) instead of the whole mesh's
@@ -738,7 +761,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 			// (2026-10-31, rt-ao-sky) [Main.Main.RayTracing] DenoiseBackbone: B1's object motion as a texel shift into its alpha (unused
 			// before), for ReSTIR GI's reuse to follow walking people (RtAOTrace.comp GIMotion); gi2.y's sign tells the trace
 			if (rt.GIReuse > 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "DenoiseBackbone") != 0 &&
-				RtDenoise::GIMotion(Device, rtLightSurface, width, height)) c.gi2.y = -c.gi2.y;
+				RtDenoise::GIMotion(Device, rtLightSurface, traceW, traceH, RtRectScaleX(), RtRectScaleY())) c.gi2.y = -c.gi2.y;	// (2026-11-04: the rect grid)
 		}
 	}
 	const int alphaAtlas = RtCore::AlphaAtlasImage() >= 0 ? RtCore::AlphaAtlasImage() : RtImageAlphaStandIn;
@@ -751,6 +774,12 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	// shadowed itself). The constants are full (512 bytes), so it rides in viewToWorld as a shear of the view point: view.xy += viewZ x
 	// (2 jx / P00, -2 jy / P11) (the trace's view = ((2 uv - 1) / P00, (1 - 2 uv) / P11, 1) x viewZ), i.e. row 2 += a x row 0 + b x row 1.
 	// Only the AO / sky ray start uses the matrix then (no GI in rect frames); RenderScale 1 is left exactly as before.
+	// (2026-11-04, phase 2: GI in rect frames) the GI ray start (the same p) takes the shear too; but the reuse inverts last frame's matrix
+	// as its transpose (RT_GI_PASS: transpose(mat3(prevViewToWorld))), exact only for the plain rotation, so last frame's view is kept
+	// without the shear (viewToWorldPlain). The merged pass rebuilds row 2 from rows 0 x 1 (untouched by the shear): the same. The jitter
+	// left out of the reprojection is at most half a rendered pixel (a quarter of a trace texel); the reuse's depth / normal tests and its
+	// neighbour tries absorb it.
+	const D3DXMATRIX viewToWorldPlain = c.viewToWorld;
 	if (RenderRect::On && TheShaderManager->Effects.TAA) {
 		const D3DXVECTOR2 j = TheShaderManager->Effects.TAA->DepthJitterUV();
 		const float a = 2.0f * j.x / proj._11, b = -2.0f * j.y / proj._22;
@@ -821,7 +850,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		if (++frames >= 600) { Logger::Log("UNOFFICIAL RT AO: GI reuse history cut %d times in the last 600 frames (the lamps or the sun changed by > 10 %%).", cuts); cuts = frames = 0; }
 		const D3DXVECTOR4 reuseNow = RtGIHistory ? D3DXVECTOR4(camera.x - prevCamera.x, camera.y - prevCamera.y, camera.z - prevCamera.z, (std::max)(giCap, 1.0f) + 64.0f * rt.GISpatial)
 												 : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
-		const D3DXMATRIX& last = RtGIHistory ? prevViewToWorld : c.viewToWorld;
+		const D3DXMATRIX& last = RtGIHistory ? prevViewToWorld : viewToWorldPlain;	// (2026-11-04: without the rect frames' jitter shear)
 		if (giPass) {
 			g.viewToWorld = c.viewToWorld;
 			g.prevViewToWorld = last;
@@ -855,7 +884,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 			static bool logged = false;
 			if (!logged) { logged = true; Logger::Log("UNOFFICIAL RT AO: GI reuse at full rate runs inside the AO pass (one pass, 10 images; view determinant sign %+.0f).", sign); }
 		}
-		prevViewToWorld = c.viewToWorld;
+		prevViewToWorld = viewToWorldPlain;	// (2026-11-04: = c.viewToWorld at RenderScale 1)
 		prevCamera = camera;
 	}
 	const bool mergedNow = merged && c.gi3.z > 0.5f;
@@ -916,7 +945,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		(cacheNow && !RtCore::AddPass(RtCacheShader, cacheImages, lampImage ? 13 : glowAtlas ? 12 : 6, 0x1, &cc, sizeof(cc), cacheGroups, 1)) ||
 		!RtCore::AddPass(RtShader, images, aoImages, mergedNow ? (cacheNow ? 0x702 : 0x706) : 0x6, &c, sizeof(c), ((rt.Interleave >= 2 ? (traceW + 1) / 2 : traceW) + 7) / 8,
 			((rt.Interleave >= 4 ? (traceH + 1) / 2 : traceH) + 7) / 8) ||	// (Interleave: only the traced texels' threads; 2026-11-03: over the rect)
-		(giPass && !RtCore::AddPass(RtGIShader, giImages, lampImage ? 13 : cacheNow ? 12 : glowAtlas ? 11 : 10, 0x1C0, &g, sizeof(g), (width + 7) / 8, (height + 7) / 8)) ||
+		(giPass && !RtCore::AddPass(RtGIShader, giImages, lampImage ? 13 : cacheNow ? 12 : glowAtlas ? 11 : 10, 0x1C0, &g, sizeof(g), (traceW + 7) / 8, (traceH + 7) / 8)) ||	// (2026-11-04: the rect)
 		!RtCore::CopyOut(RtImageOut, rtRawSurface) ||
 		(gi && !RtCore::CopyOut(giPass || mergedNow ? RtImageGIOut : RtImageGI, rtGISurface))) { RtGIHistory = false; RtCacheValid = false; return; }
 	RtCacheValid = cacheNow;	// (a frame without the cache pass: the next one starts the cells over)
@@ -937,8 +966,8 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	static int rectLogs = 0;	// (2026-11-03)
 	if (RenderRect::On && rectLogs < 2) {
 		rectLogs++;
-		Logger::Log("UNOFFICIAL RT AO: traced in the RenderScale rect: %ux%u of %ux%u (scale %.2f x %.2f; no GI rays in rect frames).", traceW, traceH, width, height,
-			RenderRect::ScaleX, RenderRect::ScaleY);
+		Logger::Log("UNOFFICIAL RT AO: traced in the RenderScale rect: %ux%u of %ux%u (scale %.2f x %.2f; GI %s).", traceW, traceH, width, height,
+			RenderRect::ScaleX, RenderRect::ScaleY, !gi ? "off" : giPass ? "its own pass over the rect" : mergedNow ? "in the AO pass with reuse" : "in the AO pass");	// (2026-11-04)
 	}
 	if (traced++ == 0)
 		Logger::Log("UNOFFICIAL RT AO: traced (%ux%u, %d AO rays of %.0f units, sky %s, GI %s).", width, height, rt.RayCount, rt.Distance,
@@ -1339,10 +1368,10 @@ void AmbientOcclusionEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9*
 // UNOFFICIAL 2026-11-01 (core/Diagnostics.cpp, the REPORT block: a tester saw "nothing happen" when switching RT AO on): what the RT AO did
 std::string AmbientOcclusionEffect::RtStatusText() {
 	const RtAmbient::Settings& s = RtAmbient::Current;
-	if (!s.Enabled) return "RT AO off ([Shaders.AmbientOcclusion.RT] Enabled false): NVR's screen-space AO";
+	if (!s.Enabled) return "RT AO off ([Shaders.AmbientOcclusion.RT] Enabled false): Vegas Shaders' screen-space AO";
 	const unsigned frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
-	const char* state = !RtAmbient::PassesWanted() ? "on but the NVR DXVK passes are off: NVR's AO runs" :
-		!RtAmbient::CoreReady() ? "on but the RT core is not running (no helper, or still starting): NVR's AO runs" : "running";
+	const char* state = !RtAmbient::PassesWanted() ? "on but the Vegas Shaders DXVK passes are off: Vegas Shaders' AO runs" :
+		!RtAmbient::CoreReady() ? "on but the RT core is not running (no helper, or still starting): Vegas Shaders' AO runs" : "running";
 	char t[400];
 	sprintf_s(t, "RT AO %s | traced this frame %s (last traced frame f%u%s) | %d AO rays of %.0f units, sky %s, GI %s (%d reuse), Denoise %s, Interleave %d, DebugView %d (1 RT visibility, 2 RT sky, 3 hit distance)",
 		state, RtTracedFrame == frame ? "yes" : "no", RtTracedFrame == 0xFFFFFFFF ? 0u : RtTracedFrame, RtTracedFrame == 0xFFFFFFFF ? ", never" : "",

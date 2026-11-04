@@ -18,6 +18,13 @@
 #include "includes/Terrain.hlsl"	// shared code
 #include "includes/Shadow.hlsl"	// shared code
 #include "includes/TerrainErosion.hlsl"
+// UNOFFICIAL 2026-11-04 macro variation ([Shaders.Terrain.Macro], Includes/TerrainMacro.hlsl): compiled in only when on at startup.
+#ifndef TERRAIN_MACRO
+    #define TERRAIN_MACRO 0
+#endif
+#if TERRAIN_MACRO && defined(PS)
+#include "includes/TerrainMacro.hlsl"
+#endif
 
 
 struct VS_INPUT {	// the vertex stream
@@ -159,7 +166,12 @@ PS_OUTPUT main(PS_INPUT pin) {
     float3 geoNormal = GetShadowGeometricNormal(pin.shadowPos);
     float sunShadow = FORWARD_SHADOWS ? GetSunShadow(pin.shadowPos, geoNormal) : 1.0f;
 
-    float3 lit = getSunLighting(pin.sunDir.xyz, LinColor(PSLightColor.rgb), viewDir, nrm.xyz, LinColor(AmbientColor.rgb), LinColor(albedo), nrm.a, LandLODSpec.x, 1.0, sunShadow, geoNormal);
+#if TERRAIN_MACRO
+    const float3 groundColor = MacroVary(LinColor(albedo), pin.shadowPos);	// 2026-11-04 macro variation, as the near land
+#else
+    const float3 groundColor = LinColor(albedo);
+#endif
+    float3 lit = getSunLighting(pin.sunDir.xyz, LinColor(PSLightColor.rgb), viewDir, nrm.xyz, LinColor(AmbientColor.rgb), groundColor, nrm.a, LandLODSpec.x, 1.0, sunShadow, geoNormal);
 
     float3 col = LinEncode(lit);	// UNOFFICIAL linear lighting: back to the stored (gamma) space, before the fog
     col = lerp(col, col * (0.8 * noiseSample + 0.55), saturate(TESR_TerrainExtraData.z)); // Apply noise.

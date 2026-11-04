@@ -317,7 +317,7 @@ namespace GrassShadows {
 		if (Frames <= 3 || Frames == 60 || Frames == 600 || Frames % 3600 == 0) {
 			char pixels[32] = "not known yet";
 			if (PixelsKnown) sprintf_s(pixels, "%lu", (unsigned long)LastPixels);
-			Logger::Log("UNOFFICIAL grass shadows: frame %u: %u early grass passes drawn into the %s sun shadow map (%u draws; %u skipped: not NVR's grass VS; %u put back on the map: a pass had changed the target or viewport), %u outside it%s; map pixels written (last read, near map) %s; first piece at %.3f %.3f %.3f in the map (x, y -1..1, z 0..1 to be on it)%s",
+			Logger::Log("UNOFFICIAL grass shadows: frame %u: %u early grass passes drawn into the %s sun shadow map (%u draws; %u skipped: not Vegas Shaders' grass vertex shader; %u put back on the map: a pass had changed the target or viewport), %u outside it%s; map pixels written (last read, near map) %s; first piece at %.3f %.3f %.3f in the map (x, y -1..1, z 0..1 to be on it)%s",
 				Frames, StatPasses, CascadeNames[Cascade], StatDraws, StatSkipped, StatRetarget, StatOutside, Cascade ? " or past CastShadowsReach" : "", pixels, ProbeLight.x, ProbeLight.y, ProbeLight.z, Black ? "; CastShadowsBlack on" : "");
 		}
 		Cascade = ShadowsExteriorEffect::MapNear;

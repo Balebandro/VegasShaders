@@ -78,6 +78,23 @@ static float4 RmaosValue = float4(1.0f, 0.0f, 1.0f, 1.0f);
 // z = MetalnessScale - 1, w = RoughnessScale - 1, so a register never written (0) and the neutral 1.0 defaults leave the map's
 // values exactly as read (x + x * 0 = x); the map's own values are in 0-1, so the saturate changes nothing there either.
 // RoughnessScale is 1-2 (rougher only, never above 1), MetalnessScale 0-1. AOScale needs no shader change (c220.y, RmaosDraw).
+// 2026-11-04 micro-shadowing ([Shaders.PBR.MicroShadow], off by default; compiled in only when on at startup: MICRO_SHADOW_ON).
+// A normal map's bumps never shadow themselves, so cracks and crevices look painted on. Naughty Dog's micro-shadowing (Uncharted 4,
+// The Last of Us Part II) darkens the direct light where the material's own ambient occlusion says the surface sits in a crevice,
+// more as the light comes in at a grazing angle: saturate(|N.L| + 2 AO^2 - 1) per light. The occlusion is the _rmaos map's blue
+// channel; without a map (or with the feature off) the factor is exactly 1. Strength blends it in (c194.x).
+#if defined(RMAOS) && defined(MICRO_SHADOW_ON) && MICRO_SHADOW_ON
+#define MICRO_SHADOW_ACTIVE
+float4 TESR_MicroShadow : register(c194);	// x strength (0: none, 1: the map as it is, up to 3: its crevices that much deeper)
+static float MicroShadowAO = 1.0f;	// the map's occlusion at this pixel, toward 1 by (1 - strength); set in RmaosRead
+float MicroShadowTerm(float3 N, float3 L) {
+    return MicroShadowAO >= 1.0f ? 1.0f : saturate(abs(dot(N, normalize(L))) + 2.0f * MicroShadowAO * MicroShadowAO - 1.0f);
+}
+// MICRO_SHADOW(N, L) is a factor with its own "*": "x * MICRO_SHADOW(N, L) y". Off it expands to nothing at all, so the compiled
+// shaders stay byte-identical (a literal 1.0f factor reordered the compiler's constant pool in four parallax shaders).
+#define MICRO_SHADOW(N, L) MicroShadowTerm((N), (L)) *
+#endif
+
 void RmaosRead(float2 uv) {
     float2 dx = ddx(uv), dy = ddy(uv);
     [branch] if (RMAOS_ACTIVE) {
@@ -85,6 +102,11 @@ void RmaosRead(float2 uv) {
         RmaosValue.rg = saturate(RmaosValue.rg + RmaosValue.rg * TESR_PBRMath.wz);
         #ifdef RMAOS_SPEC
             RmaosSpecular = RMAOS_FADING ? lerp(1.0f, RmaosValue.a, NVR_Rmaos.x) : RmaosValue.a;	// (FadeIn: from the plain 0.04)
+        #endif
+        #ifdef MICRO_SHADOW_ACTIVE
+            // 2026-11-04 (user: "no visible change between 0-1 or 1-2"): the formula only bites below an occlusion of about 0.7, and
+            // generated maps are mostly lighter; Strength above 1 deepens the map's occlusion (2: twice as far from white) before it.
+            MicroShadowAO = saturate(1.0f - (1.0f - RmaosValue.b) * TESR_MicroShadow.x * (RMAOS_FADING ? NVR_Rmaos.x : 1.0f));
         #endif
     }
 }
@@ -112,6 +134,9 @@ float3 RmaosDebug(float3 color, float3 albedo) {
 #else
 float RmaosAmbient() { return 1.0f; }
 float3 RmaosDebug(float3 color, float3 albedo) { return color; }
+#endif
+#ifndef MICRO_SHADOW
+#define MICRO_SHADOW(N, L)	// micro-shadowing off (or no _rmaos maps): nothing, the lights exactly as before
 #endif
 
 // UNOFFICIAL 2026-10-20 MaterialAware reflections ([Shaders.Reflections.Main] MaterialAware, core/ReflMaterial.h): the first
@@ -215,7 +240,7 @@ float3 getPointLightLighting(float3 toLight, float radius, float3 radiance, floa
     float3 graded = lerp(luma(baseColor), baseColor, TESR_PBRExtraData.x);
     // UNOFFICIAL 2026-10-20: the falloff decoded like the colours (LinearLight.hlsl); 2026-10-21 or LampFalloff's shape (LampFalloff.hlsl)
     float falloff = LampAtt(vanillaAtt(toLight, radius));
-    return falloff * objLampTerm(0, r, graded, N, toEye, toLight, scaled);
+    return falloff * MICRO_SHADOW(N, toLight) objLampTerm(0, r, graded, N, toEye, toLight, scaled);
 }
 
 // The same with the falloff given. UNOFFICIAL: metal, the share of the pixel that is metal (getDerivedMetallic below; 0 elsewhere).
@@ -223,7 +248,7 @@ float3 getPointLightLightingAtt(float3 toLight, float falloff, float3 radiance, 
     float3 scaled = radiance * LIN_SCALE_LIGHT;
     float3 graded = lerp(luma(baseColor), baseColor, TESR_PBRExtraData.x);
     float shaped = LampAtt(falloff);	// UNOFFICIAL 2026-10-20 / 2026-10-21, as above
-    return shaped * objLampTerm(metal, r, graded, N, toEye, toLight, scaled);
+    return shaped * MICRO_SHADOW(N, toLight) objLampTerm(metal, r, graded, N, toEye, toLight, scaled);
 }
 
 float3 getPointLightLightingAtt(float3 toLight, float falloff, float3 radiance, float3 toEye, float3 N, float3 baseColor, float r) {
@@ -235,11 +260,11 @@ float3 getSunLighting(float3 toSun, float3 radiance, float3 toEye, float3 N, flo
     float3 scaled = radiance * LIN_SCALE_LIGHT;
     float3 graded = lerp(luma(baseColor), baseColor, TESR_PBRExtraData.x);
     #if defined(ONLY_SPECULAR)
-        return PBRSunSpecular(metal, r, graded, N, toEye, toSun, scaled);
+        return MICRO_SHADOW(N, toSun) PBRSunSpecular(metal, r, graded, N, toEye, toSun, scaled);
     #elif defined(SPECULAR)
-        return PBRSun(metal, r, graded, N, toEye, toSun, scaled);
+        return MICRO_SHADOW(N, toSun) PBRSun(metal, r, graded, N, toEye, toSun, scaled);
     #else
-        return PBRDiffuse(metal, r, graded, N, toEye, toSun, scaled);
+        return MICRO_SHADOW(N, toSun) PBRDiffuse(metal, r, graded, N, toEye, toSun, scaled);
     #endif
 }
 
@@ -254,13 +279,13 @@ float3 getPointLightLightingAttFull(float3 lightDir, float att, float3 lightColo
     lightColor = lightColor * LIN_SCALE_LIGHT;
     albedo = lerp(luma(albedo), albedo, TESR_PBRExtraData.x);
     att = LampAtt(att);
-    return att * PBR(metallic, roughness, albedo, normal, viewDir, lightDir, lightColor);
+    return att * MICRO_SHADOW(normal, lightDir) PBR(metallic, roughness, albedo, normal, viewDir, lightDir, lightColor);
 }
 
 float3 getSunLightingFull(float3 lightDir, float3 lightColor, float3 viewDir, float3 normal, float3 albedo, float roughness, float metallic) {
     lightColor = lightColor * LIN_SCALE_LIGHT;
     albedo = lerp(luma(albedo), albedo, TESR_PBRExtraData.x);
-    return PBRSun(metallic, roughness, albedo, normal, viewDir, lightDir, lightColor);
+    return MICRO_SHADOW(normal, lightDir) PBRSun(metallic, roughness, albedo, normal, viewDir, lightDir, lightColor);
 }
 #endif
 

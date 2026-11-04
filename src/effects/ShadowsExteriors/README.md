@@ -23,7 +23,7 @@ Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one v
 
 ### Textures (D3D9 sampler registers, declaration order)
 
-The fx file declares five samplers. The register numbers below are the ones written in the source and are the slot order NVR binds by declaration.
+The fx file declares five samplers. The register numbers below are the ones written in the source and are the slot order Vegas Shaders binds by declaration.
 
 | Slot | Name | Holds | Filter / address |
 |---|---|---|---|

@@ -136,7 +136,7 @@ Upsample (techniques 8 to 14):
 - Read and write: the upsample reads its own level (own_i) from the texture it writes (the D3D9 chain has no separate target
   for it). See section 9.
 
-### The Vulkan chain (NVR DXVK)
+### The Vulkan chain (Vegas Shaders DXVK)
 
 Same passes and maths. Each downsample level below the top goes into its own target (NVR_BloomLevel0..6), so no pass reads and
 writes one target. The upsamples write the chain's levels and read the downsample results from those targets.
@@ -182,7 +182,7 @@ buffer when Bloom is disabled.
 
 ## 7. Vulkan path
 
-- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) and the NVR DXVK extension (DxvkCompute::PassesOn). RenderBloomExt runs
+- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) and the Vegas Shaders DXVK extension (DxvkCompute::PassesOn). RenderBloomExt runs
   the chain. A pass that fails sets the effect's failure flag for the session. The D3D9 chain does the frame in that case.
 - Files (src/hlsl/NewVegas/Compute):
   - Bloom.glsl: the shared include: the push block, the taps, the box and tent functions. Helper sampling is at point of use
@@ -236,5 +236,5 @@ Still open:
 4. The tonemap path with the flag at 0 uses Blending and Strength with a different meaning. Whether that is intended for the game's
    own bloom is not stated in the code.
 5. The blur radius of the upsample is in uv units at the default; whether it looks the same at every level was not measured.
-6. Strength: the toml describes it for NVR and vanilla; the code reaches the tonemap as a gain on the NVR path and as a power-scaled gain
+6. Strength: the toml describes it for Vegas Shaders and vanilla; the code reaches the tonemap as a gain on the Vegas Shaders path and as a power-scaled gain
    on the game's path. Confirm the vanilla look against the toml wording.

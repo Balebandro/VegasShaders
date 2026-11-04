@@ -14,12 +14,12 @@ A dirt-on-the-lens look. Where the picture is bright (around lights, the sun, br
 - Skipped when the player is underwater: the strength is forced to zero and the should-render check returns false.
 - Skipped when its strength for the current place and time is zero or less.
 - Strength is chosen by place and time. Exterior uses the Night and Main values, blended by the game's day/night transition curve (Night value at curve 0, Main value at curve 1). Interior (any non-exterior cell) uses the Interiors values. There is no separate menu rule; the effect simply follows the frame it is given.
-- Frame order: drawn in the NVR post-effect stage, after the game's tonemapper has produced the picture. The copy taken at the start of that stage is tonemapped and display-encoded sRGB. Within the stage it runs after the exposure step and after this frame's bloom buffer has been rendered, and before the optional pre-tonemap LUT step. Its timer label is "Pre-tonemap lens + LUT". Its output becomes the current image for the LUT step and everything after.
+- Frame order: drawn in the Vegas Shaders post-effect stage, after the game's tonemapper has produced the picture. The copy taken at the start of that stage is tonemapped and display-encoded sRGB. Within the stage it runs after the exposure step and after this frame's bloom buffer has been rendered, and before the optional pre-tonemap LUT step. Its timer label is "Pre-tonemap lens + LUT". Its output becomes the current image for the LUT step and everything after.
 - Because bloom is produced earlier in the same frame, the bloom input is this frame's bloom, not last frame's.
 
 ## 3. Inputs
 
-Textures (D3D9 technique). NVR binds samplers by declaration order, so the slot order below is the order the shader declares them:
+Textures (D3D9 technique). Vegas Shaders binds samplers by declaration order, so the slot order below is the order the shader declares them:
 
 | Slot | Name | Holds | Addressing / filter |
 |---|---|---|---|
@@ -65,7 +65,7 @@ Notes:
 - One pass, one technique. The D3D9 technique is unnamed in the source; technique index 0 is the only one the C++ asks for. Vertex shader: the shared full-screen frame vertex stage (passes position and texture coordinate through). Pixel shader: the lens pass. Shader model 3.0 (vs_3_0 / ps_3_0).
 - Render target: the frame's current render target (the chain target the earlier effects wrote to). No new target is created.
 - Output: opaque colour (alpha written as 1). Full-screen; every pixel is written.
-- Vulkan: one pass named "Lens" through the NVR extension, one push block, the same output target, one colour output at location 0.
+- Vulkan: one pass named "Lens" through the Vegas Shaders extension, one push block, the same output target, one colour output at location 0.
 
 ## 6. Behaviour details
 
@@ -89,7 +89,7 @@ Notes:
 ## 7. Vulkan path
 
 - Shader: src/hlsl/NewVegas/Compute/Lens.frag (GLSL 450, includes Common.glsl). Compiled output Lens.spv in the same folder.
-- Selection: the effect's C++ extension entry is used when the NVR DXVK extension is present and the pass option is on. The option is NvrDxvkPasses in resource/VegasShaders.defaults.toml, section [_Main.Main.Performance] (top-level key, default on). D3D9 is used instead when the effect is named in the keep-on-D3D9 list, when the extension render failed earlier this session (logged; the session then falls back to D3D9 for this effect), or when a shader-model-6 build covers the technique and that option is on.
+- Selection: the effect's C++ extension entry is used when the Vegas Shaders DXVK extension is present and the pass option is on. The option is NvrDxvkPasses in resource/VegasShaders.defaults.toml, section [_Main.Main.Performance] (top-level key, default on). D3D9 is used instead when the effect is named in the keep-on-D3D9 list, when the extension render failed earlier this session (logged; the session then falls back to D3D9 for this effect), or when a shader-model-6 build covers the technique and that option is on.
 - Pass name: "Lens". It selects Compute\Lens.spv through the shared extension pass helper.
 - Textures, in the order handed to the pass: index 0 = frame copy (source), index 1 = first bloom level (null if the bloom effect does not exist), index 2 = dirt file texture. Bound at set 1, bindings 0, 1, 2.
 - Samplers: the extension's sampler heap is set 0 binding 0. Two sampler indices are passed: linear clamp (source and bloom) and linear wrap (dirt).

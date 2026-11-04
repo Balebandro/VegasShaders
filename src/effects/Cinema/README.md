@@ -22,7 +22,7 @@ Cinema gives the picture a film look. It adds black letterbox bars at the top an
 
 ## 3. Inputs
 
-### Textures (slot order; NVR binds samplers by declaration order)
+### Textures (slot order; Vegas Shaders binds samplers by declaration order)
 
 | Slot | Name | Holds | Filtering / addressing |
 |---|---|---|---|
@@ -103,7 +103,7 @@ The toml comment lists only 0, 1 and 2. Modes 3 and 4 exist in the code (see sec
 
 **Jitter (TAA).** No handling; Cinema runs on the displayed picture.
 
-**Reversed depth.** Not relevant: depth is NVR's linear combined depth, and sky is recognised by the stored value near far.
+**Reversed depth.** Not relevant: depth is Vegas Shaders' linear combined depth, and sky is recognised by the stored value near far.
 
 **HDR vs LDR.** LDR only, 8-bit chain picture. Overlay and grain are applied in display space.
 
@@ -114,7 +114,7 @@ The toml comment lists only 0, 1 and 2. Modes 3 and 4 exist in the code (see sec
 ## 7. Vulkan path
 
 - **Files:** `src/hlsl/NewVegas/Compute/Cinema.frag` (SPIR-V `Cinema.spv` in the same folder).
-- **Selection:** `CinemaEffect::ExtRender` is used only when NVR DXVK is loaded, `[Main.Main.Performance] NvrDxvkPasses` is on, and the frame is not a render-rectangle frame. Technique index 0 or 1 is handled; any other index returns "not drawn". If the pass fails, the D3D9 technique runs for the session.
+- **Selection:** `CinemaEffect::ExtRender` is used only when Vegas Shaders DXVK is loaded, `[Main.Main.Performance] NvrDxvkPasses` is on, and the frame is not a render-rectangle frame. Technique index 0 or 1 is handled; any other index returns "not drawn". If the pass fails, the D3D9 technique runs for the session.
 - **Bindings (descriptor set 1):** binding 0 = picture (`t_rendered`), binding 1 = combined depth (`t_depth`), binding 2 = blue-noise texture (`t_noise`).
 - **Samplers:** the picture and depth use the linear clamp sampler, taken from the push block at offset 96. The blue-noise texture uses the point wrap sampler, taken from the push block at offset 100.
 - **Push constants (112 bytes):**

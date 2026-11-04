@@ -126,6 +126,23 @@ UploadBudget = 0.0                   # UNOFFICIAL (2026-10-18), live: [0.0-8.0] 
 FadeIn = 0.5                         # UNOFFICIAL, BUG FIX (2026-10-18), live: [0.0-2.0] seconds over which a material map that has just arrived (they load a few a frame after a new place appears) blends in, instead of the object's roughness, metal and shading changing at once in view. 0 = at once, as before.
 ReloadTest = 0                       # TEST (2026-10-18), development builds only: a new nonzero value drops every loaded map so they arrive again, as in a new place. 0 = nothing.
 
+[_Shaders.PBR.Dust]
+Enabled = false                      # UNOFFICIAL (2026-11-04) Dust on top surfaces: a thin sand-coloured coat where things face up -- the tops of rocks and cliffs, car roofs and hoods, ledges, crates -- as sand settles in the desert (Death Stranding, Uncharted 4). Part of the surface's own colour, so the sun and lamps light it and the fog sits in front of it. Not on people, creatures or hair. Needs a restart to turn on or off; off, the object shaders are exactly what they were.
+Amount = 0.35                        # [0.0-1.0] (2026-11-04) How thick the coat is where it is fullest (1: the dust's colour alone; 0.35: the surface still shows clearly through; at 0.55 a flat rock top already read as ground on the bench).
+ColorR = 0.66                        # [0.0-1.0] (2026-11-04) The dust's colour, red (as a colour picker would show it).
+ColorG = 0.56                        # [0.0-1.0] (2026-11-04) green.
+ColorB = 0.43                        # [0.0-1.0] (2026-11-04) blue. The default is Mojave sand.
+Patchiness = 0.6                     # [0.0-1.0] (2026-11-04) 0: an even coat on every upward face; 1: patches with bare spots between.
+Size = 600.0                         # [32-20000] (2026-11-04) Game units across one patch (70 = 1 m).
+UpFrom = 0.55                        # [-1.0-1.0] (2026-11-04) How upward a face must be before dust starts (the height of its normal: 1 = facing straight up, 0.55 = about 57 degrees from flat).
+UpFull = 0.85                        # [-1.0-1.0] (2026-11-04) From here up the coat is full.
+Exteriors = true                     # (2026-11-04) Outdoors.
+Interiors = false                    # (2026-11-04) Indoors too (ruins, dusty rooms).
+
+[_Shaders.PBR.MicroShadow]
+Enabled = false                      # UNOFFICIAL (2026-11-04) Micro-shadowing: the bumps of a surface's normal map shadow themselves, so cracks and crevices look deep instead of painted on, more so when the light comes in low (Naughty Dog's technique, Uncharted 4 / The Last of Us Part II). Uses the occlusion in the _rmaos material maps ([Shaders.PBR.Rmaos], needs them on): objects without a map are not changed. Needs a restart to turn on or off; off, the shaders are exactly what they were.
+Strength = 1.0                       # [0.0-3.0] (2026-11-04) How much of it: 0 none, 1 the material maps' occlusion as it is, 2-3 their crevices twice or three times as deep (the effect only shows where the occlusion is fairly dark; [Shaders.PBR.Rmaos] DebugView 3 shows it).
+
 [_Shaders.PBR.Linear]
 LinearScene = true                  # UNOFFICIAL (2026-10-28; on by default since 2026-10-28: user, it "completely resolved the pop in issue"), needs a restart (then live), with linear lighting: THE fix for pieces looking lighter than the same surface next to them (floor tiles, rubble, road pieces, by day and at night): the game draws some surfaces in several passes (light, extra lamps, texture, highlights) and adds them in the picture, and each pass used to add its own already-encoded colour, which comes out too bright. On, the world is kept in linear light while it is drawn, so the passes add up exactly, and encoded once afterwards; LampSums, HighlightSums and ExactPassSums are then not needed (switched off by themselves). Surfaces drawn in one pass look as before; the game's own shaders (texture passes, signs, sky, water, glass) draw as before. Costs a few full-screen steps a frame (the log's "LinearScene" line counts them). Eyes keep the mod's shader while it is on. false = as before.
 ExactPassSums = 0                    # UNOFFICIAL TEST (2026-10-16): objects lit in several passes add them up in linear light (the extra lamp passes and the highlight passes were each added in the stored curve: up to 3.7x too bright indoors). 0 off, 1 lamps, 2 highlights, 3 both (the numbers were listed the other way round until 2026-10-25). Test only (a full-screen fold-in per run); LampSums and HighlightSums are the play versions. Applies immediately

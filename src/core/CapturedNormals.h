@@ -1018,7 +1018,7 @@ namespace CapturedNormals {
 		// Measured by SkinScattering on a GTX 1070 (native D3D9): with multisampled extra targets bound a draw writes nothing at all to
 		// target 0. Under DXVK it works; on native D3D9 the game's MSAA keeps the depth-rebuilt normals.
 		if (t.MultiSampleType != D3DMULTISAMPLE_NONE && !DxvkCompute::Available()) {
-			if (!MsaaWarned) { MsaaWarned = true; Logger::Log("[WARNING] CapturedNormals: the scene is multisampled (the game's MSAA) on native D3D9, where extra multisampled targets draw nothing: off while MSAA is on (fine under NVR DXVK)"); }
+			if (!MsaaWarned) { MsaaWarned = true; Logger::Log("[WARNING] CapturedNormals: the scene is multisampled (the game's MSAA) on native D3D9, where extra multisampled targets draw nothing: off while MSAA is on (fine under Vegas Shaders DXVK)"); }
 			rt0->Release();
 			return;
 		}

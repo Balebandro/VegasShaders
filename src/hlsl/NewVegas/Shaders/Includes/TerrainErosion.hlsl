@@ -14,6 +14,7 @@
 // SkyAmbient.hlsl c137-c145).
 
 float4 TESR_CameraPosition : register(c180);
+#define TESR_CAMERA_POSITION_C180	// TerrainMacro.hlsl declares it only without this
 float4 TESR_TerrainErosionData : register(c181);	// x gully depth (0 off), y widest gully spacing (units), z gully floor darkening
 float4 TESR_TerrainErosionRange : register(c182);	// x near distance, y far distance, z near strength (0-1), w far detail (0-1)
 

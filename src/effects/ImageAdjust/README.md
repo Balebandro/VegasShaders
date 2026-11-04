@@ -106,7 +106,7 @@ The shader works in this order on each pixel. (Written in words; the formulas ar
 ## 7. Vulkan path
 
 - **Files:** `src/hlsl/NewVegas/Compute/ImageAdjust.frag` (SPIR-V `ImageAdjust.spv`).
-- **Selection:** `ImageAdjustEffect::ExtRender` is used only when NVR DXVK is loaded, `[Main.Main.Performance] NvrDxvkPasses` is on, and the frame is not a render-rectangle frame. Technique 0 only. If the pass fails, the D3D9 technique runs for the rest of the session.
+- **Selection:** `ImageAdjustEffect::ExtRender` is used only when Vegas Shaders DXVK is loaded, `[Main.Main.Performance] NvrDxvkPasses` is on, and the frame is not a render-rectangle frame. Technique 0 only. If the pass fails, the D3D9 technique runs for the rest of the session.
 - **Bindings (descriptor set 1):** binding 0 = picture (`t_rendered`), one sampled 2D texture.
 - **Sampler:** the linear clamp sampler, taken from the push block at offset 48.
 - **Push constants (64 bytes):**

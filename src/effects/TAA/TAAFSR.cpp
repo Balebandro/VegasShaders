@@ -109,14 +109,14 @@ bool TAAEffect::FSREnsureResources() {
 	}
 	fsrWidth = width;
 	fsrHeight = height;
-	Logger::Log("UNOFFICIAL NVR DXVK: TAA FSR 2 inputs made (%ix%i, about %u MB)", width, height, (UInt32)((UInt64)width * height * 12 / (1024 * 1024)));
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK: TAA FSR 2 inputs made (%ix%i, about %u MB)", width, height, (UInt32)((UInt64)width * height * 12 / (1024 * 1024)));
 	return true;
 }
 
 bool TAAEffect::FSRWanted() {
 	if (!FSRSettings.Enabled || fsrFailed) return false;
 	if (!DxvkCompute::Available()) {
-		if (!fsrMissingLogged) Logger::Log("UNOFFICIAL: TAA FSR is on but needs NVR DXVK (%s); TAA's own resolve runs.", DxvkCompute::Status());
+		if (!fsrMissingLogged) Logger::Log("UNOFFICIAL: TAA FSR is on but needs the Vegas Shaders DXVK fork (%s); TAA's own resolve runs.", DxvkCompute::Status());
 		fsrMissingLogged = true;
 		return false;
 	}
@@ -139,7 +139,7 @@ bool TAAEffect::FSRDispatchPrep(const NVR_EXT_RESOURCE_BINDING* bindings, UINT c
 	GpuProfileScope gpu(timer, TheRenderManager->device);
 	DxvkCompute::PreLoad(bindings, count);	// UNOFFICIAL 2026-10-27 (merge with the alflicker fix): managed textures on the GPU
 	if (FAILED(DxvkCompute::Extension()->Dispatch(&dispatch))) {
-		Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: TAA FSR pass FSRPrep failed to dispatch; FSR is off for this session (TAA's own resolve runs)");
+		Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: TAA FSR pass FSRPrep failed to dispatch; FSR is off for this session (TAA's own resolve runs)");
 		fsrFailed = true;
 		return false;
 	}
@@ -150,7 +150,7 @@ bool TAAEffect::FSRDispatchPrep(const NVR_EXT_RESOURCE_BINDING* bindings, UINT c
 // exactly as FSRDraw made them: a failure turns FSR off for the session (logged); false then, and while either pipeline is missing.
 bool TAAEffect::FSRPipelines() {
 	auto fail = [this](const char* why) {
-		Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: TAA FSR: %s; FSR is off for this session (TAA's own resolve runs)", why);
+		Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: TAA FSR: %s; FSR is off for this session (TAA's own resolve runs)", why);
 		EffectStatus::Level("TAA FSR / DLSS (native)", (std::string("OFF for the session, TAA's resolve: ") + why).c_str(), false);	// UNOFFICIAL 2026-11-01
 		fsrFailed = true;
 		return false;
@@ -169,7 +169,7 @@ bool TAAEffect::FSRPipelines() {
 
 bool TAAEffect::FSRDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, bool reset) {
 	auto fail = [this](const char* why) {
-		Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: TAA FSR: %s; FSR is off for this session (TAA's own resolve runs)", why);
+		Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: TAA FSR: %s; FSR is off for this session (TAA's own resolve runs)", why);
 		EffectStatus::Level("TAA FSR / DLSS (native)", (std::string("OFF for the session, TAA's resolve: ") + why).c_str(), false);	// UNOFFICIAL 2026-11-01
 		fsrFailed = true;
 		return false;
@@ -274,7 +274,7 @@ bool TAAEffect::FSRDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 		if (!ExtDrawTo(fsrComposite.Pipeline, &RenderTarget, 1, b, _countof(b), &compositePush, sizeof(compositePush))) return fail("the composite pass failed");
 	}
 
-	if (++fsrFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: TAA runs %s (AMD FidelityFX Super Resolution) as its resolve, %ix%i native, sharpness %.2f.", upscaler->Name(), width, height, FSRSettings.Sharpness);
+	if (++fsrFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: TAA runs %s (AMD FidelityFX Super Resolution) as its resolve, %ix%i native, sharpness %.2f.", upscaler->Name(), width, height, FSRSettings.Sharpness);
 	return true;
 }
 
@@ -311,7 +311,7 @@ bool TAAEffect::RRFrameChecks(bool frameStart) {
 	if (!Enabled || !Effect || !ShouldRender()) return no(4, "TAA is off ([Shaders.TAA.Status] Enabled): DLSS and its Ray Reconstruction need it");
 	if (RenderRect::Active() || Up.Deferred || Up.Upscaled) return no(8, "a RenderScale frame: no Ray Reconstruction in it");
 	if (!DxvkCompute::PassesOn() || DxvkCompute::KeptOnD3D9(Name))
-		return no(16, "NVR DXVK's Vulkan passes are off ([Main.Main.Performance] NvrDxvkPasses, or TAA in NvrDxvkKeepD3D9): no Ray Reconstruction");
+		return no(16, "the Vegas Shaders DXVK fork's Vulkan passes are off ([Main.Main.Performance] NvrDxvkPasses, or TAA in NvrDxvkKeepD3D9): no Ray Reconstruction");
 	if (!TheSettingManager->SettingsMain.Main.RenderPreTonemapping)
 		return no(32, "[Main.Main.Main] RenderPreTonemapping is off (the effects run after the tonemap): no Ray Reconstruction");
 	if (!TheSettingManager->SettingsMain.Main.RenderEffects || !Player || !Player->parentCell || TheShaderManager->GameState.OverlayIsOn ||
@@ -360,7 +360,7 @@ bool TAAEffect::RREnsureResources() {
 	}
 	rrWidth = width;
 	rrHeight = height;
-	Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction inputs made (%ix%i, about %u MB)", width, height, (UInt32)((UInt64)width * height * 34 / (1024 * 1024)));
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction inputs made (%ix%i, about %u MB)", width, height, (UInt32)((UInt64)width * height * 34 / (1024 * 1024)));
 	return true;
 }
 
@@ -370,7 +370,7 @@ bool TAAEffect::RRPipelines() {
 	if (!rrTried) {
 		rrTried = true;
 		auto fail = [this](const char* why) {
-			Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction: %s; RR is off for this session (DLSS SR runs after the tonemap as before)", why);
+			Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction: %s; RR is off for this session (DLSS SR runs after the tonemap as before)", why);
 			EffectStatus::Level("DLSS Ray Reconstruction", (std::string("OFF for the session: ") + why).c_str(), false);	// UNOFFICIAL 2026-11-01
 			rrFailed = true;
 			return false;
@@ -422,7 +422,7 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		return false;
 	}
 	auto fail = [this](const char* why) {
-		Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction: %s; RR is off for this session (DLSS SR runs after the tonemap as before)", why);
+		Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction: %s; RR is off for this session (DLSS SR runs after the tonemap as before)", why);
 		EffectStatus::Level("DLSS Ray Reconstruction", (std::string("OFF for the session: ") + why).c_str(), false);	// UNOFFICIAL 2026-11-01
 		rrFailed = true;
 		rrHistoryValid = false;
@@ -592,7 +592,7 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	rrHistoryValid = true;
 	rrRanThisFrame = true;
 	if (++rrFrames == 1)
-		Logger::Log("UNOFFICIAL NVR DXVK: DLSS Ray Reconstruction runs after the god rays, before exposure and bloom, %ix%i native (albedo %s, normals in %s space, roughness %s).", width, height,
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction runs after the god rays, before exposure and bloom, %ix%i native (albedo %s, normals in %s space, roughness %s).", width, height,
 			albedoOn ? "the albedo buffer where written, else the picture's chroma" : RRSettings.Albedo >= 1 ? "the picture's chroma" : "flat grey", RRSettings.Normals == 1 ? "view" : "world", materialOn ? "from the material buffer" : "constant");
 	return true;
 }

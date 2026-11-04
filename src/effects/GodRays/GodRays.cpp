@@ -632,7 +632,7 @@ bool GodRaysEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSurface9*
 	}
 	idleCheckSkipped = heavySkipped;
 	if (FAILED(result) && ext) {
-		if (!ExtFailed) { ExtFailed = true; Logger::Log("UNOFFICIAL NVR DXVK: pass GodRays failed to draw: its D3D9 technique is used from now on"); }
+		if (!ExtFailed) { ExtFailed = true; Logger::Log("UNOFFICIAL Vegas Shaders DXVK: pass GodRays failed to draw: its D3D9 technique is used from now on"); }
 		return false;	// nothing was committed: the D3D9 passes draw this frame
 	}
 	if (FAILED(result)) {

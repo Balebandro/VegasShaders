@@ -50,7 +50,7 @@ namespace Diagnostics {
 	void StageAfterEffect(EffectRecord* effect);
 	void StageMark(const char* name, IDirect3DSurface9* picture);
 	// The marks' names (ShaderManager passes these; the attribution re-bases the chain at the tonemap mark: HDR before, display after)
-	constexpr const char* SceneMarkName = "scene before NVR";
+	constexpr const char* SceneMarkName = "scene before Vegas Shaders";
 	constexpr const char* TonemapMarkName = "tonemapped (the game's tonemap, before the post effects)";
 	void ProbeOwn(const char* name, IDirect3DSurface9* buffer);
 	// UNOFFICIAL 2026-11-01 the detector's self-test ([Main.Develop.Main] FlashSelfTestEvery = N frames, 0 = off; FlashSelfTestEffect = the

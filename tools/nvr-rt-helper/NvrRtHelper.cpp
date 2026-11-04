@@ -11,6 +11,10 @@
 // Usage:
 //   NvrRtHelper.exe --shm <name>   started by NVR (never by hand)
 //   NvrRtHelper.exe --probe        prints every GPU and whether it can run the helper, then exits
+//   NvrRtHelper.exe --replay <capture.nvrcap> [--shader <name>=<file.spv> ...] [--shaders <folder>] [--runs N] [--out <folder>]
+//                                  UNOFFICIAL 2026-11-03: runs one captured frame again without the game (docs/next/RT-REPLAY.md).
+//                                  A capture is written when NvrRtHelper.capture (checked every 60 frames) or NvrRtHelper.capture-at
+//                                  (read at start) is next to the exe: CaptureSpec below.
 //
 // The pass binding layout (set 0), the same for every trace shader:
 //   binding 0      accelerationStructureEXT     the scene
@@ -33,10 +37,12 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "NvrRtProtocol.h"
+#include "NvrRtCapture.h"	// UNOFFICIAL 2026-11-03 frame capture / replay (claude/rt-replay)
 #include "RtArenaGuard.h"	// kRtArenaGuardSpv (RtArenaGuard.comp)
 
 namespace {
@@ -424,6 +430,7 @@ namespace {
 		uint32_t					vertices = 0;
 		bool						dynamic = false;				// built with ALLOW_UPDATE: later frames refit it in place
 		bool						compacted = false;
+		uint32_t					opFlags = 0;					// UNOFFICIAL 2026-11-03: NVR_RT_OP_FLAG_* of its build (the capture rebuilds it the same way)
 	};
 
 	// The geometry data's words: first fit.
@@ -458,6 +465,7 @@ namespace {
 		VkImageView		view = VK_NULL_HANDLE;
 		VkFormat		format = VK_FORMAT_UNDEFINED;
 		uint32_t		width = 0, height = 0;
+		uint32_t		usage = 0;			// UNOFFICIAL 2026-11-03: as imported (the capture notes it)
 	};
 
 	// The importer's VkImage must have the exporter's layout. The game's driver is the 32-bit one, this is the 64-bit one: with the
@@ -533,6 +541,7 @@ namespace {
 		out.format = (VkFormat)d.vkFormat;
 		out.width = d.width;
 		out.height = d.height;
+		out.usage = d.usage & ~chosen->usageOff;
 		Log("imported shared image %u: %ux%u, format %u, %llu bytes, memory type %u", index, d.width, d.height, d.vkFormat,
 			(unsigned long long)d.allocationSize, d.memoryTypeIndex);
 		return true;
@@ -586,6 +595,36 @@ namespace {
 
 	struct CompactReady { uint32_t id; VkAccelerationStructureKHR as; VkDeviceSize size; };
 
+	// UNOFFICIAL 2026-11-03 (claude/rt-replay) frame capture: what to capture, read from a small text file next to the exe, one
+	// "key value" a line (# starts a comment), every key optional:
+	//   frame  <N>        the first helper frame (exchange) that may be captured
+	//   shader <text>     only frames with a pass whose .spv path contains this (any case), e.g. RtPathTrace
+	//   skip   <K>        pass over the first K frames that match (let an accumulation settle)
+	//   count  <C>        captures in a row (default 1)
+	//   out    <folder>   where the .nvrcap goes (default: next to the exe)
+	// NvrRtHelper.capture-at is read once at start (it stays: a bench copies it in with the helper); NvrRtHelper.capture is looked for
+	// every 60 frames and deleted when read (drop it in while the game runs). No file: nothing else happens (one file check a second).
+	struct CaptureSpec {
+		bool			armed = false;
+		uint64_t		minFrame = 0;
+		std::string		shader;
+		uint32_t		skip = 0;
+		uint32_t		count = 1;
+		std::wstring	out;
+	};
+
+	struct CaptureRegion { uint32_t tag, index; VkDeviceSize offset, size; };	// a chunk the GPU copies into the capture buffer
+
+	struct Capture {
+		CaptureSpec		spec;
+		bool			active = false;		// the frame being recorded is captured
+		Buffer			buffer;				// host-visible: the images before / after the passes, the geometry data
+		std::vector<CaptureRegion> regions;
+		std::vector<uint8_t> meta;			// the CPU chunks (images' descriptions, geometries, instances, records, passes, shaders)
+		NvrRtCaptureHeader header = {};
+		uint32_t		written = 0;
+	};
+
 	struct PendingFree { uint64_t frame; Geometry geometry; };
 
 	struct Helper {
@@ -633,6 +672,7 @@ namespace {
 		float			probeTransform[3][12] = {};
 		int				probeSlot = -1;
 		bool			probeDone = false;
+		Capture			capture;			// UNOFFICIAL 2026-11-03 (claude/rt-replay): one frame's inputs to a file on request
 		NvrRtFrame		frame;				// this frame's record, copied out of the ring (2 MB: on the heap via Helper)
 	};
 
@@ -785,6 +825,289 @@ namespace {
 		h.triangles -= it->second.triangles;
 		h.pendingFrees.push_back({ frame, it->second });	// frames up to this one may still trace it
 		h.geometries.erase(it);
+	}
+
+	// ---------------------------------------------------------------------------------------------------------------------
+	// UNOFFICIAL 2026-11-03 (claude/rt-replay) frame capture: the frame's whole input (every shared image as the passes found it,
+	// the geometry data the bottom levels were built from, the scene's instances and records, the passes, their SPIR-V) and the
+	// images the passes wrote, into one .nvrcap file (NvrRtCapture.h) that `--replay` runs again without the game.
+
+	// Bytes a texel of the formats NVR shares (0: unknown, not captured)
+	uint32_t TexelBytes(VkFormat f) {
+		switch (f) {
+			case VK_FORMAT_R8_UNORM: return 1;
+			case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16_UNORM: case VK_FORMAT_R8G8_UNORM: return 2;
+			case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16_UNORM:
+			case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_SRGB:
+			case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2R10G10B10_UNORM_PACK32: case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return 4;
+			case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R16G16B16A16_UNORM: return 8;
+			case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+			default: return 0;
+		}
+	}
+
+	void AddChunk(std::vector<uint8_t>& out, uint32_t tag, uint32_t index, const void* data, size_t size) {
+		NvrRtCaptureChunk c = { tag, index, (uint64_t)size };
+		const size_t at = out.size();
+		out.resize(at + sizeof(c) + ((size + 7) & ~(size_t)7), 0);
+		memcpy(out.data() + at, &c, sizeof(c));
+		if (size) memcpy(out.data() + at + sizeof(c), data, size);
+	}
+
+	// A capture spec from a file (false: no such file)
+	bool ReadCaptureSpec(const std::wstring& path, CaptureSpec& spec) {
+		FILE* f = nullptr;
+		if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return false;
+		spec = CaptureSpec();
+		char line[1024];
+		while (fgets(line, sizeof(line), f)) {
+			char* hash = strchr(line, '#');
+			if (hash) *hash = 0;
+			char* key = line;
+			while (*key == ' ' || *key == '\t') key++;
+			char* value = key;
+			while (*value && *value != ' ' && *value != '\t' && *value != '\r' && *value != '\n') value++;
+			if (*value) *value++ = 0;
+			while (*value == ' ' || *value == '\t') value++;
+			size_t n = strlen(value);
+			while (n && (value[n - 1] == '\r' || value[n - 1] == '\n' || value[n - 1] == ' ' || value[n - 1] == '\t')) value[--n] = 0;
+			if (!_stricmp(key, "frame")) spec.minFrame = _strtoui64(value, nullptr, 10);
+			else if (!_stricmp(key, "shader")) { spec.shader = value; std::transform(spec.shader.begin(), spec.shader.end(), spec.shader.begin(), ::tolower); }
+			else if (!_stricmp(key, "skip")) spec.skip = (uint32_t)strtoul(value, nullptr, 10);
+			else if (!_stricmp(key, "count")) spec.count = std::max(1u, (uint32_t)strtoul(value, nullptr, 10));
+			else if (!_stricmp(key, "out") && n) {
+				wchar_t wide[MAX_PATH] = {};
+				MultiByteToWideChar(CP_ACP, 0, value, -1, wide, MAX_PATH);
+				spec.out = wide;
+			}
+		}
+		fclose(f);
+		spec.armed = true;
+		Log("capture armed from %ls: frame >= %llu, shader '%s', skip %u, count %u, out %ls", path.c_str(), (unsigned long long)spec.minFrame,
+			spec.shader.c_str(), spec.skip, spec.count, spec.out.empty() ? g_exeDir.c_str() : spec.out.c_str());
+		return true;
+	}
+
+	// Whether this frame (h.frame, intact) is the one to capture; counts the skips down
+	bool CaptureThisFrame(Helper& h, uint64_t frameNumber) {
+		CaptureSpec& spec = h.capture.spec;
+		if (!spec.armed || frameNumber < spec.minFrame) return false;
+		if (!spec.shader.empty()) {
+			bool any = false;
+			for (uint32_t p = 0; p < h.frame.passCount && !any; p++) {
+				const uint32_t shader = h.frame.passes[p].shader;
+				if (shader >= NVR_RT_MAX_SHADERS) continue;
+				char path[261] = {};
+				memcpy(path, g_shared->shaderPaths[shader], 260);
+				for (char* c = path; *c; c++) *c = (char)tolower((unsigned char)*c);
+				any = strstr(path, spec.shader.c_str()) != nullptr;
+			}
+			if (!any) return false;
+		}
+		if (spec.skip) { spec.skip--; return false; }
+		return true;
+	}
+
+	// In RecordFrame, after the scene build: the capture buffer, the "before" copies, the CPU chunks. False: not captured (logged).
+	bool CaptureBefore(Helper& h, Slot& s, VkCommandBuffer cmd, uint32_t instanceCount) {
+		Capture& c = h.capture;
+		const NvrRtFrame& f = h.frame;
+		c.regions.clear();
+		c.meta.clear();
+		uint32_t bound[NVR_RT_MAX_IMAGES] = {}, written[NVR_RT_MAX_IMAGES] = {};
+		for (uint32_t p = 0; p < f.passCount; p++)
+			for (uint32_t i = 0; i < std::min<uint32_t>(f.passes[p].imageCount, NVR_RT_PASS_IMAGES_MAX); i++) {
+				const uint32_t image = NvrRtPassImage(f.passes[p], i);
+				if (image >= NVR_RT_MAX_IMAGES) continue;
+				bound[image] = 1;
+				if (f.passes[p].writeMask & (1u << i)) written[image] = 1;
+			}
+		VkDeviceSize total = 0;
+		for (uint32_t i = 0; i < h.imageCount; i++) {
+			const SharedImage& im = h.images[i];
+			NvrRtCaptureImage d = { (uint32_t)im.format, im.width, im.height, TexelBytes(im.format), 0, im.usage };
+			if (bound[i]) d.flags |= NVR_RT_CAPTURE_IMAGE_BOUND;
+			const bool copy = d.texelBytes && im.image && (i != NVR_RT_ARENA_IMAGE || bound[i]);	// the arena (64 MB) only when a pass reads it
+			if (copy) {
+				const VkDeviceSize size = (VkDeviceSize)im.width * im.height * d.texelBytes;
+				d.flags |= NVR_RT_CAPTURE_IMAGE_BEFORE;
+				c.regions.push_back({ NVR_RT_CHUNK_IMAGE_BEFORE, i, total, size });
+				total += AlignUp(size, 256);
+				if (written[i]) {
+					d.flags |= NVR_RT_CAPTURE_IMAGE_AFTER;
+					c.regions.push_back({ NVR_RT_CHUNK_IMAGE_AFTER, i, total, size });
+					total += AlignUp(size, 256);
+				}
+			}
+			else d.flags |= NVR_RT_CAPTURE_IMAGE_NO_COPY;
+			AddChunk(c.meta, NVR_RT_CHUNK_IMAGE_DESC, i, &d, sizeof(d));
+		}
+		// every geometry alive (in id order: the same file for the same scene), its words copied in that order
+		std::vector<NvrRtCaptureGeometry> geos;
+		geos.reserve(h.geometries.size());
+		uint32_t noData = 0;
+		for (const auto& kv : h.geometries) {
+			const Geometry& g = kv.second;
+			NvrRtCaptureGeometry cg = { kv.first, g.vertices, g.triangles, g.vertexOffset, g.indexOffset, g.uvOffset, g.dataWords, g.opFlags,
+				g.compacted ? 1u : 0u, 0 };
+			if (g.vertexOffset == NVR_RT_NO_DATA || !g.dataWords) { cg.vertexOffset = cg.indexOffset = cg.uvOffset = NVR_RT_NO_DATA; cg.dataWords = 0; noData++; }
+			geos.push_back(cg);
+		}
+		std::sort(geos.begin(), geos.end(), [](const NvrRtCaptureGeometry& a, const NvrRtCaptureGeometry& b) { return a.id < b.id; });
+		std::vector<VkBufferCopy> dataCopies;
+		VkDeviceSize dataBytes = 0;
+		for (const NvrRtCaptureGeometry& g : geos) {
+			if (!g.dataWords) continue;
+			dataCopies.push_back({ (VkDeviceSize)g.vertexOffset * 4, total + dataBytes, (VkDeviceSize)g.dataWords * 4 });
+			dataBytes += (VkDeviceSize)g.dataWords * 4;
+		}
+		c.regions.push_back({ NVR_RT_CHUNK_GEOMETRY_DATA, 0, total, dataBytes });
+		total += AlignUp(dataBytes, 256);
+		if (!CreateBuffer(h.vk, total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, c.buffer)) {
+			Log("capture: no %llu MB host-visible buffer: frame not captured", (unsigned long long)(total >> 20));
+			c.buffer = Buffer();
+			return false;
+		}
+		for (const CaptureRegion& r : c.regions) {
+			if (r.tag != NVR_RT_CHUNK_IMAGE_BEFORE) continue;
+			const SharedImage& im = h.images[r.index];
+			VkBufferImageCopy copy = {};
+			copy.bufferOffset = r.offset;
+			copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			copy.imageExtent = { im.width, im.height, 1 };
+			vkCmdCopyImageToBuffer(cmd, im.image, VK_IMAGE_LAYOUT_GENERAL, c.buffer.buffer, 1, &copy);
+		}
+		if (!dataCopies.empty()) vkCmdCopyBuffer(cmd, h.geometryData.buffer, c.buffer.buffer, (uint32_t)dataCopies.size(), dataCopies.data());
+		FullBarrier(cmd);	// the passes may write what was just copied
+
+		AddChunk(c.meta, NVR_RT_CHUNK_GEOMETRIES, 0, geos.data(), geos.size() * sizeof(NvrRtCaptureGeometry));
+		// the scene as built: the instance buffer's entries (the geometry id from the record next to it) and the records as bound
+		std::vector<NvrRtInstance> instances(instanceCount);
+		const VkAccelerationStructureInstanceKHR* built = (const VkAccelerationStructureInstanceKHR*)s.instances.mapped;
+		const NvrRtInstanceRecord* records = (const NvrRtInstanceRecord*)s.records.mapped;
+		for (uint32_t i = 0; i < instanceCount; i++) {
+			memcpy(instances[i].transform, &built[i].transform, sizeof(instances[i].transform));
+			instances[i].geometryId = records[i].geometryId;
+			instances[i].customIndex = built[i].instanceCustomIndex;
+			instances[i].mask = built[i].mask;
+			instances[i].flags = built[i].flags;
+		}
+		AddChunk(c.meta, NVR_RT_CHUNK_INSTANCES, 0, instances.data(), instances.size() * sizeof(NvrRtInstance));
+		AddChunk(c.meta, NVR_RT_CHUNK_RECORDS, 0, records, (size_t)instanceCount * sizeof(NvrRtInstanceRecord));
+		AddChunk(c.meta, NVR_RT_CHUNK_PASSES, 0, f.passes, (size_t)f.passCount * sizeof(NvrRtPass));
+		const uint32_t shaderCount = std::min<uint32_t>((uint32_t)g_shared->shaderCount, NVR_RT_MAX_SHADERS);
+		for (uint32_t i = 0; i < shaderCount; i++) {
+			char path[261] = {};
+			memcpy(path, g_shared->shaderPaths[i], 260);
+			AddChunk(c.meta, NVR_RT_CHUNK_SHADER_PATH, i, path, strlen(path) + 1);
+			FILE* sf = nullptr;
+			if (fopen_s(&sf, path, "rb") == 0 && sf) {
+				std::vector<uint8_t> code;
+				fseek(sf, 0, SEEK_END);
+				const long n = ftell(sf);
+				fseek(sf, 0, SEEK_SET);
+				if (n > 0) { code.resize((size_t)n); code.resize(fread(code.data(), 1, (size_t)n, sf)); }
+				fclose(sf);
+				AddChunk(c.meta, NVR_RT_CHUNK_SHADER_CODE, i, code.data(), code.size());
+			}
+		}
+		NvrRtCaptureHeader& hd = c.header;
+		hd = NvrRtCaptureHeader();
+		hd.magic = NVR_RT_CAPTURE_MAGIC;
+		hd.version = NVR_RT_CAPTURE_VERSION;
+		hd.protocol = NVR_RT_PROTOCOL_VERSION;
+		hd.headerSize = sizeof(NvrRtCaptureHeader);
+		hd.frame = f.frame;
+		hd.imageCount = h.imageCount;
+		hd.geometryCount = (uint32_t)geos.size();
+		hd.instanceCount = instanceCount;
+		hd.passCount = f.passCount;
+		hd.shaderCount = shaderCount;
+		hd.dataWords = kDataWords;
+		hd.noDataGeometries = noData;
+		strncpy_s(hd.device, h.vk.properties.deviceName, _TRUNCATE);
+		return true;
+	}
+
+	// In RecordFrame, after the passes: the written images as the game gets them
+	void CaptureAfter(Helper& h, VkCommandBuffer cmd) {
+		Capture& c = h.capture;
+		for (const CaptureRegion& r : c.regions) {
+			if (r.tag != NVR_RT_CHUNK_IMAGE_AFTER) continue;
+			const SharedImage& im = h.images[r.index];
+			VkBufferImageCopy copy = {};
+			copy.bufferOffset = r.offset;
+			copy.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+			copy.imageExtent = { im.width, im.height, 1 };
+			vkCmdCopyImageToBuffer(cmd, im.image, VK_IMAGE_LAYOUT_GENERAL, c.buffer.buffer, 1, &copy);
+		}
+		VkMemoryBarrier b = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+		b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		b.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+	}
+
+	// After the captured frame's submit: wait for it, then the file is written on a thread of its own (the game's next frames go on)
+	void CaptureFinish(Helper& h, Slot& s, uint64_t frameNumber) {
+		Capture& c = h.capture;
+		c.active = false;
+		VkSemaphoreWaitInfo wait = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+		wait.semaphoreCount = 1;
+		wait.pSemaphores = &h.outputReady;
+		wait.pValues = &frameNumber;
+		const VkResult r = vkWaitSemaphores(h.vk.device, &wait, 10ull * 1000 * 1000 * 1000);
+		if (r != VK_SUCCESS) { Log("capture: frame %llu did not finish in 10 s (%s): not written", (unsigned long long)frameNumber, VkResultName(r)); DestroyBuffer(h.vk, c.buffer); return; }
+		// this frame's own pass times (the same timestamps WaitSlot reads later)
+		std::vector<float> passMs;
+		if (h.queries) {
+			const uint32_t slot = (uint32_t)(&s - h.slots);
+			uint64_t stamps[kQueriesPerSlot] = {};
+			if (vkGetQueryPoolResults(h.vk.device, h.queries, slot * kQueriesPerSlot, kQueriesPerSlot, sizeof(stamps), stamps, sizeof(uint64_t),
+				VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+				const uint64_t mask = h.vk.timestampBits >= 64 ? ~0ull : ((1ull << h.vk.timestampBits) - 1);
+				for (uint32_t p = 0; p < s.passesStamped; p++)
+					passMs.push_back((float)((double)((stamps[4 + p] - stamps[p == 0 ? 2 : 4 + p - 1]) & mask) * h.vk.properties.limits.timestampPeriod / 1e6));
+			}
+		}
+		AddChunk(c.meta, NVR_RT_CHUNK_PASS_TIMES, 0, passMs.data(), passMs.size() * sizeof(float));
+		size_t bytes = sizeof(NvrRtCaptureHeader) + c.meta.size();
+		for (const CaptureRegion& rg : c.regions) bytes += sizeof(NvrRtCaptureChunk) + (size_t)AlignUp(rg.size, 8);
+		std::vector<uint8_t>* file = new std::vector<uint8_t>();
+		file->reserve(bytes);
+		file->insert(file->end(), (const uint8_t*)&c.header, (const uint8_t*)&c.header + sizeof(c.header));
+		file->insert(file->end(), c.meta.begin(), c.meta.end());
+		for (const CaptureRegion& rg : c.regions) AddChunk(*file, rg.tag, rg.index, (const uint8_t*)c.buffer.mapped + rg.offset, (size_t)rg.size);
+		DestroyBuffer(h.vk, c.buffer);
+		c.meta.clear();
+		c.regions.clear();
+		const std::wstring folder = c.spec.out.empty() ? g_exeDir : c.spec.out;
+		CreateDirectoryW(folder.c_str(), nullptr);
+		wchar_t name[64];
+		swprintf_s(name, L"\\NvrRtCapture-%llu.nvrcap", (unsigned long long)frameNumber);
+		const std::wstring path = folder + name;
+		std::string passes;
+		for (uint32_t p = 0; p < c.header.passCount; p++) {
+			const NvrRtPass& pass = h.frame.passes[p];
+			const char* sp = pass.shader < NVR_RT_MAX_SHADERS ? (const char*)g_shared->shaderPaths[pass.shader] : "?";
+			const char* nm = strrchr(sp, '\\');
+			char one[160];
+			sprintf_s(one, " %s%.40s (%ux%u groups, %u images, %.3f ms)", p ? "," : "", nm ? nm + 1 : sp, pass.groupsX, pass.groupsY, pass.imageCount,
+				p < passMs.size() ? passMs[p] : -1.0f);
+			passes += one;
+		}
+		Log("capture of frame %llu: %u images, %u geometries (%u without data), %u instances, %u passes:%s; %llu MB -> %ls (writing)",
+			(unsigned long long)frameNumber, c.header.imageCount, c.header.geometryCount, c.header.noDataGeometries, c.header.instanceCount,
+			c.header.passCount, passes.c_str(), (unsigned long long)(file->size() >> 20), path.c_str());
+		std::thread([file, path]() {
+			FILE* out = nullptr;
+			bool ok = false;
+			if (_wfopen_s(&out, path.c_str(), L"wb") == 0 && out) { ok = fwrite(file->data(), 1, file->size(), out) == file->size(); ok = fclose(out) == 0 && ok; }
+			Status("capture %ls: %s (%llu MB)", path.c_str(), ok ? "written" : "FAILED to write", (unsigned long long)(file->size() >> 20));
+			delete file;
+		}).detach();
+		c.written++;
+		if (c.spec.count > 1) c.spec.count--;
+		else c.spec.armed = false;
 	}
 
 	bool WaitSlot(Helper& h, Slot& s, HANDLE parent) {
@@ -1031,6 +1354,7 @@ namespace {
 				Geometry geo;
 				geo.vertices = op.vertexCount;
 				geo.dynamic = dynamic;
+				geo.opFlags = op.flags;
 				geo.size = sizes.accelerationStructureSize;
 				geo.triangles = op.triangleCount;
 				if (!h.structures.Allocate(h.vk, geo.size, geo.block, geo.offset)) { g_shared->failedOps++; continue; }
@@ -1160,6 +1484,7 @@ namespace {
 			FullBarrier(cmd);
 			s.measured[1] = true;
 		}
+		if (h.capture.active && !CaptureBefore(h, s, cmd, count)) h.capture.active = false;	// (2026-11-03) before stamp 2: not in the passes' times
 		if (h.queries) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, slot * kQueriesPerSlot + 2);
 
 		// 3. the passes
@@ -1199,6 +1524,7 @@ namespace {
 				s.passShaders[s.passesStamped++] = pass.shader;
 			}
 		}
+		if (h.capture.active) CaptureAfter(h, cmd);	// (2026-11-03) what the passes wrote
 		return true;
 	}
 
@@ -1237,7 +1563,14 @@ namespace {
 			vkCmdResetQueryPool(cmd, h.queries, slot * kQueriesPerSlot, kQueriesPerSlot);
 			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, h.queries, slot * kQueriesPerSlot);
 		}
+		// UNOFFICIAL 2026-11-03 (claude/rt-replay): a capture asked for by a file dropped next to the exe (looked for every 60 frames)
+		if (!h.capture.spec.armed && (frameNumber % 60) == 0) {
+			const std::wstring trigger = g_exeDir + L"\\NvrRtHelper.capture";
+			if (GetFileAttributesW(trigger.c_str()) != INVALID_FILE_ATTRIBUTES && ReadCaptureSpec(trigger, h.capture.spec)) DeleteFileW(trigger.c_str());
+		}
+		h.capture.active = intact && h.capture.spec.armed && CaptureThisFrame(h, frameNumber);
 		if (intact && !RecordFrame(h, s, frameNumber)) {
+			if (h.capture.active) { h.capture.active = false; DestroyBuffer(h.vk, h.capture.buffer); }	// (nothing of it was submitted)
 			// Start over with an empty command buffer: the signal must still go out
 			vkResetCommandBuffer(cmd, 0);
 			VK_CHECK(vkBeginCommandBuffer(cmd, &begin), "vkBeginCommandBuffer");
@@ -1278,6 +1611,7 @@ namespace {
 		submit.pSignalSemaphores = &h.outputReady;
 		VK_CHECK(vkQueueSubmit(h.vk.queue, 1, &submit, VK_NULL_HANDLE), "vkQueueSubmit");
 		s.frame = frameNumber;
+		if (h.capture.active) CaptureFinish(h, s, frameNumber);	// (2026-11-03) waits for this frame, writes the file on a thread
 
 		LARGE_INTEGER now, frequency;
 		QueryPerformanceCounter(&now);
@@ -1425,7 +1759,8 @@ namespace {
 		const SharedImage& arena = h.images[NVR_RT_ARENA_IMAGE];
 		if (!CreateBuffer(h.vk, (VkDeviceSize)arena.width * arena.height * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT |
 				VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, h.staging) ||
-			!CreateBuffer(h.vk, (VkDeviceSize)kDataWords * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, h.geometryData) ||
+			!CreateBuffer(h.vk, (VkDeviceSize)kDataWords * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+				VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, h.geometryData) ||	// (TRANSFER_SRC: the capture copies it out, 2026-11-03)
 			!CreateTlas(h) || !EnsureScratch(h, h.tlasScratch) || !CreatePipelineLayout(h))
 			return fail(nullptr);
 		if (!CreateBuffer(h.vk, 3 * 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, h.probe)) h.probe = Buffer();	// the probe is optional
@@ -1434,6 +1769,7 @@ namespace {
 		for (uint32_t i = 0; i < std::min<uint32_t>((uint32_t)shared->shaderCount, NVR_RT_MAX_SHADERS); i++) Pipeline(h, i);
 
 		h.dataWords.Init(kDataWords);
+		ReadCaptureSpec(g_exeDir + L"\\NvrRtHelper.capture-at", h.capture.spec);	// UNOFFICIAL 2026-11-03: a capture at a given frame (CaptureSpec)
 		// The first structure block and a build scratch now, not in the first frame (on the iGPU with the game running, the first
 		// allocations took seconds: the game's GPU would have waited for them)
 		{
@@ -1498,6 +1834,8 @@ namespace {
 		vkDestroyInstance(vk.instance, nullptr);
 		return 0;
 	}
+
+#include "NvrRtReplay.inl"	// UNOFFICIAL 2026-11-03 (claude/rt-replay): RunReplay, --replay <capture>
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -1506,7 +1844,8 @@ int wmain(int argc, wchar_t** argv) {
 	for (int i = 1; i < argc; i++) {
 		if (!wcscmp(argv[i], L"--shm") && i + 1 < argc) return RunHelper(argv[i + 1]);
 		if (!wcscmp(argv[i], L"--probe")) return RunProbe();
+		if (!wcscmp(argv[i], L"--replay")) return RunReplay(argc, argv);
 	}
-	printf("NvrRtHelper: started by New Vegas Reloaded. By hand: --probe (can this PC run it?).\n");
+	printf("NvrRtHelper: started by New Vegas Reloaded. By hand: --probe (can this PC run it?), --replay <capture.nvrcap> (docs/next/RT-REPLAY.md).\n");
 	return 1;
 }

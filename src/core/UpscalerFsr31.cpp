@@ -169,7 +169,7 @@ namespace {
 		FSR3Constants	c = {};		// kept between frames: AMD reads last frame's sizes, jitter and phase count from it
 
 		bool	Fail(const char* why) {
-			Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: FSR 3.1: %s; FSR 3.1 is off for this session (FSR 2 runs instead)", why);
+			Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: FSR 3.1: %s; FSR 3.1 is off for this session (FSR 2 runs instead)", why);
 			failed = true;
 			return false;
 		}
@@ -279,7 +279,7 @@ namespace {
 		c = FSR3Constants();
 		const UInt64 renderBytes = (UInt64)inW * inH * (4 + 4 + 2 * 2 + 2 + 2 * 2 + 8 + 8 * 2 + 4) + (UInt64)halfW * halfH * (2 + 2 + 4 * 4 / 3);
 		const UInt64 displayBytes = (UInt64)outW * outH * (2 + 8 * 2 + 8);
-		Logger::Log("UNOFFICIAL NVR DXVK: FSR 3.1 resources made (render up to %ux%u, display %ux%u, about %u MB)", inW, inH, outW, outH,
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: FSR 3.1 resources made (render up to %ux%u, display %ux%u, about %u MB)", inW, inH, outW, outH,
 			(UInt32)((renderBytes + displayBytes) / (1024 * 1024)));
 		return true;
 	}
@@ -311,7 +311,7 @@ namespace {
 		GpuProfileScope gpu(timers[index], TheRenderManager->device);
 		DxvkCompute::PreLoad(bindings, count);	// the alflicker rule: managed textures on the GPU (the inputs are render targets; harmless)
 		if (FAILED(DxvkCompute::Extension()->Dispatch(&dispatch))) {
-			Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: FSR 3.1 pass %s failed to dispatch; FSR 3.1 is off for this session (FSR 2 runs instead)", Pipelines[index].name);
+			Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: FSR 3.1 pass %s failed to dispatch; FSR 3.1 is off for this session (FSR 2 runs instead)", Pipelines[index].name);
 			failed = true;
 			return false;
 		}
@@ -330,7 +330,7 @@ namespace {
 		ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 		ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
 		ID3D9NvrExtSampler* linearMips = DxvkCompute::MipSampler(false, NVR_EXT_ADDRESS_CLAMP);
-		if (!point || !linear || !linearMips) return Fail("its samplers could not be made (needs NVR DXVK extension 1.3 or newer)");
+		if (!point || !linear || !linearMips) return Fail("its samplers could not be made (needs Vegas Shaders DXVK extension 1.3 or newer)");
 
 		// ffx_fsr3upscaler.cpp fsr3upscalerDispatch, in its order.
 		const bool odd = parity != 0;

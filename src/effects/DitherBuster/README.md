@@ -103,7 +103,7 @@ Edge cases:
 
 ## 7. Vulkan path
 
-- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the NVR DXVK extension present. Technique 0 uses DitherBuster.frag,
+- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the Vegas Shaders DXVK extension present. Technique 0 uses DitherBuster.frag,
   technique 1 DitherBusterStable.frag. A refused pass makes the D3D9 technique run for the session.
 - Bindings (set 1): binding 0 = the picture. One LINEAR CLAMP sampler, its heap index in the push block.
 - Push block for technique 0: 0 TESR_ReciprocalResolution (vec4); 16 TESR_DitherBusterData (vec4); 32 sampler heap index (uint).

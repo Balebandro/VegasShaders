@@ -400,6 +400,9 @@
     <ClInclude Include="..\src\effects\DustMotes\DustMotes.h">
       <Filter>Effects</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\effects\LocalExposure\LocalExposure.h">
+      <Filter>Effects</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\effects\PBR\PBR.h">
       <Filter>Effects</Filter>
     </ClInclude>
@@ -730,6 +733,9 @@
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\DustMotes\DustMotes.cpp">
+      <Filter>Effects</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\effects\LocalExposure\LocalExposure.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\PBR\PBR.cpp">

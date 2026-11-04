@@ -101,7 +101,7 @@ Worked out from the compiled shader (D3DX, ps_3_0: Specks about 600 instruction 
 - MaxDistance near 1000 at 1080p: the farthest specks' discs can reach about 2 units, close to the 2.8-unit margin the wobble leaves inside a cell, so a far speck may rarely show a clipped edge.
 - First-person weapon: specks nearer than 24 units are not drawn, and the depth test keeps specks behind the weapon hidden.
 - RenderScale (FSR / DLSS LowResEffects): the passes draw into the rect like every pre-tonemap effect; the pixel size follows the drawn rows. The sun term is off in rect frames (no grid).
-- Under DXVK (with or without the NVR extension) the effect draws through D3D9 like any effect with no Vulkan port (no ExtRender), which DXVK translates; nothing extra is needed.
+- Under DXVK (with or without the Vegas Shaders extension) the effect draws through D3D9 like any effect with no Vulkan port (no ExtRender), which DXVK translates; nothing extra is needed.
 
 ## 9. What correct / wrong looks like
 

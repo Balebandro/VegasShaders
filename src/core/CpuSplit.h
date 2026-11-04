@@ -478,7 +478,7 @@ namespace CpuSplit {
 		PatchList(false);
 		MainInstalled = true;
 		Logger::Log("CPU SPLIT: on (diagnostic, F10 only). 'Upd'/'Swp'/'Post' lines are the game's own main-thread frame cut at its calls, 'Rnd' the "
-			"world render (NVR's passes inside), 'AI' the two AI threads (they run beside the main thread; 'AI join wait' is the main thread "
+			"world render (Vegas Shaders' passes inside), 'AI' the two AI threads (they run beside the main thread; 'AI join wait' is the main thread "
 			"waiting for them). Per-frame averages; the main-thread lines add up to the frame interval.");
 	}
 

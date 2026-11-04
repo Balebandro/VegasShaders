@@ -1052,6 +1052,6 @@ bool VolumetricCloudsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 		return ExtDrawTo(ext.Pipeline, &RenderTarget, 1, resources, count + 5, &push, sizeof(push), &rows);
 	}
 	if (!ExtDrawTo(ext.Pipeline, &RenderTarget, 1, resources, count + 5, &push, sizeof(push))) return false;
-	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as Vulkan passes.", Name);
+	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as Vulkan passes.", Name);
 	return true;
 }

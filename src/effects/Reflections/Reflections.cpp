@@ -888,7 +888,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 			bindings[_countof(ReflBindings) + 1] = ShaderCounters::Binding(ReflCounterSlot);
 			if (DebugReadback::Interface() && DxvkCompute::HasSpirv("ReflectionsTraceHiZCount"))
 				extTraceHiZCount.Pipeline = DxvkCompute::CreateGraphicsPipeline("ReflectionsTraceHiZCount", bindings, _countof(bindings), sizeof(ReflPush), true, 1, NVR_EXT_BLEND_NONE, false);
-			if (!extTraceHiZCount.Pipeline) Logger::Log("UNOFFICIAL Reflections: the Hi-Z trace's counting build is not available (needs NVR DXVK 1.5-debug and the shader file ReflectionsTraceHiZCount.spv); the normal trace runs.");
+			if (!extTraceHiZCount.Pipeline) Logger::Log("UNOFFICIAL Reflections: the Hi-Z trace's counting build is not available (needs the Vegas Shaders DXVK fork 1.5-debug and the shader file ReflectionsTraceHiZCount.spv); the normal trace runs.");
 		}
 		if (extTraceHiZCount.Pipeline) {
 			D3DSURFACE_DESC target = {};
@@ -1131,7 +1131,7 @@ std::string ReflectionsEffect::RtStatusText() const {
 	if (!Enabled) return "Reflections off";
 	if (!Settings.RtEnabled) return "Reflections on, RT off ([Shaders.Reflections.RT] Enabled false): the screen-space trace alone";
 	const char* why = ExtFailed ? "its Vulkan passes failed (D3D9 fallback, no RT)" : rtTraceFailed ? "an RT pass or image could not be made (logged): the normal trace" :
-		!RtPassesWanted() ? "the NVR DXVK passes are off (NvrDxvkPasses off, or no NVR DXVK): the normal trace" :
+		!RtPassesWanted() ? "the Vegas Shaders DXVK passes are off (NvrDxvkPasses off, or no Vegas Shaders DXVK fork): the normal trace" :
 		!RtCoreClient::Ready() && !Settings.RtSplitTest ? "the RT core is not running (no helper, or it is still starting): the normal trace" : nullptr;
 	char t[500];
 	sprintf_s(t, "Reflections on, RT on: %s | last frame: %s | frames traced with RT %u, frames the helper traced nothing %u | MaxRoughness %.2f, Distance %.0f, "

@@ -13,6 +13,7 @@ float4 TESR_ReciprocalResolution;
 float4 TESR_FlashLightTuning;		// x near fade, y soft edges, z hotspot limit, w cookie strength
 float4 TESR_FlashLightComposite;	// x source buffer is already linear; UNOFFICIAL (EdgeFix): y 1 = also the beam's shaft, zw 1 / beam buffer size
 float4 TESR_VolumetricControl;		// x beam strength, 0 when the FlashlightBeam effect is off
+float4 TESR_FlashLightRT;			// UNOFFICIAL 2026-11-04: x 1 = read the traced shadow (TESR_RtFlashShadow) in place of the shadow map (not drawn while traced)
 
 #define FL_NEARFADE			TESR_FlashLightTuning.x
 #define FL_SOFTEDGE			TESR_FlashLightTuning.y
@@ -30,6 +31,9 @@ sampler2D TESR_NormalsBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; 
 sampler2D TESR_ShadowSpotlightBuffer0 : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_SpotLightTexture : register(s6) < string ResourceName = "Effects\Flashlight.png"; > = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 sampler2D TESR_VolumetricBuffer : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-04 RenderScale < 1: RT lamp shadows Flashlight's traced shadow (RtFlashTrace.comp: R32F, 1 lit / 0 blocked, screen space;
+// in a rect frame in the rect layout, as this pass' uv). Read only with TESR_FlashLightRT.x 1 (the Vulkan path reads it in native frames).
+sampler2D TESR_RtFlashShadow : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 
 
 struct VSOUT
@@ -88,6 +92,8 @@ float4 Shadows(VSOUT IN) : COLOR0
 	float4 lsc = clipToTex(mul(wp, TESR_FlashLightViewProjTransform));
 	float sDepth = tex2D(TESR_ShadowSpotlightBuffer0, lsc.xy).r;
 	float occl = sDepth + 0.05 * dist > dist; // BIAS to reduce shadowing artefacts
+	// UNOFFICIAL 2026-11-04 the traced shadow at the pixel (FlashlightShadowsRT.frag's lookup), its taps kept inside the drawn rect
+	if (TESR_FlashLightRT.x > 0.5) occl = tex2D(TESR_RtFlashShadow, clampToRectIfOn(IN.UVCoord, TESR_ReciprocalResolution.xy)).r;
 
 	if (dist < 1 && lsc.x > 0.0 && lsc.x < 1.0 && lsc.y > 0.0 && lsc.y < 1.0) return float4(occl.rrr, 1);
 	return float4(1.0, 1.0, 1.0, 1.0);

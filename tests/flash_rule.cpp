@@ -151,7 +151,7 @@ int main() {
 		}
 		v = Judge(bloom[0], bloom[1], bloom[2]);
 		r = Attribute(in, 4, v.mask, v.sign, RelativeJump(bloom[0], bloom[1], bloom[2], v.mask, v.sign));
-		CHECK(v.flash && r.source == 0, "a dip in the game's own frame is attributed to the scene before NVR (source %d)", r.source);
+		CHECK(v.flash && r.source == 0, "a dip in the game's own frame is attributed to the scene before Vegas Shaders (source %d)", r.source);
 
 		// 16. A stage missing from one frame (a late read-back) is skipped and the next stage is measured against the last probed one.
 		const StageInput gap[4] = { in[0], { fog[0], nullptr, fog[2] }, in[2], in[3] };

@@ -32,7 +32,7 @@ Samplers are bound by their declared register numbers (s0 to s12) and one name-b
 
 | Name | Register | Holds | Filter / address |
 |---|---|---|---|
-| TESR_DepthBuffer | s0 | NVR linear depth: stored value multiplied by the far plane distance (TESR_CameraData y) gives view distance in game units | linear, clamp |
+| TESR_DepthBuffer | s0 | Vegas Shaders linear depth: stored value multiplied by the far plane distance (TESR_CameraData y) gives view distance in game units | linear, clamp |
 | TESR_NormalsBuffer | s1 | per-pixel normal, encoded 0..1 (x2-1 gives a view-space normal, then multiplied by TESR_ViewTransform to get world space) | point, clamp |
 | TESR_ShadowCubeMapBuffer0 .. TESR_ShadowCubeMapBuffer10 | s2 .. s12 (slot k is register s(k+2)) | the lamp's shadow cube map of lamp slot k: the nearest caster's distance from the lamp, divided by the lamp's radius, per direction. A texel of 0 or 1 means nothing was drawn there (no test) | linear, clamp, cube |
 | NVR_LampMaskHalf | s13 (bound by name, not declaration order) | the half-resolution mask in R and the full-resolution depth in G (format G16R16F, half size rounded up) | point, clamp in the effect file (see section 9) |
@@ -115,7 +115,7 @@ The effect has no settings section of its own. Every value below is read by the 
 |---|---|---|---|
 | LampMaskScissor | bool | true | Draws the merged pass only inside the screen rectangle its lamps can reach; outside it stays 0. Same picture. Does not apply when extra lamps exist, or with unusual camera matrices (then the whole pass is drawn) |
 | LampMaskScissorCheck | int | 0 | Development-only diagnostic. Leave 0. Does not change the picture |
-| NvrDxvkPasses | bool | toml true (the code's own default is false) | Runs this effect's passes as Vulkan passes when the NVR DXVK extension is present (section 7) |
+| NvrDxvkPasses | bool | toml true (the code's own default is false) | Runs this effect's passes as Vulkan passes when the Vegas Shaders DXVK extension is present (section 7) |
 | NvrDxvkVariants | bool | true | Uses the compile-time mode variant files where they exist (section 7) |
 | NvrDxvkKeepD3D9 | string | "" | Comma list of effect names that keep their D3D9 passes. Naming PointShadows here forces the D3D9 passes |
 | NvrDxvkTestSuffix | string | "" | Test only: tries a variant file with this suffix added to the mode name first (section 7) |
@@ -175,7 +175,7 @@ Rect frames (RenderRect, TESR_RenderScale): the Vulkan route is not used in a re
 
 Jitter (TAA): the pass uses the uv it is given and does not remove any jitter itself. Whether the uv it gets is jittered is not checked here (section 9).
 
-Reversed depth: the depth is the linear NVR depth (not a reversed buffer). The pass does not handle reversed depth.
+Reversed depth: the depth is the linear Vegas Shaders depth (not a reversed buffer). The pass does not handle reversed depth.
 
 HDR vs LDR: the scene is HDR and this pass does not touch scene colour. The buffer is G16R16 (unsigned normalised, 0 to 1), so the mask is clamped to 0..1 on write, and the additive batches are clamped too. The contact multiply can only darken.
 
@@ -214,7 +214,7 @@ Wave 3 (2026-11-02): PointShadows.spv, the four -m variants and the five test va
 ### 7.2 How the C++ chooses D3D9 or Vulkan
 
 Checked in the order the engine does it (src\core\EffectRecord.cpp, the effect's Render path; src\core\DxvkCompute.cpp; src\core\Sm6Pass.cpp):
-1. The Vulkan draw is tried first when the passes are on: NvrDxvkPasses on, not a rect frame, and the NVR DXVK extension available. Those are the conditions of DxvkCompute's passes-on check.
+1. The Vulkan draw is tried first when the passes are on: NvrDxvkPasses on, not a rect frame, and the Vegas Shaders DXVK extension available. Those are the conditions of DxvkCompute's passes-on check.
 2. The effect is skipped from Vulkan when NvrDxvkKeepD3D9 names it ("PointShadows").
 3. The Vulkan draw is skipped for a technique whose passes all have SM6 builds while NvrSm6Shaders is on (technique 0 only has one).
 4. The effect's Vulkan draw returns false (so the D3D9 technique runs for that draw) when: technique index above 4; the extension or the linear and point samplers are missing; the scissor test is on (the Vulkan passes ignore the scissor); a texture is missing; a required constant is missing.

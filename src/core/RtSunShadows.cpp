@@ -63,6 +63,9 @@ namespace {
 	IDirect3DSurface9*	penumbraSurface = nullptr;
 	ID3D9NvrExtPipeline* penumbraPipeline = nullptr;
 	bool		penumbraTried = false;
+	// UNOFFICIAL 2026-11-04 RenderScale < 1 (docs/next/RT-RENDERSCALE.md): the traced part of the traced-size textures this frame (the
+	// RenderRect's top-left tw x th; the whole of them in a native frame), for Penumbra's footprint and its taps
+	UINT		tracedRectW = 0, tracedRectH = 0;
 	ID3D9NvrExtPipeline* combine[3] = {};	// [0] multiply, [1] write red (DebugView 1 / 3), [2] write all (DebugView 4, grey)
 	bool		combineTried[3] = {};
 	bool		tracedForDebug = false;		// this frame's visibility is there for RenderDebug
@@ -121,7 +124,7 @@ namespace {
 			imageCloud = RtCore::AddImage("NVR RT sun cloud shadow", desc.Width, desc.Height, NVR_EXT_SHARED_RGBA16F);
 			imageCloudSize = desc.Width;
 		}
-		else if (S.cloudShadows) Logger::Log("UNOFFICIAL NVR DXVK: RT sun CloudShadows: no volumetric cloud shadow map at the helper's start (Volumetric Clouds and their Shadows on?); off until the next start.");
+		else if (S.cloudShadows) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun CloudShadows: no volumetric cloud shadow map at the helper's start (Volumetric Clouds and their Shadows on?); off until the next start.");
 	}
 
 	void Record(IDirect3DDevice9* Device) {
@@ -156,15 +159,17 @@ namespace {
 		// rect size is then the screen's, the depth is read in the rect), the result goes to the same top-left part of the full-size
 		// visibility texture, which the combine copies texel for texel into the rect-layout shadow buffer. (Before: the full grid's
 		// uv read rect pixels as screen points: wrong positions, round 20's "RT barely changes the picture at RenderScale 0.67".)
-		// Off: the rect is the whole screen, exactly as before. Not yet rect-aware: SunAngle's denoiser and Penumbra.
+		// Off: the rect is the whole screen, exactly as before. (SunAngle's denoiser: RtDenoise, rect-aware 2026-11-03; Penumbra:
+		// RunPenumbra, 2026-11-04.)
 		const UINT rw = RenderRect::Width(fw), rh = RenderRect::Height(fh);
 		static int stateLogs = 0;
 		if (stateLogs < 3 && (frames % 120) == 5) {
 			stateLogs++;
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun shadows Record: RenderRect %s (scale %.2f x %.2f, in use %d), traced grid %ux%u of %ux%u.", RenderRect::On ? "ON" : "off",
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows Record: RenderRect %s (scale %.2f x %.2f, in use %d), traced grid %ux%u of %ux%u.", RenderRect::On ? "ON" : "off",
 				RenderRect::ScaleX, RenderRect::ScaleY, RenderRect::InUse(TheFrameRateManager->FrameNumber) ? 1 : 0, (std::max)(1u, rw / scale), (std::max)(1u, rh / scale), w, h);
 		}
 		const UINT tw = (std::max)(1u, rw / scale), th = (std::max)(1u, rh / scale);
+		tracedRectW = tw; tracedRectH = th;	// (2026-11-04) Penumbra's
 		PassConstants c = {};
 		c.size[0] = (float)tw; c.size[1] = (float)th; c.size[2] = 1.0f / tw; c.size[3] = 1.0f / th;
 		c.full[0] = (float)rw; c.full[1] = (float)rh;	// depth / normals are read at full size (in the rect)
@@ -193,7 +198,7 @@ namespace {
 		static int cloudLogs = 0;
 		if (S.cloudShadows && cloudLogs < 3 && (frames % 300) == 30) {
 			cloudLogs++;
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun CloudShadows: image %d (%u texels), map valid %d size %u range %.0f m base %.0f m centre %.0f %.0f m light %.3f %.3f %.3f, "
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun CloudShadows: image %d (%u texels), map valid %d size %u range %.0f m base %.0f m centre %.0f %.0f m light %.3f %.3f %.3f, "
 				"strength %.3f, camera %.0f %.0f %.0f m", imageCloud, imageCloudSize, clouds && clouds->rtMapValid ? 1 : 0, clouds ? clouds->shadowMapSize : 0u,
 				clouds ? clouds->rtMapRange : 0.0f, clouds ? clouds->rtMapBase : 0.0f, clouds ? clouds->rtMapCentre[0] : 0.0f, clouds ? clouds->rtMapCentre[1] : 0.0f,
 				clouds ? clouds->rtMapLight[0] : 0.0f, clouds ? clouds->rtMapLight[1] : 0.0f, clouds ? clouds->rtMapLight[2] : 0.0f,
@@ -230,15 +235,15 @@ namespace {
 		static int rectLogs = 0;
 		if (tracedThisFrame && RenderRect::On && rectLogs < 2) {
 			rectLogs++;
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun shadows traced in the RenderScale rect: %ux%u of %ux%u (scale %.2f x %.2f).", tw, th, w, h, RenderRect::ScaleX, RenderRect::ScaleY);
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows traced in the RenderScale rect: %ux%u of %ux%u (scale %.2f x %.2f).", tw, th, w, h, RenderRect::ScaleX, RenderRect::ScaleY);
 		}
 		if (tracedThisFrame) lastTracedFrame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;	// UNOFFICIAL 2026-11-01
 		if (tracedThisFrame && c.alpha[3] > 0.0f) hitThisFrame = RtCore::CopyOut(imageHit, hitSurface, tw, th);
 		if (tracedThisFrame && frames++ == 0)
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun shadows traced (%ux%u, Mode %d: %s, range %.0f, DebugView %d).", w, h, S.mode,
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows traced (%ux%u, Mode %d: %s, range %.0f, DebugView %d).", w, h, S.mode,
 				S.mode == 1 ? "replace the cascades inside the range" : "combine with the cascades", S.range, S.debugView);
 		if (tracedThisFrame && frames == 31)
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun constants: forward %.3f %.3f %.3f (farZ %.0f), right %.3f %.3f %.3f, up %.3f %.3f %.3f, origin %.2f %.2f %.2f, "
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun constants: forward %.3f %.3f %.3f (farZ %.0f), right %.3f %.3f %.3f, up %.3f %.3f %.3f, origin %.2f %.2f %.2f, "
 				"sun %.3f %.3f %.3f (up %.0f), camera position %.0f %.0f %.0f", c.forward[0], c.forward[1], c.forward[2], c.forward[3], c.right[0], c.right[1],
 				c.right[2], c.up[0], c.up[1], c.up[2], c.origin[0], c.origin[1], c.origin[2], c.sun[0], c.sun[1], c.sun[2], c.sun[3],
 				TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z);
@@ -269,7 +274,7 @@ namespace {
 		desc.pDebugName = "RtSunPenumbra";
 		if (FAILED(ext->CreateGraphicsPipeline(&desc, &penumbraPipeline))) {
 			penumbraPipeline = nullptr;
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun Penumbra: the pass could not be made (Compute\\RtSunPenumbra.spv; the DXVK log says why)");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun Penumbra: the pass could not be made (Compute\\RtSunPenumbra.spv; the DXVK log says why)");
 		}
 		return penumbraPipeline;
 	}
@@ -284,7 +289,7 @@ namespace {
 		if (!pipeline || !depth || !normals || !cameraData || !hitThisFrame || !hitTexture || !DxvkCompute::PointClamp()) {
 			if (told < 3) {
 				told++;
-				Logger::Log("UNOFFICIAL NVR DXVK: RT sun Penumbra not run: pipeline %d depth %d normals %d camera %d blockers this frame %d blocker texture %d sampler %d",
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun Penumbra not run: pipeline %d depth %d normals %d camera %d blockers this frame %d blocker texture %d sampler %d",
 					pipeline ? 1 : 0, depth ? 1 : 0, normals ? 1 : 0, cameraData ? 1 : 0, hitThisFrame ? 1 : 0, hitTexture ? 1 : 0, DxvkCompute::PointClamp() ? 1 : 0);
 			}
 			return false;
@@ -301,13 +306,28 @@ namespace {
 		if (!penumbraSurface) return false;
 		static GpuTimer timer("  RT sun penumbra");
 		GpuProfileScope gpu(timer, Device);
+		// UNOFFICIAL 2026-11-04 RenderScale < 1 (docs/next/RT-RENDERSCALE.md): in a rect frame the trace fills the top-left tw x th part of
+		// the w x h textures. The footprint: a traced pixel's world size is the view height over th pixels (not h: the radius came out
+		// 1 / scale too wide), and the largest radius (full-size pixels of the output) is that many x the scale in traced pixels, so the
+		// penumbra covers the same part of the upscaled screen as at RenderScale 1. The taps stay inside the rect (extra.yz the last
+		// texel centre; past it hold older frames' values) and texels past it write 0 (extra.w 1). Native: th = h, scale 1, no clamp.
+		const UINT tw = (std::min)((std::max)(tracedRectW, 1u), w), th = (std::min)((std::max)(tracedRectH, 1u), h);
+		const bool rect = tw < w || th < h;
+		const float rectScale = rect ? (float)th / (float)h : 1.0f;
 		struct { float params[4], size[4], extra[4]; UInt32 samplerIndex, pad[3]; } push = {};
 		push.params[0] = tanf(0.5f * S.sunAngle * 0.0174532925f);
 		push.params[1] = cameraData->y;
 		push.params[2] = S.penumbraMaxRadius / (S.halfResolution ? 2.0f : 1.0f);	// the setting is in full-size pixels
+		if (rect) push.params[2] *= rectScale;
 		push.params[3] = S.debugView == 11 ? 1.0f : S.debugView == 12 ? 2.0f : 0.0f;	// 12: a flat 0.25 (the pass' output reaches the screen)
-		push.size[0] = 1.0f / w; push.size[1] = 1.0f / h; push.size[2] = (float)h; push.size[3] = TheRenderManager->projMatrix._22;
+		push.size[0] = 1.0f / w; push.size[1] = 1.0f / h; push.size[2] = (float)th; push.size[3] = TheRenderManager->projMatrix._22;
 		push.extra[0] = 0.75f;
+		if (rect) { push.extra[1] = ((float)tw - 0.5f) / (float)w; push.extra[2] = ((float)th - 0.5f) / (float)h; push.extra[3] = 1.0f; }
+		static int rectLogs = 0;
+		if (rect && rectLogs < 2) {
+			rectLogs++;
+			Logger::Log("UNOFFICIAL NVR DXVK: RT sun Penumbra in the RenderScale rect: %ux%u of %ux%u, max radius %.1f traced px (scale %.3f).", tw, th, w, h, push.params[2], rectScale);
+		}
 		NVR_EXT_RESOURCE_BINDING bindings[5] = {};
 		IUnknown* images[4] = { Source, hitTexture, depth, normals };
 		for (UINT i = 0; i < 4; i++) { bindings[i].Slot = i; bindings[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[i].pResource = images[i]; }
@@ -323,7 +343,7 @@ namespace {
 		const HRESULT hr = DxvkCompute::Extension()->Draw(&draw);
 		if (told < 6) {
 			told++;
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun Penumbra: pass %ux%u, tan %.5f, farZ %.0f, max radius %.1f px, debug %.0f: %s (0x%08X)", w, h, push.params[0],
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun Penumbra: pass %ux%u, tan %.5f, farZ %.0f, max radius %.1f px, debug %.0f: %s (0x%08X)", w, h, push.params[0],
 				push.params[1], push.params[2], push.params[3], SUCCEEDED(hr) ? "drawn" : "Draw FAILED", (UInt32)hr);
 		}
 		return SUCCEEDED(hr);
@@ -354,7 +374,7 @@ namespace {
 		desc.pDebugName = which == 0 ? "RtSunCombine (multiply)" : which == 1 ? "RtSunCombine (write)" : "RtSunCombine (debug grey)";
 		if (FAILED(ext->CreateGraphicsPipeline(&desc, &combine[which]))) {
 			combine[which] = nullptr;
-			Logger::Log("UNOFFICIAL NVR DXVK: RT sun shadows: the combine pass could not be made (the DXVK log says why)");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows: the combine pass could not be made (the DXVK log says why)");
 		}
 		return combine[which];
 	}

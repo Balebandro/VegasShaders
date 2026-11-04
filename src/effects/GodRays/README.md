@@ -107,7 +107,7 @@ in the headers; the code uses the name without it). Defaults are the toml values
 | Shaders.GodRays.Coloring | RayR, RayG, RayB | float | 1.0 each | custom ray colour (linear-light conversion applied) |
 | Shaders.GodRays.Coloring | Saturate | float | 0.0 | 0 = use the sun colour; 1 = use only the custom colour |
 | Main.Main.ReducedQuality | GodRaysLowRes | bool | false | rays computed at quarter instead of half resolution (4 times fewer pixels; softer rays, shimmer in thin foliage) |
-| Main.Main.Performance | NvrDxvkPasses | bool | true | the NVR DXVK Vulkan route for the passes (section 7); also used by other effects |
+| Main.Main.Performance | NvrDxvkPasses | bool | true | the Vegas Shaders DXVK Vulkan route for the passes (section 7); also used by other effects |
 | Main.Main.Quality | MaxQuality | bool | false | Max Quality: the ray buffers are made at full resolution (divisor 1) instead of half (or quarter). Needs restart. |
 | Main.Transitions.Main | TransitionCurvePower | float | 1.0 | shape of the day/night curve used for the ray strength |
 | Shaders.Sky.Main | SunsetR, SunsetG, SunsetB | float | (sky values) | the sunset colour boost (through TESR_SunsetColor) |
@@ -234,12 +234,12 @@ combine's input and output texel by texel; 3 validates the SkipIdle query agains
 Selection (C++, effects/GodRays.cpp, the effect's render entry):
 - The Vulkan route is tried first when: the effect has not failed on Vulkan this session, the dedicated path has not failed, and
   DxvkCompute::PassesOn() is true. PassesOn() = [Main.Main.Performance] NvrDxvkPasses (default true) AND no RenderRect active AND the
-  NVR DXVK extension is present ("Available"). Test builds with ProbeLog above 0 skip it.
+  Vegas Shaders DXVK extension is present ("Available"). Test builds with ProbeLog above 0 skip it.
 - The Vulkan dedicated path (RenderDedicated with the Vulkan flag) also needs: no scissor on the device, the five pipelines made, the
   two samplers, the depth texture (CombineDepth's combined depth), the scene texture, the constants present, and the target sizes
   as the D3D9 path requires. If any fails the same frame goes to the D3D9 dedicated path, then to the legacy path.
 - The NvrDxvkKeepD3D9 setting (a comma list of effect names, default empty) can keep this effect on D3D9 (test tool).
-- Full-screen Vulkan passes (the combine) need NVR DXVK extension 1.1 or later (the log says so). Without it the combine fails and
+- Full-screen Vulkan passes (the combine) need Vegas Shaders DXVK extension 1.1 or later (the log says so). Without it the combine fails and
   the frame goes to D3D9.
 - A failed Vulkan pass: logged as "pass GodRays failed to draw: its D3D9 technique is used from now on". The Vulkan path is then off
   for the session. Nothing of the frame has been committed at that point, so D3D9 draws the whole frame.
@@ -344,7 +344,7 @@ at the first step). Quarter resolution (GodRaysLowRes) is about 4 times cheaper.
    traced (the frame function's menu branch was not read).
 8. D3D9 texture binding for s0 to s3: the effect's shared texture slots are bound by the base effect's constant-table call from the
    registered texture list; that list for GodRays was not traced.
-9. The NVR DXVK extension version shipped now: the combine needs 1.1; the version in the current extension was not checked.
+9. The Vegas Shaders DXVK extension version shipped now: the combine needs 1.1; the version in the current extension was not checked.
 10. The legacy (packed) path: reachable only after a dedicated-path failure, and the rect-frame case draws nothing there. Its real
     frequency in use was not measured.
 

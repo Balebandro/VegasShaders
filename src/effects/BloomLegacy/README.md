@@ -87,7 +87,7 @@ Output: the combined picture in the chain (or the game target), same size as the
 
 ## 7. Vulkan path
 
-- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the NVR DXVK extension. The effect's ExtRender runs the four passes
+- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the Vegas Shaders DXVK extension. The effect's ExtRender runs the four passes
   when the flag is on and the effect has not failed. All pipelines are made before any pass is drawn, so a refused pipeline leaves the
   frame to the D3D9 technique. The Vulkan path needs technique 0 and the source buffer to be the chain's source surface.
 - Files (src/hlsl/NewVegas/Compute): BloomLegacyBloom.frag (pass 1); BloomLegacyBlur.frag (passes 2 and 3, direction from the push block);

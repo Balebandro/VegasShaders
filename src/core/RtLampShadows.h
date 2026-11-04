@@ -67,6 +67,10 @@ namespace RtLampShadows {
 		float reproject[4][4];					// scene-space point -> the previous trace's clip space (Reproject)
 		float many2[4];							// x frame number, y history depth tolerance
 		float jitter[4];						// (2026-11-03) xy the depth's jitter (TAAEffect::DepthJitterUV, screen uv), every variant
+		// UNOFFICIAL 2026-11-04 RenderScale < 1 (docs/next/RT-RENDERSCALE.md), ManyLights' two variants: xy the result / history images'
+		// full size. Reproject's uv is pre-scaled into the previous trace's rect of the full-size images (Submit), so the history texel
+		// is uv x this (not x size, the rect's); the history is only used at the same scale, so that rect is this frame's (size.xy).
+		float rect[4];
 	};
 	static_assert(sizeof(PassConstants) <= 512, "RtCore: 512 bytes of constants a pass");
 
@@ -241,7 +245,7 @@ namespace RtLampShadows {
 		else if (!TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled"))
 			strcpy_s(Status, "off: needs the per-object lamp shadows ([Shaders.ShadowsInteriors.Forward] Enabled)");
 		else if (!ext || FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtRt), (void**)&rt)) || !rt)
-			strcpy_s(Status, "off: needs NVR DXVK with the RT core (patch 0028)");
+			strcpy_s(Status, "off: needs Vegas Shaders DXVK with the RT core (patch 0028)");
 		else {
 			rt->Release();
 			CompiledIn = true;
@@ -549,6 +553,9 @@ namespace RtLampShadows {
 				const D3DXVECTOR4& spot = TheShaderManager->SpotLightPosition[0];
 				struct { float size[4], forward[4], right[4], up[4], origin[4], light[4], params[4]; } f = {};
 				f.size[0] = (float)tw; f.size[1] = (float)th;
+				// UNOFFICIAL 2026-11-04 the depth's jitter on the ray uv (as the lamp traces, PassConstants.jitter); the result is in the rect
+				// layout in rect frames, which Flashlight's D3D9 shadow pass reads there (TESR_RtFlashShadow, FlashlightEffect::TechniqueThisFrame)
+				if (TAAEffect* taa = TheShaderManager->Effects.TAA) { const D3DXVECTOR2 fj = taa->DepthJitterUV(); f.size[2] = fj.x; f.size[3] = fj.y; }
 				f.forward[0] = fv._13; f.forward[1] = fv._23; f.forward[2] = fv._33; f.forward[3] = cameraData->y;
 				f.right[0] = fv._11 / fp._11; f.right[1] = fv._21 / fp._11; f.right[2] = fv._31 / fp._11;
 				f.up[0] = fv._12 / fp._22; f.up[1] = fv._22 / fp._22; f.up[2] = fv._32 / fp._22;
@@ -557,6 +564,7 @@ namespace RtLampShadows {
 				f.params[0] = (std::max)(TheSettingManager->GetSettingF(kSection, "StartOffset"), 0.0f);
 				f.params[1] = (std::max)(TheSettingManager->GetSettingF(kSection, "FlashlightStop"), 0.0f);
 				f.params[2] = (float)(0xFF & ~MaskAlphaTested & ~MaskGlass);	// people (0x20) block it; lamp glass never does
+				f.params[3] = (std::max)(TheSettingManager->GetSettingF(kSection, "StartOffsetPerUnit"), 0.0f);	// (2026-11-04) as the lamp rays
 				const int flashImages[3] = { imageDepth, imageNormals, imageFlash };
 				if (RtCore::AddPass(flashShader, flashImages, 3, 0x4, &f, sizeof(f), (tw + 7) / 8, (th + 7) / 8))
 					FlashThisFrame = RtCore::CopyOut(imageFlash, FlashSurface);
@@ -637,7 +645,22 @@ namespace RtLampShadows {
 			c.params2[3] = (float)(64 + ExtraCount);	// ids 0 .. 63 + the other lamps (empty slots have reach 0)
 			// ManyLightsOneRay: one ray a pixel (RtLampTraceRestir.spv), else RtLampTraceMany.spv; the history only from the same variant
 			const bool oneRay = OneRayReady() && TheSettingManager->GetSettingI(kSection, "ManyLightsOneRay") != 0;
-			const bool history = TracedMany && TracedOneRay == oneRay && Traced.valid && Mode > 0.0f;	// Reproject (Submit) maps into the previous (ManyLights) trace
+			// (2026-11-04) and only at the scale it was traced at: a RenderScale change or a rect <-> native frame restarts the history
+			// (its texels are another layout); RenderScale 1: always 1 = 1, as before
+			const bool sameScale = Traced.sx == (float)tw / (float)w && Traced.sy == (float)th / (float)h;
+			const bool history = TracedMany && TracedOneRay == oneRay && Traced.valid && Mode > 0.0f && sameScale;	// Reproject (Submit) maps into the previous (ManyLights) trace
+			static int restartLogs = 0;
+			if (TracedMany && Traced.valid && !sameScale && restartLogs < 4) {
+				restartLogs++;
+				Logger::Log("UNOFFICIAL RT lamp shadows: ManyLights history restarted: traced scale %.3f x %.3f -> %.3f x %.3f (RenderScale change or rect <-> native)",
+					Traced.sx, Traced.sy, (float)tw / (float)w, (float)th / (float)h);
+			}
+			c.rect[0] = (float)w; c.rect[1] = (float)h;
+			static int rectLogs = 0;
+			if (tw < w && rectLogs < 2) {
+				rectLogs++;
+				Logger::Log("UNOFFICIAL RT lamp shadows: ManyLights (%s) traced in the RenderScale rect: %ux%u of %ux%u, history %d.", oneRay ? "one ray" : "many", tw, th, w, h, history ? 1 : 0);
+			}
 			c.many[0] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsRays"), 1), 4);
 			c.many[1] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsHistory"), 1), 64);
 			c.many[2] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsSpatial"), 0), 2);
@@ -694,7 +717,7 @@ namespace RtLampShadows {
 				SkippedCubes = 0;
 			}
 			if (FramesTraced++ == 0)
-				Logger::Log("UNOFFICIAL NVR DXVK: RT lamp shadows traced, ManyLights (%ux%u, %d lamps, %s).", w, h, LampCount, oneRay ? "one ray a pixel" : "2 exact + rest rays");
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced, ManyLights (%ux%u, %d lamps, %s).", w, h, LampCount, oneRay ? "one ray a pixel" : "2 exact + rest rays");
 			return;
 		}
 		// UNOFFICIAL 2026-10-29 Filter: the soft edges' noise (LampRadius, 1 ray) smoothed per lamp (RtLampFilter.comp) before the copy out
@@ -748,7 +771,7 @@ namespace RtLampShadows {
 			SkippedCubes = 0;
 		}
 		if (FramesTraced++ == 0)
-			Logger::Log("UNOFFICIAL NVR DXVK: RT lamp shadows traced (%ux%u, %d lamps, %d rays).", w, h, LampCount, (int)c.params[0]);
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced (%ux%u, %d lamps, %d rays).", w, h, LampCount, (int)c.params[0]);
 	}
 
 	// RtCore's mask hook (the FULL mask, replacing the core's land 0x01 / objects 0x02): a lamp's glass or model gets ONLY its own bit,
@@ -815,7 +838,7 @@ namespace RtLampShadows {
 				desc.pDebugName = "RtLampRepack";
 				if (FAILED(ext->CreateGraphicsPipeline(&desc, &repack))) repack = nullptr;
 			}
-			if (!repack) Logger::Log("UNOFFICIAL RT lamp shadows: Denoise off: the repack pass could not be made (RtLampRepack.spv / NVR DXVK)");
+			if (!repack) Logger::Log("UNOFFICIAL RT lamp shadows: Denoise off: the repack pass could not be made (RtLampRepack.spv / Vegas Shaders DXVK)");
 		}
 		ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 		UseRepacked = false;
@@ -881,7 +904,7 @@ namespace RtLampShadows {
 				desc.pDebugName = "RtLampMaskCombine";
 				if (FAILED(ext->CreateGraphicsPipeline(&desc, &combine))) combine = nullptr;
 			}
-			if (!combine) Logger::Log("UNOFFICIAL RT lamp shadows: Exteriors off: the mask pass could not be made (RtLampMaskCombine.spv / NVR DXVK)");
+			if (!combine) Logger::Log("UNOFFICIAL RT lamp shadows: Exteriors off: the mask pass could not be made (RtLampMaskCombine.spv / Vegas Shaders DXVK)");
 		}
 		ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 		if (!combine || !point) { ExteriorLive = false; return; }

@@ -289,7 +289,7 @@ namespace EffectSelfTest {
 				"%d blocks (spill off between each of %d settings) x (%d frames to settle + %d read), read at a quarter of the screen size; "
 				"a setting disturbed by something moving runs once more at the end; the last %d blocks are pictures only.%s",
 				RunName, Plan.Blocks(), (int)ConfigCount - 1, (int)Settle, (int)Measure, (int)(ConfigCount - FirstPictureOnly),
-				BloomBracket ? " Three blocks before them run without bloom." : " NVR's bloom is off: no bloom-off bracket.");
+				BloomBracket ? " Three blocks before them run without bloom." : " Vegas Shaders' bloom is off: no bloom-off bracket.");
 			Logger::Log("NEON SELF TEST %s: your settings: NeonSpill %.2f%s, Reach %.2f, LightLevel %.2f, Near %.2f, Far %.2f, BrightCap %.1f, Memory %.1f s, "
 				"SeparateDepth %.0f, HardEdges %.0f, HoldAfterTurn %.2f s, CapSceneLight %.0f, MaskSpillOnly %.0f, Debug %d (shown as 0 during the test).",
 				RunName, User.neonSpill, User.neonSpill > 0.0f ? "" : " (off: the test uses 2.0 for the spill-on settings)", User.spillReach, User.spillLightLevel,
@@ -654,7 +654,7 @@ namespace EffectSelfTest {
 				"(the ring round them %.0f%% / %.0f%%; brightness x%.2f / x%.2f). The difference is bloom's; what is lost without bloom is the tonemap's.",
 				RunName, 100.0f * withBloom.stable.lightsColour, 100.0f * noBloom.stable.lightsColour, 100.0f * withBloom.stable.ringColour,
 				100.0f * noBloom.stable.ringColour, withBloom.stable.lightsRatio, noBloom.stable.lightsRatio);
-		else if (!BloomBracket) Logger::Log("NEON SELF TEST %s SUMMARY: bloom: not measured (NVR's bloom is off)", RunName);
+		else if (!BloomBracket) Logger::Log("NEON SELF TEST %s SUMMARY: bloom: not measured (Vegas Shaders' bloom is off)", RunName);
 		// critic-review-8: the bracket's sanity check. Before tonemapping bloom is not applied yet, so "your settings, bloom off"
 		// (against its bloom-off references) must equal "your settings" within the noise.
 		const SelfTestCore::Result& pre1 = d.results[YourSettings], &pre11 = d.results[YoursBloomOff];

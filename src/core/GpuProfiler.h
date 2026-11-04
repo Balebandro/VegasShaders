@@ -407,7 +407,7 @@ private:
 		}
 		char detail[512] = {};
 		if (SpikeDetail) SpikeDetail(detail, sizeof(detail));
-		Logger::Log("FRAME SPIKE %.1f ms (typical %.1f ms) %s | NVR CPU timers over 0.75 ms in it: %s%s",
+		Logger::Log("FRAME SPIKE %.1f ms (typical %.1f ms) %s | Vegas Shaders CPU timers over 0.75 ms in it: %s%s",
 			ms, Typical, nearTransition ? "near a cell change or loading" : "during steady play", used ? slow : "none", detail);
 #else
 		(void)ms; (void)nearTransition;

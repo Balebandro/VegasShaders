@@ -251,6 +251,7 @@ public:
 		SandstormEffect*		Sandstorm;	// UNOFFICIAL: from Physically-Based-Reloaded (Balebandro / Alejandro Martinez), GPL-3.0
 		VolumetricLightEffect*	VolumetricLight;	// UNOFFICIAL: sun shafts from the shadow maps
 		DustMotesEffect*		DustMotes;			// UNOFFICIAL 2026-11-03: dust specks in lit air
+		LocalExposureEffect*	LocalExposure;		// 2026-11-04: each neighbourhood's brightness, for the tone mapper
 		ReflectionsEffect*		Reflections;		// UNOFFICIAL: screen-space reflections on the ground
 		BodycamEffect*			Bodycam;			// UNOFFICIAL, testbed: police body-camera look
 		SkyDitherEffect*		SkyDither;			// UNOFFICIAL: breaks up the sky's banding before the 8-bit screen

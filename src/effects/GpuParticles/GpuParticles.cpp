@@ -63,7 +63,7 @@ bool GpuParticles::Ready() {
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (!ext || FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtGeometry), (void**)&Geometry)) || !Geometry) {
 			Geometry = nullptr;
-			TurnOff("this d3d9.dll has no geometry passes (needs NVR DXVK 1.5-particles)");
+			TurnOff("this d3d9.dll has no geometry passes (needs the Vegas Shaders DXVK fork 1.5-particles)");
 			return false;
 		}
 
@@ -113,7 +113,7 @@ bool GpuParticles::Ready() {
 
 		NVR_EXT_BUFFER_DESC frame = { sizeof(FrameBlock), NVR_EXT_BUFFER_UNIFORM | NVR_EXT_BUFFER_TRANSFER_DST, "GpuParticles frame" };
 		if (FAILED(ext->CreateBuffer(&frame, &FrameBuffer)) || !FrameBuffer) { TurnOff("the frame buffer could not be made"); return false; }
-		Logger::Log("UNOFFICIAL GPU particles: ready (NVR DXVK geometry passes)");
+		Logger::Log("UNOFFICIAL GPU particles: ready (Vegas Shaders DXVK geometry passes)");
 	}
 
 	const UINT count = (UINT)SettingCount();

@@ -1,0 +1,233 @@
+#version 460
+// UNOFFICIAL 2026-11-04 PTRestirGI (docs/next/RT-PATH-TRACING.md section 29; core\RtPathTrace.cpp): ReSTIR GI on the reference path
+// tracer's first bounce, for its 1-path-a-pixel mode (PTDenoise). Runs in the RT helper right after RtPathTraceGI.spv (RtPathTrace.comp
+// with PT_RESTIR_GI), which leaves per pixel the first hit (its distance along the camera ray, its normal), one cosine-sampled bounce
+// (direction, hit distance, the hit's normal, the light arriving along it) and the rest of the path's light apart.
+// Per pixel a reservoir (Bitterli et al. 2020; Ouyang et al. 2021, ReSTIR GI) picks one bounce sample in proportion to its light here,
+// target p^ = luminance(L) x cos at the first hit:
+//   - the pixel's own new sample (source density cos / pi: weight pi x lum(L));
+//   - temporal: last frame's reservoir of the same surface (camera reprojection; same distance within PTRestirDepth, normal within
+//     PTRestirNormal), its count M capped at PTRestirMaxM;
+//   - spatial: PTRestirSpatial random neighbours of last frame's reservoirs within PTRestirRadius pixels, of a similar surface, each
+//     weighted by the Jacobian of the solid angle it covers here vs there; a sample taken from a neighbour is checked with one
+//     visibility ray (blocked: no light from it this frame).
+// The result: the reservoir's sample x (first surface colour / pi) x cos x L x W, W = sum of weights / (M x p^), plus the rest of the
+// path, divided by the first surface's colour for the denoiser (as RtPathTrace.comp's flag 512). Reservoir images ping-pong by frame.
+// The reused light is the first surface's DIFFUSE part (colour x (1 - metal) x (1 - F0), F0 = mix(0.04, colour, metal)): its glossy
+// lobe was taken in the trace with its usual chance (then this pixel's candidate is empty, the light is in the rest). Static scene: no
+// object motion in the reprojection (a moving surface fails the depth test and starts over).
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtRestirGI.spv RtRestirGI.comp
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;   // world minus CameraPosition, z up
+layout(set = 0, binding = 1, std140) uniform Pass {   // core\RtPathTrace.cpp RestirConstants
+	vec4 size;          // w, h, 1 / w, 1 / h (the traced rect)
+	vec4 forward;       // this frame's view forward (unit), w unused
+	vec4 right;         // right / P00
+	vec4 up;            // up / P11
+	vec4 origin;        // xyz the eye in scene space (RtCore::Eye), w the frame's random seed
+	vec4 rect;          // xy the depth's jitter (screen uv), z flags (1 alpha test, 2 last frame's reservoirs valid, 4 demodulate), w unused
+	vec4 prevForward;   // last frame's camera, as above
+	vec4 prevRight;
+	vec4 prevUp;
+	vec4 prevEye;       // xyz last frame's eye minus this frame's (scene space), w PTRestirMaxM
+	vec4 params;        // x PTRestirSpatial (neighbours), y PTRestirRadius (pixels), z PTRestirDepth (relative), w PTRestirNormal (cos)
+} p;
+layout(set = 0, binding = 2, rg32f) uniform readonly image2D sampleA;     // RtPathTraceGI: direction packed, hit distance (0 = sky)
+layout(set = 0, binding = 3, rg32f) uniform readonly image2D sampleB;     // the hit's normal packed, the first hit's normal packed
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D sampleL;   // the light along it, the first hit's distance (0 = none)
+layout(set = 0, binding = 5, rgba16f) uniform image2D result;             // in: the path's other light; out: the picture (demodulated)
+layout(set = 0, binding = 6, rgba16f) uniform readonly image2D albedoIn;  // the first surface's colour (0.02 floor), a = surface
+layout(set = 0, binding = 7, r16f) uniform readonly image2D alphaAtlas;   // the core's (or a stand-in, flag 1 off)
+layout(set = 0, binding = 8, rg32f) uniform readonly image2D prevA;       // last frame's reservoirs: the sample point xy (its eye)
+layout(set = 0, binding = 9, rg32f) uniform readonly image2D prevB;       //   z, normal packed + M
+layout(set = 0, binding = 12, rgba16f) uniform readonly image2D prevC;    //   its light, W
+layout(set = 0, binding = 13, rg32f) uniform writeonly image2D curA;      // this frame's, the same
+layout(set = 0, binding = 14, rg32f) uniform writeonly image2D curB;
+layout(set = 0, binding = 15, rgba16f) uniform writeonly image2D curC;
+layout(set = 0, binding = 16, rg32f) uniform readonly image2D prevSurf;   // last frame's first hits: distance (0 = none), normal packed
+layout(set = 0, binding = 17, rg32f) uniform writeonly image2D curSurf;
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
+#include "RtRestirGI.glsl"
+
+uint state;
+uint Pcg() { state = state * 747796405u + 2891336453u; uint w = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u; return (w >> 22u) ^ w; }
+float Rand() { return float(Pcg() >> 8) * (1.0 / 16777216.0); }
+
+bool AlphaTest() { return (uint(p.rect.z + 0.5) & 1u) != 0u; }
+bool History() { return (uint(p.rect.z + 0.5) & 2u) != 0u; }
+bool Demodulate() { return (uint(p.rect.z + 0.5) & 4u) != 0u; }
+
+const float kSky = 100000.0;   // a sky sample's point: this far along its direction
+
+struct Sample { vec3 x2; vec3 n2; vec3 L; };
+
+// A camera's unit ray through screen uv
+vec3 Ray(vec3 f, vec3 r, vec3 u, vec2 uv) { return normalize(f + r * (2.0 * uv.x - 1.0) - u * (2.0 * uv.y - 1.0)); }
+
+// The pixel of last frame's camera that saw point x (this frame's eye-relative); false when behind it or off the rect
+bool PrevPixel(vec3 x, out ivec2 pixel) {
+	const vec3 v = x - p.prevEye.xyz;
+	const float z = dot(v, p.prevForward.xyz);
+	pixel = ivec2(-1);
+	if (z <= 1.0) return false;
+	const float sx = dot(v, p.prevRight.xyz) / (dot(p.prevRight.xyz, p.prevRight.xyz) * z);
+	const float sy = -dot(v, p.prevUp.xyz) / (dot(p.prevUp.xyz, p.prevUp.xyz) * z);
+	pixel = ivec2(floor((vec2(sx, sy) * 0.5 + 0.5) * p.size.xy));
+	return all(greaterThanEqual(pixel, ivec2(0))) && all(lessThan(pixel, ivec2(p.size.xy)));
+}
+
+// Last frame's first hit at its pixel, in this frame's eye-relative space; false: none
+bool PrevSurface(ivec2 pixel, out vec3 x, out vec3 n) {
+	const vec2 s = imageLoad(prevSurf, pixel).rg;
+	x = n = vec3(0.0);
+	if (!(s.x > 0.0)) return false;
+	const vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
+	x = Ray(p.prevForward.xyz, p.prevRight.xyz, p.prevUp.xyz, uv) * s.x + p.prevEye.xyz;
+	n = rgiUnpack24(s.y);
+	return true;
+}
+
+bool SameSurface(vec3 x1, vec3 n1, float t1, vec3 x, vec3 n) {
+	return distance(x, x1) < p.params.z * t1 + 2.0 && dot(n, n1) > p.params.w;
+}
+
+float Target(Sample s, vec3 x1, vec3 n1) {
+	const vec3 d = s.x2 - x1;
+	return rgiLum(s.L) * max(dot(n1, d) * inversesqrt(max(dot(d, d), 1.0e-8)), 0.0);
+}
+
+// The solid angle Jacobian of moving sample s from the surface point xFrom to xTo (|cos at x2 toward xTo| / |cos toward xFrom| x
+// distance from^2 / distance to^2); sky samples (far away) ~1
+float Jacobian(Sample s, vec3 xFrom, vec3 xTo) {
+	const vec3 a = xFrom - s.x2, b = xTo - s.x2;
+	const float la = dot(a, a), lb = dot(b, b);
+	const float ca = abs(dot(s.n2, a)) * inversesqrt(max(la, 1.0e-8)), cb = abs(dot(s.n2, b)) * inversesqrt(max(lb, 1.0e-8));
+	return ca > 1.0e-4 ? (cb / ca) * (la / max(lb, 1.0e-8)) : 0.0;
+}
+
+void LoadPrev(ivec2 pixel, out Sample s, out float W, out float M) {
+	const vec2 a = imageLoad(prevA, pixel).rg, b = imageLoad(prevB, pixel).rg;
+	const vec4 c = imageLoad(prevC, pixel);
+	s.x2 = vec3(a, b.x) + p.prevEye.xyz;
+	s.n2 = rgiUnpackNormal(b.y);
+	s.L = max(c.rgb, vec3(0.0));
+	W = max(c.a, 0.0);
+	M = rgiUnpackM(b.y);
+	if (any(isnan(s.L)) || isnan(W) || isinf(W)) { W = 0.0; M = 0.0; }
+}
+
+#define Proceed(q) while (rayQueryProceedEXT(q)) if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
+	rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), \
+		rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q)
+
+bool Visible(vec3 from, vec3 to) {
+	const vec3 d = to - from;
+	const float len = length(d);
+	if (len < 1.0) return true;
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT), 0xFFu, from + p.origin.xyz,
+		0.0, d / len, max(len - 2.0, 0.0));
+	Proceed(q);
+	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT;
+}
+
+void main() {
+	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y)) return;
+	state = uint(pixel.x) * 7919u + uint(pixel.y) * 104729u + uint(p.origin.w) * 15485863u + 1u;
+	Pcg();
+	const vec4 lt = imageLoad(sampleL, pixel);
+	const vec3 rest = imageLoad(result, pixel).rgb;
+	const vec4 albedo = imageLoad(albedoIn, pixel);
+	const float t1 = lt.a;
+	if (!(t1 > 0.0)) {   // no first surface (the sky, the game's frame): the path as it was, no reservoir
+		imageStore(result, pixel, vec4(rest / (Demodulate() ? max(albedo.rgb, vec3(0.02)) : vec3(1.0)), 1.0));
+		imageStore(curA, pixel, vec4(0.0));
+		imageStore(curB, pixel, vec4(0.0));
+		imageStore(curC, pixel, vec4(0.0));
+		imageStore(curSurf, pixel, vec4(0.0));
+		return;
+	}
+	const vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
+	const vec3 x1 = Ray(p.forward.xyz, p.right.xyz, p.up.xyz, uv) * t1;
+	const vec2 sa = imageLoad(sampleA, pixel).rg, sb = imageLoad(sampleB, pixel).rg;
+	const vec3 n1 = rgiUnpackNormal(sb.y);
+	const float share = rgiUnpackM(sb.y) / 255.0;   // the glossy lobe's chance at the first hit (the source density's other part)
+	const vec3 dir = rgiUnpack24(sa.x);
+
+	// this frame's own candidate (source density cos / pi)
+	Sample sel;
+	sel.x2 = x1 + dir * (sa.y > 0.0 ? sa.y : kSky);
+	sel.n2 = sa.y > 0.0 ? rgiUnpack24(sb.x) : -dir;
+	sel.L = max(lt.rgb, vec3(0.0));
+	if (any(isnan(sel.L)) || any(isinf(sel.L))) sel.L = vec3(0.0);
+	const float cos0 = dot(n1, dir);
+	float wSum = cos0 > 1.0e-4 ? 3.14159265 * rgiLum(sel.L) / max(1.0 - share, 1.0e-3) : 0.0, M = 1.0;
+	bool fromNeighbour = false;
+	const float maxM = max(p.prevEye.w, 1.0);
+
+	if (History()) {
+		ivec2 prev;
+		vec3 px, pn;
+		const bool onScreen = PrevPixel(x1, prev);
+		// temporal: the same surface last frame
+		if (onScreen && PrevSurface(prev, px, pn) && SameSurface(x1, n1, t1, px, pn)) {
+			Sample s;
+			float W, m;
+			LoadPrev(prev, s, W, m);
+			m = min(m, maxM);
+			if (m > 0.0) {
+				const float w = Target(s, x1, n1) * W * m;
+				wSum += w;
+				M += m;
+				if (Rand() * wSum < w) { sel = s; fromNeighbour = false; }
+			}
+		}
+		// spatial: neighbours of last frame round where this surface was (or this pixel, off last frame's screen)
+		const ivec2 centre = onScreen ? prev : pixel;
+		const int count = int(p.params.x + 0.5);
+		for (int k = 0; k < count; k++) {
+			const float r = p.params.y * sqrt(Rand()), a = 6.2831853 * Rand();
+			const ivec2 q = centre + ivec2(round(vec2(cos(a), sin(a)) * r));
+			if (q == centre || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(p.size.xy)))) continue;
+			if (!PrevSurface(q, px, pn) || !SameSurface(x1, n1, t1, px, pn)) continue;
+			Sample s;
+			float W, m;
+			LoadPrev(q, s, W, m);
+			m = min(m, maxM);
+			if (!(m > 0.0) || !(W > 0.0)) continue;
+			const float J = Jacobian(s, px, x1);
+			if (!(J > 0.1 && J < 10.0)) continue;
+			const float w = Target(s, x1, n1) * W * m * J;
+			wSum += w;
+			M += m;
+			if (Rand() * wSum < w) { sel = s; fromNeighbour = true; }
+		}
+	}
+
+	const float target = Target(sel, x1, n1);
+	float W = target > 0.0 ? wSum / (M * target) : 0.0;
+	const vec3 lift = x1 + n1 * (1.0 + 0.002 * t1);
+	if (fromNeighbour && W > 0.0 && !Visible(lift, sel.x2)) W = 0.0;   // a neighbour's sample this surface does not see
+	if (isnan(W) || isinf(W)) W = 0.0;
+	M = min(M, maxM);
+
+	// the first bounce's light: colour / pi x cos x L x W (the game's units fold pi into the light: a cosine sample alone gives colour x L)
+	const vec3 d = sel.x2 - x1;
+	const float c = max(dot(n1, d) * inversesqrt(max(dot(d, d), 1.0e-8)), 0.0);
+	const vec3 colour = max(albedo.rgb, vec3(0.02));
+	const float metal = clamp(albedo.a - 1.0, 0.0, 1.0);
+	const vec3 diffuse = share > 0.0 ? colour * ((1.0 - metal) * (vec3(1.0) - mix(vec3(0.04), colour, metal))) : colour;   // (no glossy lobe: PTSpecular 0, Lambert)
+	const vec3 indirect = diffuse * (c / 3.14159265) * sel.L * W;
+	imageStore(result, pixel, vec4((rest + indirect) / (Demodulate() ? colour : vec3(1.0)), 1.0));
+
+	imageStore(curA, pixel, vec4(sel.x2.xy, 0.0, 0.0));
+	imageStore(curB, pixel, vec4(sel.x2.z, rgiPackNormalM(sel.n2, M), 0.0, 0.0));
+	imageStore(curC, pixel, vec4(sel.L, W));
+	imageStore(curSurf, pixel, vec4(t1, rgiPack24(n1), 0.0, 0.0));
+}

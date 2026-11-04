@@ -172,9 +172,9 @@ namespace {
 			ShaderCounts[EffectStatus::CompileFailed], ShaderCounts[EffectStatus::FlowControlRetry]);
 		std::string out = text;
 		std::lock_guard<std::mutex> guard(FailLock);
-		if (Failures.empty()) out += " | D3D / NVR DXVK call failures: none";
+		if (Failures.empty()) out += " | D3D / Vegas Shaders DXVK call failures: none";
 		else {
-			out += " | D3D / NVR DXVK call failures:";
+			out += " | D3D / Vegas Shaders DXVK call failures:";
 			for (const FailSite& f : Failures) {
 				sprintf_s(text, " %s x%u (%08lX, first at frame %u);", f.site, f.count, (unsigned long)f.hr, f.firstFrame);
 				out += text;
@@ -600,7 +600,7 @@ namespace {
 			if (!damped.empty()) summary += " | damped by: " + damped;
 		}
 		else if (r.largest >= 0) {
-			sprintf_s(item, "source: no stage's own jump reached %.1f %% (the final picture jumped %.1f %%; the largest: %s %.1f %%): below the probes' resolution, or after NVR's effects",
+			sprintf_s(item, "source: no stage's own jump reached %.1f %% (the final picture jumped %.1f %%; the largest: %s %.1f %%): below the probes' resolution, or after Vegas Shaders' effects",
 				(std::max)(thresholds.StageMin, thresholds.StageShare * finalRel) * 100.0f, finalRel * 100.0f, names[r.largest], r.largestOwn * 100.0f);
 			summary = item;
 		}
@@ -2121,7 +2121,7 @@ namespace {
 		const float yaw = atan2f(f.x, f.y) * 57.29578f;
 		const float pitch = asinf((std::min)(1.0f, (std::max)(-1.0f, f.z))) * 57.29578f;
 		const ShaderManager::GameStateStruct& g = TheShaderManager->GameState;
-		Logger::Log("REPORT %u camera: position %.0f, %.0f, %.0f, view yaw %.1f pitch %.1f deg, %s | underwater %s, dialogue %s, VATS %s, Pip-Boy %s, NVR menu %s",
+		Logger::Log("REPORT %u camera: position %.0f, %.0f, %.0f, view yaw %.1f pitch %.1f deg, %s | underwater %s, dialogue %s, VATS %s, Pip-Boy %s, Vegas Shaders menu %s",
 			n, p.x, p.y, p.z, yaw < 0.0f ? yaw + 360.0f : yaw, pitch, Player && Player->isThirdPerson ? "third person" : "first person",
 			g.isUnderwater ? "yes" : "no", g.isDialog ? "yes" : "no", g.VATSIsOn ? "yes" : "no", g.PipBoyIsOn ? "yes" : "no", ImGuiManager::IsVisible() ? "open" : "closed");
 		// The upscaler path (UNOFFICIAL 2026-11-01 step 2: shared with the FLASH / BEAT conditions line)
@@ -2188,7 +2188,7 @@ namespace {
 		Logger::Log("REPORT %u block end (the burst's per-frame lines follow)", n);
 		if (InterfaceManager) {
 			char message[96];
-			sprintf_s(message, "NVR report %u: capturing %u frames", n, burst);
+			sprintf_s(message, "Vegas Shaders report %u: capturing %u frames", n, burst);
 			InterfaceManager->ShowMessage(message);
 		}
 	}

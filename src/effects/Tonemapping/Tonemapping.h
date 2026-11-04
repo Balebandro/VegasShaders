@@ -11,14 +11,17 @@ public:
 		float TonemappingMode, Exposure, Saturation, Gamma;
 
 		float TonemapContrast, TonemapBrightness, TonemapMidpoint, TonemapShoulder;
+		float NightShift, NightShiftLevel;	// 2026-11-04 Night colour shift
 	};
 
 	struct TonemappingSettingsStruct { ValuesStruct Main, Night, Interiors; };
 	TonemappingSettingsStruct Settings;
+	bool NightShiftEnabled = false;	// [Shaders.Tonemapping.Main] NightShiftEnabled
 
 	struct TonemappingStruct {
 		D3DXVECTOR4		ToneMapping, BloomData, SkyData, HDRData, LotteData;
 		D3DXVECTOR4		Clip;			// UNOFFICIAL TESR_ToneMappingClip: x HueSafeClip
+		D3DXVECTOR4		Night;			// 2026-11-04 TESR_ToneMappingNight: x strength (0 off), y level
 		float			PointLightMult;
 	};
 	TonemappingStruct Constants;

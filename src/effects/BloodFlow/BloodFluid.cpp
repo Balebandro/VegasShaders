@@ -108,7 +108,7 @@ void BloodFluid::ReadSettings() {
 	static int logged = -1;
 	if (logged != (Settings.Enabled ? 1 : 0)) {
 		logged = Settings.Enabled ? 1 : 0;
-		Logger::Log("UNOFFICIAL BloodFluid: %s", Settings.Enabled ? "on (runs when NVR DXVK's extension is there)" : "off");
+		Logger::Log("UNOFFICIAL BloodFluid: %s", Settings.Enabled ? "on (runs when the Vegas Shaders DXVK fork's extension is there)" : "off");
 	}
 }
 
@@ -299,8 +299,8 @@ bool BloodFluid::Ready(IDirect3DDevice9* Device) {
 		if (SUCCEEDED(Device->GetDirect3D(&d3d)) && d3d) {
 			if (SUCCEEDED(d3d->GetAdapterDisplayMode(D3DADAPTER_DEFAULT, &mode)) && FAILED(d3d->CheckDeviceFormat(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, mode.Format,
 				D3DUSAGE_RENDERTARGET, D3DRTYPE_SURFACE, (D3DFORMAT)MAKEFOURCC('R', 'E', 'S', 'Z'))))
-				Logger::Log("UNOFFICIAL BloodFluid: WARNING: this DXVK offers no RESZ on this GPU, so NVR gets no world depth and the blood will not find walls or floors. "
-					"Fix: the NVR DXVK build with patch 0007, or 'd3d9.customVendorId = 1002' in dxvk.conf.");
+				Logger::Log("UNOFFICIAL BloodFluid: WARNING: this DXVK offers no RESZ on this GPU, so Vegas Shaders gets no world depth and the blood will not find walls or floors. "
+					"Fix: the Vegas Shaders DXVK build with patch 0007, or 'd3d9.customVendorId = 1002' in dxvk.conf.");
 			d3d->Release();
 		}
 	}

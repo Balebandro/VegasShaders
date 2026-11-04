@@ -40,5 +40,7 @@ namespace RtDenoise {
 	// UNOFFICIAL 2026-10-31 (rt-ao-sky) RT GI with DenoiseBackbone: B1's object motion as a texel shift for ReSTIR GI's reuse, into Target's
 	// alpha (the GI frame light, Width x Height = the trace grid; Compute\RtGIMotion.frag). False: not drawn (no object motion this frame,
 	// no last frame, the pass missing): the trace then reprojects with the camera only.
-	bool		GIMotion(IDirect3DDevice9* Device, IDirect3DSurface9* Target, UINT Width, UINT Height);
+	// UNOFFICIAL 2026-11-04 RT GI at RenderScale < 1 (docs/next/RT-RENDERSCALE.md, phase 2): ScaleX / ScaleY = this frame's RenderRect
+	// scale (1 in native frames): the trace grid is then the top-left rect (Width x Height = its size), the screen point = uv / scale.
+	bool		GIMotion(IDirect3DDevice9* Device, IDirect3DSurface9* Target, UINT Width, UINT Height, float ScaleX = 1.0f, float ScaleY = 1.0f);
 }

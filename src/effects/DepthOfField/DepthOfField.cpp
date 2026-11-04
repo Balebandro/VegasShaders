@@ -152,7 +152,7 @@ bool DepthOfFieldEffect::BokehReady() {
 	if (!bokehScatter || !bokehCombine || !bokehResolve || !targets) {
 		BokehRelease();
 		bokehFailed = true;
-		Logger::Log("UNOFFICIAL DepthOfField: bokeh could not be set up (needs NVR DXVK and Compute\\DepthOfFieldBokehScatter.spv, DepthOfFieldBokehResolve.spv, DepthOfFieldCombineBokeh.spv); bokeh off for this session");
+		Logger::Log("UNOFFICIAL DepthOfField: bokeh could not be set up (needs the Vegas Shaders DXVK fork and Compute\\DepthOfFieldBokehScatter.spv, DepthOfFieldBokehResolve.spv, DepthOfFieldCombineBokeh.spv); bokeh off for this session");
 		return false;
 	}
 	Logger::Log("UNOFFICIAL DepthOfField: bokeh ready (%ux%u half resolution, up to %u sprites)", w, h, budget);

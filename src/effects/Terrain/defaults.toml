@@ -84,6 +84,13 @@ StartDistance = 0.0                 # (2026-10-19) Game units from you before th
 StartFade = 512.0                   # (2026-10-19) Game units over which the variation fades in after StartDistance.
 NormalMaps = true                   # (2026-10-19) The ground's normal maps (its bumps) vary too. Off: only the colour varies, for about half the cost; the bumps keep the plain repeat.
 
+[_Shaders.Terrain.Macro]
+Enabled = false                     # UNOFFICIAL (2026-11-04) Large-scale ground variation: a slow change in brightness and tint over hundreds of metres (paler sand here, darker gravel there, a warmer or greyer stretch), as Horizon and The Witcher 3 do, so a big slope does not read as one even colour from afar. Goes with Terrain Variation (which breaks the repeat of one texture up close). The near land, the far land and the band between them vary alike. Needs a restart to turn on or off; off, the land shaders are exactly what they were.
+Strength = 1.0                      # [0.0-1.0] (2026-11-04) How much of the variation shows (0: none, the same as off). 2: diagnostic, the pattern alone as grey on the land.
+Size = 2000.0                       # [256-40000] (2026-11-04) Game units across one patch of the pattern (a cell is 4096; 2000 = half a cell, so a view crosses several). Smaller: busier; larger: broad regions.
+Brightness = 0.4                    # [0.0-1.5] (2026-11-04) How much lighter or darker a patch gets, in stops at the extremes (0.4: the lightest patches about a third brighter, the darkest a quarter darker; most patches change much less).
+Tint = 0.25                         # [0.0-1.0] (2026-11-04) How much warmer (redder) or cooler (greyer-blue) a patch gets, in stops at the extremes.
+
 [_Shaders.Terrain.LODBlending]
 Enabled = false                     # UNOFFICIAL (2026-10-19) Far land matching: the distant land (its LOD texture) by a brightness and a gamma, so it meets the near land without a visible change in colour, and optionally the near land without its painted-in vertex colours. Live, next to no GPU time. After Community Shaders' LOD Blending (GPL-3.0).
 Brightness = 1.0                    # [0.01-5] (2026-10-19) The far land's brightness (1: as it is). Raise it if distant land looks darker than the ground near you.

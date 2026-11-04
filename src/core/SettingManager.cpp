@@ -1268,11 +1268,11 @@ void SettingManager::SaveSettings() {
 	}
 
 	hasUnsavedChanges = false;
-	SessionLog::OnEvent("NVR settings saved to the toml");	// UNOFFICIAL 2026-11-01
+	SessionLog::OnEvent("Vegas Shaders settings saved to the toml");	// UNOFFICIAL 2026-11-01
 }
 
 void SettingManager::RevertSettings() {
-	SessionLog::OnEvent("NVR settings reverted to the saved toml");	// UNOFFICIAL 2026-11-01
+	SessionLog::OnEvent("Vegas Shaders settings reverted to the saved toml");	// UNOFFICIAL 2026-11-01
 	Config.Init();	// both files read again
 	LoadSettings();
 

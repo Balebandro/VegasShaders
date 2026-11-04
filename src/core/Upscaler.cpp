@@ -147,7 +147,7 @@ namespace {
 		int			frameIndex = 0;
 
 		bool	Fail(const char* why) {
-			Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: FSR 2: %s; FSR is off for this session (TAA's own resolve / native resolution runs)", why);
+			Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: FSR 2: %s; FSR is off for this session (TAA's own resolve / native resolution runs)", why);
 			failed = true;
 			return false;
 		}
@@ -186,7 +186,7 @@ namespace {
 			// An older package without the HDR builds: the LDR passes take the HDR picture (a missing file would otherwise turn every
 			// Vulkan pass off for the session, DxvkCompute::CreatePipeline's rule).
 			if (!DxvkCompute::HasSpirv(p.hdrName)) {
-				Logger::Log("UNOFFICIAL NVR DXVK: FSR 2: Compute\\%s.spv is missing; its LDR build runs on the HDR picture instead (bright edges alias more).", p.hdrName);
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: FSR 2: Compute\\%s.spv is missing; its LDR build runs on the HDR picture instead (bright edges alias more).", p.hdrName);
 				hdrPipelines[i] = pipelines[i];
 				continue;
 			}
@@ -246,7 +246,7 @@ namespace {
 		parity = 0;
 		frameIndex = 0;
 		const UInt64 renderBytes = (UInt64)inW * inH * (4 + 4 + 4 + 2 + 8 + 4 + 4), displayBytes = (UInt64)outW * outH * (2 + 8 * 2 + 8 * 2 + 4 * 2 + 8);
-		Logger::Log("UNOFFICIAL NVR DXVK: FSR 2 resources made (render up to %ux%u, display %ux%u, about %u MB)", inW, inH, outW, outH,
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: FSR 2 resources made (render up to %ux%u, display %ux%u, about %u MB)", inW, inH, outW, outH,
 			(UInt32)((renderBytes + displayBytes) / (1024 * 1024)));
 		return true;
 	}
@@ -262,12 +262,12 @@ namespace {
 		dispatch.GroupsY = groupsY;
 		dispatch.GroupsZ = 1;
 		// F10: one GPU timer per pass (the names of 2026-10-26, inside the caller's "TAA" or "FSR upscale" timer).
-		static GpuTimer timers[PipelineCount] = { GpuTimer("  FSR luma mip (NVR)"), GpuTimer("  FSR reconstruct"), GpuTimer("  FSR depth clip"),
+		static GpuTimer timers[PipelineCount] = { GpuTimer("  FSR luma mip (Vegas Shaders)"), GpuTimer("  FSR reconstruct"), GpuTimer("  FSR depth clip"),
 			GpuTimer("  FSR lock"), GpuTimer("  FSR accumulate"), GpuTimer("  FSR accumulate (sharpen)"), GpuTimer("  FSR RCAS") };
 		GpuProfileScope gpu(timers[index], TheRenderManager->device);
 		DxvkCompute::PreLoad(bindings, count);	// UNOFFICIAL 2026-10-27 (fork2-combo, the alflicker rule): managed textures on the GPU
 		if (FAILED(DxvkCompute::Extension()->Dispatch(&dispatch))) {
-			Logger::Log("[ERROR] UNOFFICIAL NVR DXVK: FSR 2 pass %s failed to dispatch; FSR is off for this session", Pipelines[index].name);
+			Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: FSR 2 pass %s failed to dispatch; FSR is off for this session", Pipelines[index].name);
 			failed = true;
 			return false;
 		}

@@ -30,16 +30,16 @@ namespace DebugReadback {
 		Tried = true;
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (!ext || !DxvkCompute::Available()) {
-			Logger::Log("UNOFFICIAL debugging tools: need NVR DXVK (the NVR extension is not present: native D3D9 or stock DXVK); nothing is done.");
+			Logger::Log("UNOFFICIAL debugging tools: need Vegas Shaders DXVK (the Vegas Shaders extension is not present: native D3D9 or stock DXVK); nothing is done.");
 			return nullptr;
 		}
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtReadback), (void**)&Ext)) || !Ext) {
 			Ext = nullptr;
-			Logger::Log("UNOFFICIAL debugging tools: need NVR DXVK 1.5-debug (fork patch 0016, non-waiting readback); this d3d9.dll has extension %u.%u without it: nothing is done.",
+			Logger::Log("UNOFFICIAL debugging tools: need Vegas Shaders DXVK 1.5-debug (fork patch 0016, non-waiting readback); this d3d9.dll has extension %u.%u without it: nothing is done.",
 				DxvkCompute::Info().ExtVersionMajor, DxvkCompute::Info().ExtVersionMinor);
 			return nullptr;
 		}
-		Logger::Log("UNOFFICIAL debugging tools: NVR DXVK 1.5-debug readback available (never waits).");
+		Logger::Log("UNOFFICIAL debugging tools: Vegas Shaders DXVK 1.5-debug readback available (never waits).");
 		return Ext;	// kept for the session (a device reference, like DxvkCompute's)
 	}
 }

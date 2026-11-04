@@ -1013,7 +1013,7 @@ namespace {
 			static bool logged = false;
 			if (!logged) {
 				logged = true;
-				Logger::Log("UNOFFICIAL NVR DXVK: VolumetricFog: %s is not registered; the D3D9 techniques are used", name);
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: VolumetricFog: %s is not registered; the D3D9 techniques are used", name);
 			}
 			return false;
 		}

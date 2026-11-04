@@ -88,7 +88,12 @@ void main() {
         vec2 hit = ToScreen(position + R * hi);
         vec3 hitNormal = ViewNormal(hit);
         // Not the weapon (it is not where the depth says, for the world), not the back of something.
-        if (!IsWeapon(hit) && dot(hitNormal, R) < 0.2) {
+        // UNOFFICIAL 2026-11-04 (rtwater) and, from the water, not the water itself: a ray leaving the water near the horizon passed the
+        // back-face test on a farther stretch of the same plane (dot < 0.2 at a grazing angle), so the water reflected its own dark colour
+        // (a band below the far shore, smears under posts: a tester's shot, og-lake). Such a hit is no hit: the ray goes to the helper.
+        float hitDepth = readDepthLod(hit);
+        bool selfWater = SurfaceWater && abs(cb.cameraPosition.z + toWorld(hit).z * hitDepth - cb.waterSettings.x) < max(2.0, hitDepth * 0.002);
+        if (!IsWeapon(hit) && dot(hitNormal, R) < 0.2 && !selfWater) {
             colour = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), hit, 0.0).rgb);
             vec2 edge = min(rectToScreen(hit), 1.0 - rectToScreen(hit));   // (2026-11-03: the screen's edges, as the .fx)
             confidence = saturate(min(edge.x, edge.y) * 12.0) * (1.0 - smoothstep(0.75, 1.0, hi / RayLength));

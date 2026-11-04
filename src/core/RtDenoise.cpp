@@ -95,7 +95,7 @@ namespace RtDenoise {
 			desc.pDebugName = name;
 			ID3D9NvrExtPipeline* pipeline = nullptr;
 			if (FAILED(ext->CreateGraphicsPipeline(&desc, &pipeline))) pipeline = nullptr;
-			if (!pipeline) Logger::Log("UNOFFICIAL NVR DXVK: RT denoiser: the pass %s could not be made (Compute\\%s.spv; the DXVK log says why)", name, name);
+			if (!pipeline) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT denoiser: the pass %s could not be made (Compute\\%s.spv; the DXVK log says why)", name, name);
 			return pipeline;
 		}
 
@@ -175,7 +175,7 @@ namespace RtDenoise {
 	IDirect3DTexture9* Backbone() { return backboneFrame == TheFrameRateManager->FrameNumber ? backboneNow : nullptr; }
 
 	// UNOFFICIAL 2026-10-31 (rt-ao-sky) RT GI with DenoiseBackbone (RtDenoise.h): at the RT point, once a frame. The camera as Run's.
-	bool GIMotion(IDirect3DDevice9* Device, IDirect3DSurface9* Target, UINT Width, UINT Height) {
+	bool GIMotion(IDirect3DDevice9* Device, IDirect3DSurface9* Target, UINT Width, UINT Height, float ScaleX, float ScaleY) {
 		const UInt32 frame = TheFrameRateManager->FrameNumber;
 		if (giMotionFrame == frame) return false;
 		const bool lastFrame = giMotionFrame + 1 == frame;	// (a frame without this call: its camera is not last frame's)
@@ -205,6 +205,8 @@ namespace RtDenoise {
 		b.up[0] = view._12 / proj._22; b.up[1] = view._22 / proj._22; b.up[2] = view._32 / proj._22;
 		b.move[0] = move.x; b.move[1] = move.y; b.move[2] = move.z;
 		b.params[0] = (float)Width; b.params[1] = (float)Height;
+		// (2026-11-04 RenderScale < 1, phase 2) the rect's scale: RtGIMotion.frag rebuilds the point at uv / scale (1, 1: as before)
+		b.params[2] = ScaleX; b.params[3] = ScaleY;
 		if (!giMotionTimer) giMotionTimer = new GpuTimer("RT GI object motion");
 		GpuProfileScope gpu(*giMotionTimer, Device);
 		IUnknown* images[2] = { depth, ObjectMotion::Texture };

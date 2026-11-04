@@ -1,0 +1,11 @@
+[_Shaders.LocalExposure.Main]
+Shadows = 0.4                       # [0.0-1.0] UNOFFICIAL (2026-11-04) How much dark parts of the picture are lifted toward a normal brightness: the shade under a rock next to sunlit sand, a dark room's corners. 0: none, 1: fully (flat-looking).
+Highlights = 0.3                    # [0.0-1.0] (2026-11-04) How much bright parts are calmed: sunlit sand, a doorway seen from a dark room, a bright sky. 0: none, 1: fully.
+EdgeGuard = 1.0                     # [0.0-4.0] (2026-11-04) How much the correction backs off where a spot is much brighter or darker than its surroundings (the edge of the sky, a lamp), so no dark or bright halo forms there. 0: never (halos), higher: only broad areas change.
+Blur = 4.0                          # [0.5-12] (2026-11-04) How big a "neighbourhood" is: larger means only broad areas are evened out, smaller reaches finer detail (and risks halos). 4 is about a tenth of the screen's width.
+Interiors = true                    # (2026-11-04) Also indoors.
+Exteriors = true                    # (2026-11-04) Also outdoors.
+DebugView = 0                       # [0-1] (2026-11-04) diagnostic: 1 shows the measured brightness of each neighbourhood as grey instead of the picture.
+
+[_Shaders.LocalExposure.Status]
+Enabled = false                     # UNOFFICIAL (2026-11-04) Local exposure: each part of the picture exposed for its own brightness, as the eye does (and Unreal Engine 5's Local Exposure): shade next to sunlit sand no longer goes black, a doorway from a dark room no longer burns white. Off by default.

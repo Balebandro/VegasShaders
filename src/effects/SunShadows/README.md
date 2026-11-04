@@ -191,7 +191,7 @@ Blurs red and green. Sky and pixels at or past RenderDistance are kept. BlurDown
 
 ## 7. Vulkan path
 
-- `SunShadowsEffect::ExtPingPong` (when `DxvkCompute::PassesOn()`: NvrDxvkPasses on, NVR DXVK present, not a rect frame) runs the
+- `SunShadowsEffect::ExtPingPong` (when `DxvkCompute::PassesOn()`: NvrDxvkPasses on, Vegas Shaders DXVK present, not a rect frame) runs the
   same techniques through the same targets: March (techniques 0, 1, 3, 4 pass 1), Blur (push pass 0 across, 1 down, 2 down +
   Intensity), Apply (`SunShadowsApply-c1` when CHARACTER_SHADOW_MAP was compiled; variants.txt line
   `SunShadowsApply c1 -DCHARACTER_SHADOW_MAP=1`), Sharp, SharpFinish.

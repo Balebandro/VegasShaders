@@ -23,7 +23,7 @@ def main():
     modes = defaultdict(dict)   # mode -> {(kind, image, reader): text}
     last_mode = "?"
     for raw in open(path, encoding="utf-8", errors="replace"):
-        if "NVR DXVK setup" in raw:
+        if "NVR DXVK setup" in raw or "Vegas Shaders DXVK setup" in raw:	# 2026-11-04: the log line was renamed; old logs keep the old name
             print(raw.rstrip())
         m = LINE.search(raw)
         if not m:

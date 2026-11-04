@@ -139,7 +139,7 @@ namespace PlantWind {
 			const float* c4 = (const float*)0x01200550;	// TallGrassShader's grouped constants: c4 WindData (the grass log)
 			Logger::Log("UNOFFICIAL Plant wind: %s, statics %s; wind direction (%.3f %.3f) speed %.3f -> strength %.3f (game grass wind min %.1f max %.1f, "
 				"its c4 now %.3f %.3f size %.2f); clock %.3f (the grass wind's, rate %.3f rad/s); per frame: static plant draws %.1f lit, %.1f shadow, skipped "
-				"%.1f (a pass without NVR's vertex shader) + %.1f (shadow, same) + %.1f (no root node); leaves: gust x%.2f, flutter %.3f rad, lean %.2f",
+				"%.1f (a pass without Vegas Shaders' vertex shader) + %.1f (shadow, same) + %.1f (no root node); leaves: gust x%.2f, flutter %.3f rad, lean %.2f",
 				On ? "on" : "off", StaticsOn ? "on" : (CompiledIn ? "off (indoors)" : "NOT compiled in (needs a restart)"), Dir[0], Dir[1], GrassWind::WindSpeed, Strength,
 				GrassMin, GrassMax, c4[0], c4[1], c4[2], ClockNow, GrassWind::Rate, DrawsLit / (float)Frames, DrawsShadow / (float)Frames, SkipSafety / (float)Frames,
 				SkipShadowVanilla / (float)Frames, SkipNoRoot / (float)Frames, LeafB.w, LeafB.x, LeafB.y);

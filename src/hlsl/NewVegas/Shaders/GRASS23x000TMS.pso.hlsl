@@ -15,6 +15,9 @@ float4 TESR_GrassScale;
 // the game's grass PS without transparency multisampling, include this file too. The game's own differs from its TMS twin only in
 // the alpha: a hard cut against AlphaTestRef (c3) for the alpha test instead of the coverage ramp (alpha x 1.75).
 uniform float4 AlphaTestRef : register(c3);
+#ifdef ALPHA_HASH_ON
+    #include "includes/AlphaHash.hlsl"	// UNOFFICIAL 2026-11-03 SmoothCutouts: the cut hashed under TAA / FSR / DLSS (see main)
+#endif
 #endif
 #ifdef GRASS_POINT_LIGHT
 // UNOFFICIAL 2026-10-27 PointLights (GRASS23x001TMS/003TMS.pso include this file): the game's 1POINT grass PS adds one lamp,
@@ -87,6 +90,17 @@ PixResult main(PixVaryings pa, float2 vpos_s : VPOS) {
     clip(pa.f_sun.w - dither_v);
 #ifdef GRASS_ALPHA_TEST
     pr.f_color.a = base_rgb.a > AlphaTestRef.x ? 1.0f : 0.0f;	// the game's cut (its fade is the dither above, as in the TMS build)
+#ifdef ALPHA_HASH_ON
+    // UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl): on a hashed draw the cut takes noise; mode 2 the coverage the
+    // game's transparency multisampling gives grass (its TMS build: alpha x 1.75). The pattern is shifted off the fade dither's.
+    const float grass_width = max(fwidth(base_rgb.a) * TESR_AlphaHash.z, 1.0f / 255.0f);
+    if (NVR_AlphaHashDraw) {
+        if (TESR_AlphaHash.x > 0.5f) {
+            const float coverage = TESR_AlphaHash.x > 1.5f ? saturate(base_rgb.a * 1.75f) : saturate((base_rgb.a - AlphaTestRef.x) / grass_width + 0.5f);
+            pr.f_color.a = AlphaHashKeep(coverage, vpos_s, 37.0f) > 0.0f ? 1.0f : 0.0f;
+        }
+    }
+#endif
 #else
     pr.f_color.a = saturate(base_rgb.a * 1.75f);
 #endif

@@ -25,6 +25,10 @@ void PBRShaders::RegisterConstants() {
 	sm->RegisterConstant("TESR_MaterialRule", &MaterialRule);
 	sm->RegisterConstant("TESR_MaterialRough", &MaterialRough);
 	sm->RegisterConstant("TESR_MaterialTint", &MaterialTint);
+	sm->RegisterConstant("TESR_DustData", &DustData);	// 2026-11-04 dust on top surfaces
+	sm->RegisterConstant("TESR_DustColor", &DustColor);
+	sm->RegisterConstant("TESR_DustOrigin", &DustOrigin);
+	sm->RegisterConstant("TESR_MicroShadow", &MicroShadow);	// 2026-11-04 micro-shadowing
 }
 
 // The first-person model's metal strength for its pass. Shaders upload their constants when bound, so the one still bound
@@ -48,6 +52,22 @@ static float RmaosScaleOr1(const char* Section, const char* Key) {
 }
 
 void PBRShaders::UpdateSettings() {
+	// 2026-11-04 dust on top surfaces and micro-shadowing (Enabled is compile time: DUST_ON, MICRO_SHADOW_ON; these are live)
+	{
+		SettingManager* cfg = TheSettingManager;
+		const char* dust = "Shaders.PBR.Dust";
+		DustSettings.Amount = std::clamp(cfg->GetSettingF(dust, "Amount"), 0.0f, 1.0f);
+		DustSettings.Size = (std::max)(cfg->GetSettingF(dust, "Size"), 32.0f);
+		DustSettings.UpFrom = std::clamp(cfg->GetSettingF(dust, "UpFrom"), -1.0f, 0.99f);
+		DustSettings.UpFull = std::clamp(cfg->GetSettingF(dust, "UpFull"), DustSettings.UpFrom + 0.01f, 1.0f);
+		DustSettings.Patchiness = std::clamp(cfg->GetSettingF(dust, "Patchiness"), 0.0f, 1.0f);
+		// the colour as typed (gamma, like a picker) to linear
+		DustSettings.Color = D3DXVECTOR3(powf(std::clamp(cfg->GetSettingF(dust, "ColorR"), 0.0f, 1.0f), 2.2f),
+			powf(std::clamp(cfg->GetSettingF(dust, "ColorG"), 0.0f, 1.0f), 2.2f), powf(std::clamp(cfg->GetSettingF(dust, "ColorB"), 0.0f, 1.0f), 2.2f));
+		DustSettings.Exteriors = cfg->GetSettingI(dust, "Exteriors") != 0;
+		DustSettings.Interiors = cfg->GetSettingI(dust, "Interiors") != 0;
+		MicroShadowStrength = std::clamp(cfg->GetSettingF("Shaders.PBR.MicroShadow", "Strength"), 0.0f, 3.0f);	// above 1: the occlusion deepened
+	}
 	// UNOFFICIAL metal (Object.hlsl): strengths per pass, the guess and the finish.
 	// MetalOn: the metal's own switch (the panel's Enabled button switches all of the PBR shaders).
 	const bool metalOn = TheSettingManager->GetSettingI("Shaders.PBR.Metal", "MetalOn") != 0;
@@ -212,6 +232,15 @@ float PBRShaders::LampFalloffNorm(float Falloff) {
 
 void PBRShaders::UpdateConstants() {
 	ApplyLinearGamma();	// first: the LinearScales below decode with it
+
+	// 2026-11-04 dust on top surfaces: outdoors and/or indoors; the camera's world position for the world-space pattern
+	{
+		const bool here = TheShaderManager->GameState.isExterior ? DustSettings.Exteriors : DustSettings.Interiors;
+		DustData = D3DXVECTOR4(here ? DustSettings.Amount : 0.0f, 1.0f / DustSettings.Size, DustSettings.UpFrom, DustSettings.UpFull);
+		DustColor = D3DXVECTOR4(DustSettings.Color.x, DustSettings.Color.y, DustSettings.Color.z, DustSettings.Patchiness);
+		DustOrigin = TheRenderManager->CameraPosition;
+		MicroShadow.x = MicroShadowStrength;
+	}
 
 	// UNOFFICIAL 2026-10-21 LampFalloff (Includes/LampFalloff.hlsl), live: the shape outdoors with Exterior, indoors with Interior.
 	{

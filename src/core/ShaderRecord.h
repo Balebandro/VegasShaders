@@ -147,7 +147,7 @@ namespace ShaderOwnership {
 		if (Ours(shader)) return true;
 		static std::unordered_set<const void*> named;
 		if (named.size() < 64 && named.insert(shader).second)
-			Logger::Log("UNOFFICIAL shaders: a %s shader NVR did not make is in a game pass (another plugin's, e.g. Real Time Reflections): left as its owner set it", kind);
+			Logger::Log("UNOFFICIAL shaders: a %s shader Vegas Shaders did not make is in a game pass (another plugin's, e.g. Real Time Reflections): left as its owner set it", kind);
 		return false;
 	}
 }

@@ -4,6 +4,7 @@
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals (TESR_CapturedNormalsData)
 #include "ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (TESR_ObjectMotionData)
 #include "TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 the temporal backbone (TESR_FrameNoise, [Main.Main.Quality] SharedNoise)
+#include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (TESR_AlphaHash)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the report burst's VL stages (Diagnostics::VLCapturing)
 #include "LampVisibility.h"	// UNOFFICIAL 2026-10-30 VisibleRanking
 #include "FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
@@ -126,6 +127,7 @@ void ShaderManager::Initialize() {
 	EnrollEffect<SandstormEffect>(sm, sm->Effects.Sandstorm);
 	EnrollEffect<VolumetricLightEffect>(sm, sm->Effects.VolumetricLight);
 	EnrollEffect<DustMotesEffect>(sm, sm->Effects.DustMotes);	// UNOFFICIAL 2026-11-03
+	EnrollEffect<LocalExposureEffect>(sm, sm->Effects.LocalExposure);	// 2026-11-04
 	EnrollEffect<SkyDitherEffect>(sm, sm->Effects.SkyDither);
 	EnrollEffect<BodycamEffect>(sm, sm->Effects.Bodycam);
 	EnrollEffect<ReflectionsEffect>(sm, sm->Effects.Reflections);
@@ -190,6 +192,7 @@ void ShaderManager::Initialize() {
 		{ "TESR_BackDepthData", &BackDepth::Data },	// UNOFFICIAL 2026-10-31 BackDepth
 		{ "TESR_ObjectMotionData", &ObjectMotion::Data },	// UNOFFICIAL 2026-10-29 ObjectMotion
 		{ "TESR_FrameNoise", &TemporalBackbone::Constant },	// UNOFFICIAL 2026-11-01 the temporal backbone
+		{ "TESR_AlphaHash", &AlphaHash::Constant },	// UNOFFICIAL 2026-11-03 SmoothCutouts
 		{ "TESR_FogData", &sm->ShaderConst.fogData },
 		{ "TESR_FogDistance", &sm->ShaderConst.fogDistance },
 		{ "TESR_FogColor", &sm->ShaderConst.fogColor },
@@ -805,7 +808,7 @@ bool ShaderManager::LoadShader(NiD3DVertexShader* Shader) {
 	if (!ShaderSetsReady) {	// (UNOFFICIAL 2026-10-27, see LoadEarlyShaders)
 		LeaveToGame(vertex);
 		EarlyVertexShaders.push_back(Shader);
-		Logger::Log("UNOFFICIAL shader %s made before NVR's shader sets: loaded once they exist", vertex->Name ? vertex->Name : "?");
+		Logger::Log("UNOFFICIAL shader %s made before Vegas Shaders' shader sets: loaded once they exist", vertex->Name ? vertex->Name : "?");
 		return false;
 	}
 	ShaderCollection* collection = GetShaderCollection(vertex->Name);
@@ -837,7 +840,7 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 	if (!ShaderSetsReady) {	// (UNOFFICIAL 2026-10-27, see LoadEarlyShaders)
 		LeaveToGame(pixel);
 		EarlyPixelShaders.push_back(Shader);
-		Logger::Log("UNOFFICIAL shader %s made before NVR's shader sets: loaded once they exist", pixel->Name ? pixel->Name : "?");
+		Logger::Log("UNOFFICIAL shader %s made before Vegas Shaders' shader sets: loaded once they exist", pixel->Name ? pixel->Name : "?");
 		return false;
 	}
 	ShaderCollection* family = GetShaderCollection(pixel->Name);
@@ -2185,7 +2188,7 @@ bool FrameChain::Begin(IDirect3DSurface9* gameTarget) {
 	static bool reported[2][2] = {};
 	if (!reported[index][useGameTexture]) {
 		Logger::Log("UNOFFICIAL frame chain: %ux%u format %u, %s.", desc.Width, desc.Height, desc.Format,
-			useGameTexture ? "game target used as a chain buffer (no seed copy)" : "two NVR buffers (seed copy)");
+			useGameTexture ? "game target used as a chain buffer (no seed copy)" : "two Vegas Shaders buffers (seed copy)");
 		reported[index][useGameTexture] = true;
 	}
 

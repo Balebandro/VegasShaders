@@ -148,20 +148,24 @@ void main() {
     // What the ray did not find on screen: the surroundings cube and (GridFallback) the light grid along it, then (outdoors)
     // the sky if it points up into it. Each fills only the share still missing (premultiplied sums).
     float screenShare = confidence, cubeShare = 0.0, gridShare = 0.0, skyShare = 0.0;   // (DebugView 6)
+    // UNOFFICIAL 2026-11-04 (rtwater) the water (RT Water): a ray that met nothing within Distance takes no fallback here, so its share
+    // stays missing and the water shader shows the planar map there (Includes/Water.hlsl getRTWaterReflection: by the confidence), which
+    // reaches the far shore and the LOD land; before, the far cliffs of og-lake came out as the sky panorama (they are past Distance).
+    bool waterMiss = WaterRtOn && rtOpen && abs(cb.cameraPosition.z + surfaceW.z - cb.waterSettings.x) < max(2.0, ray.x * 0.002);
     vec4 grid = vec4(0.0), env = vec4(0.0);
     // UNOFFICIAL 2026-10-31 SkyPanorama: a ray that met nothing on its way out is the sky (or something past Distance in the haze):
     // the panorama as seen, all of the missing share, no horizon fade; not the cube (seen from the camera, it holds whatever lay
     // that way from there) and not the grid.
-    if (SkyPanoOn && rtOpen && confidence < 1.0) {
+    if (SkyPanoOn && rtOpen && confidence < 1.0 && !waterMiss) {
         skyShare = 1.0 - confidence;
         sum += PanoAlong(worldR) * skyShare;
         confidence = 1.0;
     }
-    if (CubeOn > 0.0 && confidence < 1.0) env = EnvAlong(worldR, roughness);
+    if (CubeOn > 0.0 && confidence < 1.0 && !waterMiss) env = EnvAlong(worldR, roughness);
     float gridFirst = smoothstep(0.15, 0.35, roughness);
     bool gridUseful = (gridFirst > 0.0 || env.a < 1.0) && !(SkyFallback > 0.0 && RoofMaskOn < 0.5 && worldR.z >= 0.15);
-    if (GridOn > 0.0 && ((confidence < 1.0 && gridUseful) || abs(DebugView - 5.0) < 0.5)) grid = GridAlong(surfaceW, worldR);
-    if (confidence < 1.0 && (CubeOn > 0.0 || GridOn > 0.0)) {
+    if (GridOn > 0.0 && !waterMiss && ((confidence < 1.0 && gridUseful) || abs(DebugView - 5.0) < 0.5)) grid = GridAlong(surfaceW, worldR);
+    if (confidence < 1.0 && (CubeOn > 0.0 || GridOn > 0.0) && !waterMiss) {
         float missing = 1.0 - confidence;
         float cubeA = missing * env.a, gridA = (missing - cubeA) * grid.a;   // the cube first
         float gridB = missing * grid.a, cubeB = (missing - gridB) * env.a;   // the grid first
@@ -170,7 +174,7 @@ void main() {
         sum += env.rgb * cubeShare + grid.rgb * gridShare;
         confidence += cubeShare + gridShare;
     }
-    if (confidence < 1.0 && SkyFallback > 0.0) {
+    if (confidence < 1.0 && SkyFallback > 0.0 && !waterMiss) {
         skyShare = (1.0 - confidence) * smoothstep(0.0, 0.15, worldR.z);
         // (RT: a ray that met nothing within Distance needs no guess at how much of the sky is hidden.)
         if (!rtOpen) skyShare *= mix(1.0, mix(cb.sky.y, 1.0, textureLod(sampler2D(t_skyVis, LINEAR_S), uv, 0.0).b), cb.sky.x);

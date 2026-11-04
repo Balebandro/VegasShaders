@@ -78,7 +78,7 @@ Every key this effect reads, with where it is read:
 |---|---|---|---|---|---|
 | `[_Shaders.ShadowsInteriors.Status]` | Enabled | bool | on/off | true | Turns the effect on or off. |
 | `[_Shaders.ShadowsInteriors.Main]` | Darkness | float | not stated in the defaults file | 0.65 | Strength of the indoor shadow darkening (the "darkness of shadows"). Reaches the apply as the darkness constant (component y). The apply turns it into a darkening amount through a Reinhard-type curve with a speed of 5, then scales by the shadow-fade enable (section 6). |
-| `[Main.Main.Performance]` | NvrDxvkPasses | bool | on/off | true in the defaults file (false in the C++ default) | When on and running on NVR DXVK, the dedicated path runs as Vulkan passes. Off (or not on DXVK): the D3D9 dedicated path. |
+| `[Main.Main.Performance]` | NvrDxvkPasses | bool | on/off | true in the defaults file (false in the C++ default) | When on and running on Vegas Shaders DXVK, the dedicated path runs as Vulkan passes. Off (or not on DXVK): the D3D9 dedicated path. |
 | `[Main.Main.Performance]` | InteriorShadowFold | bool | on/off | false | When on, the apply moves into the fog composite and this pass is not drawn when the fold conditions hold. |
 | `[Main.Main.Performance]` | InteriorShadowFoldRound | int | 0-3 | 0 | Rounding mode used only by the fold. Not this effect's look. |
 | `[_Shaders.ShadowsInteriors.Forward]` | KeepDarkening | bool | on/off | not confirmed in the defaults file | Whether the room darkening is drawn at all when per-object lamp shadows are on. |
@@ -186,7 +186,7 @@ Selection (in the C++):
 - The dedicated path is used when its technique and textures are available and the blur and apply targets match the frame
   size and the render target.
 - The Vulkan path is tried first only when the Vulkan passes are on: `[Main.Main.Performance] NvrDxvkPasses` is on, the
-  game runs on NVR DXVK (the extension is available), and no render-scale rect is active. In that case the C++ runs the
+  game runs on Vegas Shaders DXVK (the extension is available), and no render-scale rect is active. In that case the C++ runs the
   two blur passes into the two scratch targets and the apply into the frame.
 - If any Vulkan pass cannot be created or fails before the apply is committed, the effect falls back to the D3D9 dedicated
   path for that frame. If it fails in the middle of the D3D9 path, that path falls back to the generic technique. A failure

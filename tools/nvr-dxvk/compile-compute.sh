@@ -31,7 +31,7 @@ for f in Rt/*.comp; do
   n=$((n+1))
 done
 # UNOFFICIAL 2026-11-02: the RT helper's passes built from another pass's source with a define (no .comp of their own; each source's
-# header names its variants). Checked 2026-11-02: all four rebuild byte for byte with the Vulkan SDK 1.3.296.0 glslangValidator.
+# header names its variants; 2026-11-04 RtPathTraceGrid: PTLightGrid). Checked 2026-11-02: all four rebuild byte for byte with the Vulkan SDK 1.3.296.0 glslangValidator.
 while read -r out src defs; do
   [ ${#NAMES[@]} -eq 0 ] || want "$out" || want "$src" || continue
   # shellcheck disable=SC2086
@@ -43,6 +43,8 @@ RtGITrace RtAOTrace -DRT_GI_PASS
 RtRadianceCache RtAOTrace -DRT_CACHE_PASS
 RtLampTraceSplit RtLampTrace -DSPLIT
 RtLampTraceExterior RtLampTrace -DEXTERIOR
+RtPathTraceGrid RtPathTrace -DPT_LIGHT_GRID
+RtPathTraceGI RtPathTrace -DPT_RESTIR_GI
 RT_VARIANTS
 v=0
 while read -r frag suffix defs; do

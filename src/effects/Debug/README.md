@@ -30,7 +30,7 @@ Debug is a developer and fault-finding tool. With the overlay on, the player (or
 
 ## 3. Inputs
 
-### Textures (slot order; NVR binds samplers by declaration order)
+### Textures (slot order; Vegas Shaders binds samplers by declaration order)
 
 | Slot | Name | Holds | Filtering / addressing |
 |---|---|---|---|
@@ -146,7 +146,7 @@ Colour values: magenta (1, 0, 1), cyan (0, 1, 1), red (1, 0, 0), yellow (1, 1, 0
 
 **Jitter (TAA).** None.
 
-**Reversed depth.** Not used; depth is the NVR combined depth.
+**Reversed depth.** Not used; depth is the Vegas Shaders combined depth.
 
 **HDR vs LDR.** LDR only (8 bits). The clipping view's whole purpose is the 8-bit limit; it is meaningless for an HDR chain.
 

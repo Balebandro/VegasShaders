@@ -4,11 +4,11 @@ Source of this spec: the rewritten shader (wave 3 buffers, branch claude/rw3-buf
 
 ## 1. Purpose
 
-Normals builds a per-pixel surface normal for the whole picture, in view space, from the CombineDepth buffer, and stores it in a full-frame texture that most NVR effects read. The player does not see it directly. Its quality decides how smooth lit surfaces, reflections, shadows and snow look on low-poly ground and rocks. An optional smoothing step (off by default) evens out the normals of flat-shaded low-poly geometry in place, so every reader gets the same smoothed normal.
+Normals builds a per-pixel surface normal for the whole picture, in view space, from the CombineDepth buffer, and stores it in a full-frame texture that most Vegas Shaders effects read. The player does not see it directly. Its quality decides how smooth lit surfaces, reflections, shadows and snow look on low-poly ground and rocks. An optional smoothing step (off by default) evens out the normals of flat-shaded low-poly geometry in place, so every reader gets the same smoothed normal.
 
 ## 2. When it runs
 
-- Every frame where NVR's post-process runs: RenderDepthAndNormals (first step of RenderEffectsPreTonemapping), right after CombineDepth.
+- Every frame where Vegas Shaders' post-process runs: RenderDepthAndNormals (first step of RenderEffectsPreTonemapping), right after CombineDepth.
 - It is skipped when the merged CombineDepth pass already wrote the normals (see the CombineDepth spec).
 - After the normals pass, the smoothing (SmoothNormals > 0) runs in place (two passes), then the CapturedNormals merge (not specified here).
 - Enabled: no settings section; on whenever loaded.

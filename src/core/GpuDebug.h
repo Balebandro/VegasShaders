@@ -130,7 +130,7 @@ namespace GpuDebug {
 		RenderDocGetApiFn getApi = (RenderDocGetApiFn)GetProcAddress(rd, "RENDERDOC_GetAPI");
 		void* api = nullptr;
 		if (!getApi || !getApi(kRenderDocApi112, &api) || !api) {
-			Logger::Log("RENDERDOC: renderdoc.dll is loaded but RENDERDOC_GetAPI(1.1.2) failed; no captures from NVR.");
+			Logger::Log("RENDERDOC: renderdoc.dll is loaded but RENDERDOC_GetAPI(1.1.2) failed; no captures from Vegas Shaders.");
 			return nullptr;
 		}
 		s.Api = (RenderDocApi112*)api;

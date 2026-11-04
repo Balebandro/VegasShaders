@@ -1,5 +1,6 @@
 #include <regex>
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
+#include "SessionLog.h"	// 2026-11-04: the effect's name as the CRASH lines' stage
 #include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "Sm6Pass.h"	// UNOFFICIAL 2026-10-26 (deep/fork-sm6)
 #include "RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
@@ -462,6 +463,7 @@ void EffectRecord::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTar
 		renderTime = 0.0f;
 		return;
 	}
+	SessionLog::StageScope stage(Name);	// 2026-11-04 (CRASH lines)
 	if (Diagnostics::SelfTestSkip(this)) {	// UNOFFICIAL 2026-11-01 the flash detector's self-test: a one-frame dropout on purpose (off unless FlashSelfTestEvery)
 		EffectStatus::Note(StatusSlot, Name, EffectStatus::Skipped, "flash self-test: left out this frame on purpose ([Main.Develop.Main] FlashSelfTestEvery)");
 		renderTime = 0.0f;
@@ -628,12 +630,12 @@ bool EffectRecord::ExtFullScreen(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 	}
 	if (FAILED(result)) {
 		ExtFailed = true;
-		EffectStatus::D3DFail("NVR DXVK pass draw (EffectRecord::ExtFullScreen)", result);	// UNOFFICIAL 2026-11-01
-		EffectStatus::Level(Name, "NVR DXVK pass failed: its D3D9 technique for the session", false);
-		Logger::Log("UNOFFICIAL NVR DXVK: pass %s failed to draw (%08lX; DXVK's log says why): its D3D9 technique is used from now on", Name, result);
+		EffectStatus::D3DFail("Vegas Shaders DXVK pass draw (EffectRecord::ExtFullScreen)", result);	// UNOFFICIAL 2026-11-01
+		EffectStatus::Level(Name, "Vegas Shaders DXVK pass failed: its D3D9 technique for the session", false);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:pass %s failed to draw (%08lX; DXVK's log says why): its D3D9 technique is used from now on", Name, result);
 		return false;
 	}
-	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as a Vulkan pass.", Name);
+	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s runs as a Vulkan pass.", Name);
 	return true;
 }
 
@@ -677,7 +679,7 @@ bool EffectRecord::ExtDrawTo(ID3D9NvrExtPipeline* Pipeline, IDirect3DSurface9* c
 		if (fabsf(shiftY) < 1e-6f) shiftY = 0.0f;
 		if ((shiftX != 0.0f || shiftY != 0.0f) && DxvkCompute::Info().ExtVersionMinor < 4) {
 			static bool said = false;
-			if (!said) Logger::Log("UNOFFICIAL NVR DXVK: this d3d9.dll has extension %u.%u: passes into targets smaller than the screen read at the texel centre, not where their D3D9 pass reads (a quarter texel at half resolution; needs 1.4)", DxvkCompute::Info().ExtVersionMajor, DxvkCompute::Info().ExtVersionMinor);
+			if (!said) Logger::Log("UNOFFICIAL Vegas Shaders DXVK:this d3d9.dll has extension %u.%u: passes into targets smaller than the screen read at the texel centre, not where their D3D9 pass reads (a quarter texel at half resolution; needs 1.4)", DxvkCompute::Info().ExtVersionMajor, DxvkCompute::Info().ExtVersionMinor);
 			said = true; shiftX = shiftY = 0.0f;
 		}
 	}
@@ -686,13 +688,13 @@ bool EffectRecord::ExtDrawTo(ID3D9NvrExtPipeline* Pipeline, IDirect3DSurface9* c
 		: (shiftX != 0.0f || shiftY != 0.0f) ? DxvkCompute::Extension()->DrawShifted(&draw, shiftX, shiftY) : DxvkCompute::Extension()->Draw(&draw);
 	if (SUCCEEDED(result) && (shiftX != 0.0f || shiftY != 0.0f) && !ExtShiftLogged) {
 		ExtShiftLogged = true;
-		Logger::Log("UNOFFICIAL NVR DXVK: %s's passes into smaller targets read at the D3D9 frame quad's uv (first: shift %.3f, %.3f px)", Name, shiftX, shiftY);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s's passes into smaller targets read at the D3D9 frame quad's uv (first: shift %.3f, %.3f px)", Name, shiftX, shiftY);
 	}
 	if (FAILED(result)) {
 		ExtFailed = true;
-		EffectStatus::D3DFail("NVR DXVK pass draw (EffectRecord::ExtDrawTo)", result);	// UNOFFICIAL 2026-11-01
-		EffectStatus::Level(Name, "NVR DXVK pass failed: its D3D9 technique for the session", false);
-		Logger::Log("UNOFFICIAL NVR DXVK: pass %s failed to draw into its own target (%08lX; DXVK's log says why): its D3D9 technique is used from now on", Name, result);
+		EffectStatus::D3DFail("Vegas Shaders DXVK pass draw (EffectRecord::ExtDrawTo)", result);	// UNOFFICIAL 2026-11-01
+		EffectStatus::Level(Name, "Vegas Shaders DXVK pass failed: its D3D9 technique for the session", false);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:pass %s failed to draw into its own target (%08lX; DXVK's log says why): its D3D9 technique is used from now on", Name, result);
 		return false;
 	}
 	for (UINT i = 0; MixCheck::On && i < TargetCount; i++) MixCheck::NoteWrite(Targets[i], MixCheck::kVulkan);	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
@@ -710,7 +712,7 @@ ID3D9NvrExtPipeline* EffectRecord::ExtVariant(std::map<std::string, ExtPass>& Va
 		if (!pass.Tried) {
 			pass.Tried = true;
 			if (DxvkCompute::HasSpirv(name.c_str())) pass.Pipeline = Make(name.c_str());
-			if (pass.Pipeline) Logger::Log("UNOFFICIAL NVR DXVK: test variant %s in use (NvrDxvkTestSuffix)", name.c_str());
+			if (pass.Pipeline) Logger::Log("UNOFFICIAL Vegas Shaders DXVK:test variant %s in use (NvrDxvkTestSuffix)", name.c_str());
 		}
 		if (pass.Pipeline) return pass.Pipeline;
 	}

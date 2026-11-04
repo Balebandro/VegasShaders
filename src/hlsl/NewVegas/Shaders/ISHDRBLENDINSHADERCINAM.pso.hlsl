@@ -108,7 +108,8 @@ VtxVaryings main(VtxAttrs pa) {
     }
     
     final_c.rgb = lerp(final_c.rgb, final_c.rgb * Cinematic.w, cine_k); // apply brightness from Cinematic
-    final_c.rgb = tonemap(final_c.rgb * TESR_HDRData.y); // exposure & tonemap using provided tonemapper
+    // exposure, local exposure and the night colour shift (2026-11-04, both off by default) & tonemap
+    final_c.rgb = tonemap(nightShift(localExposure(final_c.rgb * TESR_HDRData.y, pa.f_texcoord_1.xy, TESR_HDRData.y)));
     // UNOFFICIAL 2026-10-30 HueSafeClip here too (as ISHDRBLENDINSHADERCIN): this alpha-mask variant tonemaps the frames with a
     // menu over the world (the Pip-Boy), and it cut a too-bright channel where the world's keeps the hue, so the Pip-Boy's lit
     // amber and orange came out yellower than the same colours in the world. The setting's description says it applies everywhere.

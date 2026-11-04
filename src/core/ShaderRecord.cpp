@@ -17,6 +17,7 @@
 #include "GpuProfiler.h"
 #include "LinearPreDecode.h"	// UNOFFICIAL 2026-10-17
 #include "ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
+#include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (ALPHA_HASH_ON)
 #include "LandLight.h"	// UNOFFICIAL 2026-10-25 (SunFar)
 // Small helpers for the shader loader: a template's define list is searched by name, and a held interface
 // is released and cleared in one step.
@@ -201,6 +202,10 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// UNOFFICIAL _rmaos maps (Includes/Object.hlsl, ObjectTemplate.hlsl, Render.cpp RmaosDraw): compiled in only when on at
 	// startup, so that otherwise the object shaders are exactly what they were.
 	AppendDefine("RMAOS_ON", TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "Enabled") ? "1" : "0");
+	// 2026-11-04 dust on top surfaces (Includes/ObjectDust.hlsl) and micro-shadowing (Includes/Object.hlsl, needs RMAOS_ON): compiled in
+	// only when on at startup, so that off the object and parallax shaders are exactly what they were.
+	if (TheSettingManager->GetSettingI("Shaders.PBR.Dust", "Enabled")) AppendDefine("DUST_ON", "1");
+	if (TheSettingManager->GetSettingI("Shaders.PBR.MicroShadow", "Enabled")) AppendDefine("MICRO_SHADOW_ON", "1");
 	// UNOFFICIAL 2026-11-02 SpecularFromMap (Includes/Object.hlsl): the maps' alpha (specular level) is used unless switched off; defined
 	// only when off, so the define list is unchanged by default.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "Enabled") && !TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "SpecularFromMap"))
@@ -322,6 +327,8 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 		layerDefine[0] = (char)('0' + std::clamp(TheSettingManager->GetSettingI("Shaders.Terrain.Variation", "Layers"), 1, 7));
 		AppendDefine("TERRAIN_VARIATION_LAYERS", layerDefine);
 	}
+	// 2026-11-04 macro variation (Includes/TerrainMacro.hlsl): compiled in only when on at startup, like TERRAIN_VARIATION.
+	AppendDefine("TERRAIN_MACRO", TheSettingManager->GetSettingI("Shaders.Terrain.Macro", "Enabled") ? "1" : "0");
 
 	// UNOFFICIAL 2026-10-13 blood on the first-person weapon and gloves (Includes/HandBlood.hlsl, HandBlood.cpp): compiled in only
 	// when on at startup, like TERRAIN_BLEND (the per-draw switch alone cost every lit object 2-5 %).
@@ -332,6 +339,9 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	AppendDefine("PIPBOY_FIT_ON", TheSettingManager->GetSettingI("Shaders.PipboyFit.Main", "Enabled") ? "1" : "0");
 	// UNOFFICIAL 2026-10-20 plant wind (Includes/PlantWind.hlsl, core/PlantWind.h): the static plants' part, likewise.
 	AppendDefine("PLANT_WIND_ON", TheSettingManager->GetSettingI("Shaders.Plants.Wind", "Enabled") ? "1" : "0");
+	// UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl, core/AlphaHash.h): the hashed alpha test, compiled in only when on at
+	// startup (defined only then: the define list, and so the shader cache's keys, stay as they were with it off).
+	if (AlphaHash::CompiledIn()) AppendDefine("ALPHA_HASH_ON", "1");
 
 	AppendDefine("SUN_CROSSFADE", TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.SunSmoothing", "CrossFade") &&
 		TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows") ? "1" : "0");

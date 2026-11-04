@@ -12,8 +12,9 @@
 //   - HEARTBEAT every 60 s in game: frame times (avg, 1% low, worst, spikes), address space, the D3D9 texture memory estimate, effects on,
 //     and the flicker counters of the minute (camera cuts, history resets, lamp shadow slot changes, cached sun cascade redraws,
 //     shadow atlas re-converts, reflection cube restarts, AmbientLight grid rebuilds);
-//   - SESSION END at exit, and one CRASH line from a chained unhandled-exception filter (the previous filter, e.g. a crash logger,
-//     still runs).
+//   - SESSION END at exit, and CRASH lines from a chained unhandled-exception filter (the previous filter, e.g. a crash logger,
+//     still runs): 2026-11-04 armed at plugin load (it came only once the player was in a cell, so a crash at start-up or in the
+//     main menu left nothing), with the exception in words, the registers, a scanned call stack and the stage the thread was in.
 // The frame journal ([Main.Develop.Main] FrameJournal, off by default) adds one FJ line per event that changes what is drawn, with the
 // frame number of the line prefix, up to 20000 lines a session (for flicker hunting with the bench's shots).
 // UNOFFICIAL 2026-11-01 (core/Diagnostics.cpp): the journal's events are ALSO kept in memory, always (the last 256, journal on or off),
@@ -23,6 +24,7 @@
 
 class GameSetting;
 struct IDirect3DDevice9;
+struct _EXCEPTION_RECORD;
 
 namespace FrameJournal {
 	inline bool On = false;			// [Main.Develop.Main] FrameJournal (read once a second by SessionLog::OnFrame)
@@ -76,4 +78,24 @@ namespace SessionLog {
 	std::string Environment();
 	// The last frames' times (ms, oldest first, loading screens left out), at most count
 	void RecentFrameTimes(std::vector<float>& out, unsigned count);
+
+	// 2026-11-04 (user: "we constantly need to ask other users for crash logs. is there anyway we can get some of that info in our own
+	// log?"): the CRASH lines name the stage the crashing thread was in. A StageScope marks one for its lifetime; nested ones stack,
+	// per thread, 8 deep, so a crash reads "game frame > effects > AmbientOcclusion". A store and a decrement: cheap enough per effect.
+	namespace Stages {
+		inline thread_local const char* Stack[8] = {};
+		inline thread_local unsigned Depth = 0;
+	}
+	struct StageScope {
+		explicit StageScope(const char* stage) { if (Stages::Depth < 8) Stages::Stack[Stages::Depth] = stage; Stages::Depth++; }
+		~StageScope() { Stages::Depth--; }
+		StageScope(const StageScope&) = delete;
+		StageScope& operator=(const StageScope&) = delete;
+	};
+	// NVSEPlugin_Load, after OnPluginLoad: the CRASH lines from here on (the filter set before ours, a crash logger's, still runs)
+	void ArmCrashReport();
+	// xNVSE PostLoad and once in game: a crash handler set after ours goes under ours (when: for the log line)
+	void ReassertCrashReport(const char* when);
+	// A C++ exception's type as the compiler names it (".?AVtype_error@toml@@"), or "?"; safe on a broken record
+	const char* CppExceptionType(const _EXCEPTION_RECORD* record);
 }

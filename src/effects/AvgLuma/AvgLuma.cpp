@@ -107,7 +107,7 @@ bool AvgLumaEffect::RenderCompute(IDirect3DDevice9* Device) {
 	if (!Enabled || !ShouldRender()) return false;
 	if (!ComputeReady()) {
 		static bool said = false;
-		if (histogramWanted && !said) Logger::Log("UNOFFICIAL AvgLuma: Histogram needs NVR DXVK; the exposure uses the D3D9 average");
+		if (histogramWanted && !said) Logger::Log("UNOFFICIAL AvgLuma: Histogram needs the Vegas Shaders DXVK fork; the exposure uses the D3D9 average");
 		said = true;
 		return false;
 	}

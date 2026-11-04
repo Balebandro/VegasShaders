@@ -426,7 +426,7 @@ static bool CopyRegistered(void* to, size_t bytes, const char* name) {
 		static bool logged = false;
 		if (!logged) {
 			logged = true;
-			Logger::Log("UNOFFICIAL NVR DXVK: SunFar: %s is not registered; the D3D9 technique is used", name);
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: SunFar: %s is not registered; the D3D9 technique is used", name);
 		}
 		return false;
 	}
@@ -532,6 +532,6 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	SunFarPush push = {};	// the sampler heap indices: DXVK fills them in
 	IDirect3DSurface9* target = Surface;
 	if (!ExtDrawTo(extPass.Pipeline, &target, 1, resources, _countof(resources), &push, sizeof(push), nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
-	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL NVR DXVK: %s runs as a Vulkan pass.", Name);
+	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as a Vulkan pass.", Name);
 	return true;
 }

@@ -103,7 +103,7 @@ namespace LinearSceneCensus {
 			total += e.second; if (isNvr) nvr += e.second;
 			if (e.first.main) { mainAll += e.second; if (isNvr) mainNvr += e.second; }
 		}
-		Logger::Log("LINEAR CENSUS: %u frames, %.1f draws/frame (%.1f by NVR shaders); main opaque list %.1f/frame (%.1f NVR)", Frames,
+		Logger::Log("LINEAR CENSUS: %u frames, %.1f draws/frame (%.1f with Vegas Shaders' own shaders); main opaque list %.1f/frame (%.1f Vegas Shaders)", Frames,
 			total / (double)Frames, nvr / (double)Frames, mainAll / (double)Frames, mainNvr / (double)Frames);
 		// UNOFFICIAL 2026-10-31 (docs/next/DEFERRED-RENDERING-PLAN.md stage 0a): the world's main list by blend, NVR's templates against the game's
 		// shaders, and every blended template draw inside it (what a pass at the end of the list would find already blended over the walls: the

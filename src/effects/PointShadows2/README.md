@@ -56,7 +56,7 @@ composite over the picture.
 Slot 8 (cube map 11) is reserved and unbound: lamp slot 11 is never shadow-tested. Samplers are bound by declaration order.
 An absent texture makes the pass skip (in the Vulkan path, the D3D9 pass runs instead).
 
-### Constants (D3D9 registers are not fixed by NVR; the compiler assigns them and the engine finds them by name)
+### Constants (D3D9 registers are not fixed by Vegas Shaders; the compiler assigns them and the engine finds them by name)
 
 | Name | Type | Meaning and units |
 |---|---|---|
@@ -87,7 +87,7 @@ and where it runs.
 | [_Shaders.ShadowsInteriors.Main] | ShadowCubeMapSize | int | 64 to 2048 | 512 | Resolution of each cube map this pass samples. Not read by the pass itself |
 | [_Shaders.ShadowsExteriors.Main] | UsePointShadowsDay | bool | 0 or 1 | false | Outdoors in daytime: when 0, the fade constant z is 0 and every lamp counts as unshadowed |
 | [_Shaders.ShadowsExteriors.Main] | UsePointShadowsNight | bool | 0 or 1 | false | Outdoors at night, same effect as the daytime key |
-| [Main.Main.Performance] | NvrDxvkPasses | bool | 0 or 1 | true | Selects the Vulkan pass (section 7) when the NVR DXVK extension is present |
+| [Main.Main.Performance] | NvrDxvkPasses | bool | 0 or 1 | true | Selects the Vulkan pass (section 7) when the Vegas Shaders DXVK extension is present |
 | [Main.Main.Performance] | NvrDxvkKeepD3D9 | string list | names separated by commas | empty | If this effect's name is listed, the Vulkan pass is skipped and the D3D9 pass is used (a test tool) |
 
 Keys this pass does NOT read, though they sit next to it: NearFade and EdgeFade (of [_Shaders.ShadowsInteriors.Main]), DrawDistance
@@ -180,7 +180,7 @@ Files (in src/hlsl/NewVegas/Compute):
 - PointShadows2.spv: the compiled pass (the engine loads this file by the name "PointShadows2"). Wave 3: rebuilt from the new .frag (see section 9 item 3).
 
 How C++ chooses: effects/PointShadows2.cpp overrides the extension-render entry of the effect base. The choice is made in the effect
-base's render (core/EffectRecord.cpp): the Vulkan path runs when the NVR DXVK switch is on (NvrDxvkPasses on, not a rect frame, and the
+base's render (core/EffectRecord.cpp): the Vulkan path runs when the Vegas Shaders DXVK switch is on (NvrDxvkPasses on, not a rect frame, and the
 extension is available), the effect's name is not in NvrDxvkKeepD3D9, and the technique is not replaced by an SM6 build (none exists for
 this effect). If the Vulkan entry returns false, the D3D9 pass runs for that call. Conditions that return false: technique index not 0;
 clear requested; target not the shadow pass surface; a texture missing; a register-table entry missing; the pipeline fails to build; or the

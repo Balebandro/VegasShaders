@@ -131,7 +131,7 @@ they replace.
 | FogVolume | bool | true | Read by the volumetric light (TESR_VolumetricLightGridData.x). With the grid bound, outdoors, modern look: the noise and the sun visibility come from the grid's height-weighted air sums along the view (the part inside the march distance), the rest from the four-point march / the surface. |
 | Amount | max 0 | 0.4 (Int 0.25) | Final strength: mul = lerp(1, mul, a), add x a, a = saturate(Amount x lerp(1, AmountScale, night)). Int. |
 | FogSaturation | max 0 | 1.7 (Int 0.5) | lerp(luma, colour, FogSaturation / (1 + density)). Int. |
-| BaseDensity | max 0 | 0.2 (Int 0.3) | NVR's own density. Int. |
+| BaseDensity | max 0 | 0.2 (Int 0.3) | Vegas Shaders' own density. Int. |
 | WeatherImpact | max 0 | 0.5 (Int 0) | Adds the weather's density (from its fog near / far), pulls the fog power toward the weather's (lerp(1, FogData.w, WI), as the froxel grid), and blends the colour toward the weather side. Int. |
 | GameFogFloor | 0-2 | 0 | Ext, modern only. After Amount, tops coverage up to the game's own fog curve x this (raw near, far, power), never on the sky, with the fog colour without glow. |
 | WeatherFogColor | 0-1 (missing 1) | 1 | Ext, modern only. Share of the weather's fog colour (instead of the sky toward the horizon) in the weather side; the sky dome keeps the sky colour. |
@@ -320,7 +320,7 @@ Files: `Compute/VolumetricFog.glsl` (bindings, uniform block, push block, the wh
 `VolumetricFogEstimate.spv`, `VolumetricFogApply.spv` and the variants of `Compute/variants.txt` (Estimate l c i p, Apply m l c p, the
 test suffixes n / s / k / f).
 
-- Selected by `NvrDxvkPasses` on NVR DXVK (not in rect frames, not for the diagnostic overrides or SM6); ExtDedicated (both passes),
+- Selected by `NvrDxvkPasses` on Vegas Shaders DXVK (not in rect frames, not for the diagnostic overrides or SM6); ExtDedicated (both passes),
   ExtShadowAO (mode 3), ExtRender (mode 4, full-resolution techniques). PackedFog and HalfStoreProbe stay D3D9.
 - Set 1 bindings: 0 scene, 1 depth, 2 atlas, 3 normals, 4 point shadow, 5 noise (3D), 6 sky table, 7 grid; Apply also 8 fog multiply, 9
   fog add, 10 AO, 11 sky visibility, 12 SunFar. Stand-ins (the depth buffer) are never read while their flags are 0.

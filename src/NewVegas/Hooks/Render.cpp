@@ -49,7 +49,9 @@
 #include "../../core/HdrOutput.h"	// UNOFFICIAL 2026-10-26 HDR output (needs NVR DXVK 1.5-hdr)
 void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-29: from NVSEPlugin_Load (see HdrOutput.h)
 #include "../../core/ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
+#include "../../core/AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts
 #include "../../core/CharacterObjectReach.h"	// UNOFFICIAL 2026-10-23 CharacterObjectReach: head/face/headgear object draws flagged (c204)
+#include "../../core/DustDraw.h"	// 2026-11-04 dust on top surfaces: static world draws flagged (c169)
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-26: DXVK PROFILE lines (F10 profiling on NVR DXVK 1.5)
 #include "../../core/ShadowAtlas.h"	// UNOFFICIAL 2026-10-30 ShadowAtlas (WorldStartConvert)
 #include "../../core/LandLamps.h"	// UNOFFICIAL 2026-10-30 LandAllLamps: the land lit by all of its own lamps (plan C)
@@ -345,7 +347,7 @@ namespace ShaderSplit {
 			}
 			if (!count) continue;
 			std::sort(rows, rows + count, [](const Row& a, const Row& b) { return a.Avg > b.Avg; });
-			Logger::Log("GPU SPLIT %s, %u frames: %.4f ms per frame by shader family (NVR = NVR's replacement shader, vanilla = the game's own)",
+			Logger::Log("GPU SPLIT %s, %u frames: %.4f ms per frame by shader family (NVR = Vegas Shaders' replacement shader, vanilla = the game's own)",
 				ContextNames[c], timeline.WindowFrames(), total);
 			for (unsigned i = 0; i < count; ++i)
 				Logger::Log("GPU SPLIT   %-12s %-14s %-7s avg %.4f ms  max %.4f  (%4.1f%%)", ContextNames[c], LabelNames[rows[i].Label],
@@ -641,6 +643,7 @@ static void PrepareSceneCameras() {
 using RenderMethod = void(__thiscall*)(Main*, BSRenderedTexture*, int, int);
 RenderMethod Render = reinterpret_cast<RenderMethod>(Hooks::Render);
 void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTexture, int Arg2, int Arg3) {
+	SessionLog::StageScope stage("game frame");	// 2026-11-04: the CRASH lines' stage (SessionLog.h)
 	static CpuTimer gameRenderCpuTimer("Game render (CPU)"), presentCpuTimer("Present (CPU)"), gameUpdateCpuTimer("Game update (CPU)");
 	const double renderStart = CpuTimer::NowMs();
 	if (GpuTimer::Enabled) {
@@ -718,6 +721,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	PbrPop::SpecFade::BeginFrame();	// UNOFFICIAL 2026-10-18 SpecularFade
 	PbrPop::SpecDistance::BeginFrame();	// UNOFFICIAL 2026-10-27 SpecularDistance (before the scene walk builds the objects' passes)
 	CharacterObjectReach::BeginFrame();	// UNOFFICIAL 2026-10-23 CharacterObjectReach
+	DustDraw::BeginFrame();	// 2026-11-04 dust: which object draws may take it (core/DustDraw.h)
 	FoldHighlights::BeginFrame();	// UNOFFICIAL 2026-10-21 FoldHighlights
 	LinearScene::BeginFrame(TheRenderManager->device);	// UNOFFICIAL 2026-10-28 LinearScene
 	{	// UNOFFICIAL 2026-10-28 CapturedNormals: captured while a reader will use them this frame (SnowAccumulation's CapturedNormals, or
@@ -1298,7 +1302,7 @@ namespace ReflectionProbe {
 		if (!Player || !Player->parentCell) return;
 		TESWaterForm* form = nullptr;
 		const float chosen = (Tes && WorldSceneGraph) ? Tes->GetWaterHeight(Player, WorldSceneGraph, &form) : 0.0f;
-		Logger::Log("UNOFFICIAL reflection probe water: player z %.1f, cell water height %.1f, NVR's GetWaterHeight %.1f",
+		Logger::Log("UNOFFICIAL reflection probe water: player z %.1f, cell water height %.1f, Vegas Shaders' GetWaterHeight %.1f",
 			Player->pos.z, Player->parentCell->GetWaterHeight(), chosen);
 		WaterManager* water = Tes ? Tes->waterManager : nullptr;
 		if (!water) return;
@@ -1360,7 +1364,7 @@ namespace ReflectionProbe {
 	}
 
 	static void Report() {
-		static const char* const modeNames[ModeCount] = { "m0 as the game draws it", "m1 clip plane forced OFF at every bind", "m2 clip plane re-set by NVR at every bind" };
+		static const char* const modeNames[ModeCount] = { "m0 as the game draws it", "m1 clip plane forced OFF at every bind", "m2 clip plane re-set by Vegas Shaders at every bind" };
 		Logger::Log("UNOFFICIAL reflection probe for screenshot %s, %s%s:", Name, modeNames[Mode], FixOn() ? " (ReflectionClipFix on: m0 includes it)" : "");
 		LogPass("world pass", Shots[0]);
 		LogPass("reflection pass", Shots[1]);
@@ -2214,7 +2218,7 @@ namespace GrassFirst {
 			if (learned && ForgetLogs < 20) {
 				ForgetLogs++;
 				Logger::Log("UNOFFICIAL GrassFirst: %u grass passes learned as the game's VS are tried again (%s)", learned,
-					gap ? "the world was not drawn for a while: a loading screen or a menu" : "NVR's shaders were switched");
+					gap ? "the world was not drawn for a while: a loading screen or a menu" : "Vegas Shaders' own shaders were switched");
 			}
 		}
 		LastEarlyFrame = frame;
@@ -2690,7 +2694,7 @@ namespace GrassFirst {
 							GameVertexShader[i] = false;
 							NvrAgainFrames[i] = 0;
 							if (++StatUnlearned <= 10)
-								Logger::Log("UNOFFICIAL GrassFirst: grass pass %03X binds NVR's vertex shader again (%u frames running): split and drawn before the land again (with its sun shadows)",
+								Logger::Log("UNOFFICIAL GrassFirst: grass pass %03X binds Vegas Shaders' vertex shader again (%u frames running): split and drawn before the land again (with its sun shadows)",
 									r.passId, (unsigned)UnlearnFrames);
 						}
 					}
@@ -3138,7 +3142,7 @@ namespace LampCountStats {
 		Objects.clear();
 		if (++CapFrames < 240) return;
 		const double f = 1.0 / CapFrames;
-		Logger::Log("LAMP CAPS skippable: %.1f extra lamp + highlight passes a frame (%.1f lamps in them) on %.1f objects whose base pass is an NVR template; %.1f such passes on %.1f objects in all",
+		Logger::Log("LAMP CAPS skippable: %.1f extra lamp + highlight passes a frame (%.1f lamps in them) on %.1f objects whose base pass is a Vegas Shaders template; %.1f such passes on %.1f objects in all",
 			SkipPasses * f, SkipLamps * f, SkipObjects * f, ExtraPasses * f, ExtraObjects * f);
 		SkipPasses = SkipLamps = SkipObjects = ExtraObjects = ExtraPasses = 0;
 		for (unsigned t = 0; t < 256; t++) {
@@ -3297,6 +3301,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 		PbrPop::SpecFade::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, fold, foldVertexColor);
 	}
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
+	DustDraw::ForDraw(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// 2026-11-04: a static mesh in the world scene takes dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
 	ForwardShadowsForPass(Pass);
 	if (LampScissor::Before((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World, BarrelHeat::Active) == LampScissor::Skip) {
@@ -3321,7 +3326,9 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 		ShaderSplit::CurrentContext == ShaderSplit::Reflections ? DxvkCompute::kDisplaceReflection : DxvkCompute::kDisplaceOther);
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	DisplaceHeight::Geometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-11-01 SameHeight
+	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	RenderPassStandard(Pass, Arg2, Arg3, Arg4);
+	AlphaHash::AfterPass(TheRenderManager->device);
 	DisplaceHeight::Geometry = nullptr;
 	GameEyes::After();
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) ObjectMotion::NoteRigid(((const PointShadowForward::RenderPassView*)Pass)->geometry);	// UNOFFICIAL 2026-10-29 ObjectMotion
@@ -3374,6 +3381,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 		PbrPop::SpecFade::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, fold, foldVertexColor);
 	}
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
+	DustDraw::ForDraw(TheRenderManager->device, false);	// 2026-11-04: skinned (people, creatures, armour, arms): no dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
 	ForwardShadowsForPass(Pass);
 	ClothWind::PassGeometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-10-19 cloth: SetShadersHook notes this object
@@ -3388,7 +3396,9 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) TAAEffect::NoteWorldDraw();	// UNOFFICIAL 2026-10-27 RenderScale: a check of the viewport
 	else if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) TAAEffect::NoteWorldDraw(true);	// v2: the weapon into the world's rect
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
+	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	RenderPassSkinned(Pass, Arg2, Arg3, Arg4);
+	AlphaHash::AfterPass(TheRenderManager->device);
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) ObjectMotion::NoteSkinned(((const PointShadowForward::RenderPassView*)Pass)->geometry);	// UNOFFICIAL 2026-10-29 ObjectMotion: the bones the game just made
 	GameEyes::After();
 	if (countOpt) OnePassDepth::Counts::After();
@@ -3580,6 +3590,7 @@ static void ResolveViewModelDepth() {
 	TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
 }
 void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, UInt8 IsFirstPerson, UInt8 WireFrame, UInt8 Arg4) {
+	SessionLog::StageScope stage("the world");
 	EndPreSceneTimer();
 	WorldRenderedThisFrame = true;
 	if (!FrameWorldArgsKnown) { FrameWorldArgsKnown = true; FrameWorldArgs[0] = IsFirstPerson; FrameWorldArgs[1] = WireFrame; FrameWorldArgs[2] = Arg4; }
@@ -3610,7 +3621,10 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 		SandstormGlass::BeginWorld();	// UNOFFICIAL sandport: ThroughBlended (RenderBlendedHook)
 		// UNOFFICIAL 2026-10-20 MaterialAware reflections (core/ReflMaterial.h): blended passes keep off the scene's alpha.
 		ReflMaterial::BeginWorld(TheRenderManager->renderState, TheRenderManager->device, ReflMaterial::CompiledIn() && TheSettingManager->GetSettingI("Shaders.Reflections.Main", "MaterialAware") > 0);
+		// UNOFFICIAL 2026-11-03 SmoothCutouts (core/AlphaHash.h): alpha-tested objects hashed while TAA / FSR / DLSS jitter this scene.
+		AlphaHash::BeginWorld(TheRenderManager->device, FrameWorldCalls == 1, TAA && TAA->IsJitterActive());
 		RenderWorldSceneGraph(This, SkySun, IsFirstPerson, WireFrame, Arg4);
+		AlphaHash::EndWorld(TheRenderManager->device);
 		ReflMaterial::EndWorld(TheRenderManager->renderState, TheRenderManager->device);
 		SandstormGlass::EndWorld();
 		PassSums::EndWorld(TheRenderManager->device);	// UNOFFICIAL ExactPassSums: a run still open at the world's end is folded in here
@@ -3667,6 +3681,7 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 using RenderFirstPersonMethod = void(__thiscall*)(Main*, NiDX9Renderer*, NiGeometry*, Sun*, BSRenderedTexture*);
 RenderFirstPersonMethod RenderFirstPerson = reinterpret_cast<RenderFirstPersonMethod>(Hooks::RenderFirstPerson);
 void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Renderer, NiGeometry* Geo, Sun* SkySun, BSRenderedTexture* RenderedTexture) {
+	SessionLog::StageScope stage("first person");
 	// Clear the depth buffer before rendering first person model to prevent clipping with world objects & other artefacts
 	static GpuTimer firstPersonTimer("First person (game)");
 	GpuProfileScope gpu(firstPersonTimer, TheRenderManager->device);
@@ -3691,6 +3706,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 using RenderReflectionsMethod = void(__thiscall*)(WaterManager*, NiCamera*, ShadowSceneNode*);
 RenderReflectionsMethod RenderReflections = reinterpret_cast<RenderReflectionsMethod>(Hooks::RenderReflections);
 void __fastcall RenderReflectionsHook(WaterManager* This, UInt32 edx, NiCamera* Camera, ShadowSceneNode* SceneNode) {
+	SessionLog::StageScope stage("the water reflection");
 	ReflectionProbe::HookCamera = Camera;
 	// UNOFFICIAL 2026-10-31 RT water ([Shaders.Reflections.RT] WaterSkipPlanar): the water shaders read the RT reflection this frame,
 	// not the planar map, so the planar pass is not drawn (ReflectionsEffect::UpdateWaterConstants decides, once a frame).
@@ -3798,6 +3814,7 @@ static void FlushRenderScale(BSRenderedTexture* SourceTarget, IDirect3DSurface9*
 using ProcessImageSpaceShadersMethod = void(__cdecl*)(NiDX9Renderer*, BSRenderedTexture*, BSRenderedTexture*);
 ProcessImageSpaceShadersMethod ProcessImageSpaceShaders = reinterpret_cast<ProcessImageSpaceShadersMethod>(Hooks::ProcessImageSpaceShaders);
 void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer* Renderer, BSRenderedTexture* SourceTarget, BSRenderedTexture* DestinationTarget) {
+	SessionLog::StageScope stage("effects");
 	if (TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->Unbind();	// UNOFFICIAL the skin blur
 	bool liveRendered = false;	// FORenderedMenu, FOPipBoyManager
 	bool live3D = false;	// normal menus, but 3D (lockpick etc)
@@ -3851,7 +3868,7 @@ void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer* Renderer, BSRenderedTex
 		// No world scene has been rendered for several frames, so the depth buffers NVR's effects need are
 		// stale and they would darken the image. Let the game's own image space run on its own.
 		static bool announced = false;
-		if (!announced) { Logger::Log("UNOFFICIAL world scene guard: no world scene render for %u frames, NVR effects skipped until it returns.", WorldMissStreak); announced = true; }
+		if (!announced) { Logger::Log("UNOFFICIAL world scene guard: no world scene render for %u frames, Vegas Shaders effects skipped until it returns.", WorldMissStreak); announced = true; }
 #if NVR_TEST_TOOLS
 		SettingShots::BeginFrame();	// UNOFFICIAL 2026-10-20, test only: the shots go on over a menu's still background (Pip-Boy pictures)
 #endif
@@ -3971,9 +3988,10 @@ static void RenderMainMenuMovie() {
 
 CallDetour kRenderInterfaceDetour;
 void __fastcall RenderInterfaceHook(void* apThis, void*, void* apCuller, bool abPipboyVisible) {
-	ShaderWarmUp::OnInterfaceFrame();	// UNOFFICIAL: at the main menu, draw the shaders used in play once (ShaderWarmUp.h)
-	ShaderWarmUp2::OnInterfaceFrame();	// UNOFFICIAL: at the main menu, draw the recorded drawing setups once (ShaderWarmUp2.h)
-	RenderMainMenuMovie();
+	SessionLog::StageScope stage("the interface");
+	{ SessionLog::StageScope warm("shader warm-up"); ShaderWarmUp::OnInterfaceFrame(); }	// UNOFFICIAL: at the main menu, draw the shaders used in play once (ShaderWarmUp.h)
+	{ SessionLog::StageScope warm("shader warm-up 2"); ShaderWarmUp2::OnInterfaceFrame(); }	// UNOFFICIAL: at the main menu, draw the recorded drawing setups once (ShaderWarmUp2.h)
+	{ SessionLog::StageScope movie("the main menu movie"); RenderMainMenuMovie(); }
 	ImGuiManager::NewFrame();
 	const auto original = kRenderInterfaceDetour.GetOverwrittenAddr();
 	ThisCall(original, apThis, apCuller, abPipboyVisible);

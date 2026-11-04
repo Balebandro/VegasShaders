@@ -52,6 +52,13 @@
 #define SHADOW_OLD_ATLAS_SAMPLER_REG s15 // the sun cross-fade's kept atlas (SUN_CROSSFADE only)
 #include "includes/Shadow.hlsl"	// shared code
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
+// UNOFFICIAL 2026-11-04 macro variation ([Shaders.Terrain.Macro], Includes/TerrainMacro.hlsl): compiled in only when on at startup.
+#ifndef TERRAIN_MACRO
+    #define TERRAIN_MACRO 0
+#endif
+#if TERRAIN_MACRO && defined(PS)
+#include "includes/TerrainMacro.hlsl"
+#endif
 
 // UNOFFICIAL terrain blending ([Shaders.Terrain.Blending]), ported from Balebandro's Physically-Based-Reloaded fork
 // (Alejandro Martinez, fork commit a23a624b), which follows the idea of Community Shaders' Terrain Blending (Skyrim).
@@ -510,6 +517,9 @@ PS_OUTPUT main(PS_INPUT pin) {
     float3 baseColor = LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights));
 #else
     float3 baseColor = LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts));	// UNOFFICIAL linear lighting: decoded
+#endif
+#if TERRAIN_MACRO
+    baseColor = MacroVary(baseColor, camPos);	// 2026-11-04 macro variation (Includes/TerrainMacro.hlsl)
 #endif
 #if TERRAIN_BLEND_ACTIVE
     // The land texture's height shapes the blend's edge (HeightBlend); the dither, if used, cuts on the shaped edge.

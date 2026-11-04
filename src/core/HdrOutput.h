@@ -451,7 +451,7 @@ namespace HdrOutput {
 			if (DxvkCompute::Extension())
 				DxvkCompute::Extension()->QueryInterface(__uuidof(ID3D9NvrExtHdr), (void**)&S.Hdr);
 		}
-		if (!S.Hdr) { Reason("Enabled, but this d3d9.dll has no HDR output (needs NVR DXVK with extension 1.5-hdr): SDR as before"); return; }
+		if (!S.Hdr) { Reason("Enabled, but this d3d9.dll has no HDR output (needs Vegas Shaders DXVK with extension 1.5-hdr): SDR as before"); return; }
 		// The fork's view (its surface formats and the EDID; the fork logs the formats when they change), once before the display check
 		if (!S.InfoRead) {
 			S.InfoRead = true;

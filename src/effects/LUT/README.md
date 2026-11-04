@@ -107,7 +107,7 @@ One technique (index 0, the only one), one pass. Full-screen quad through the fr
 
 ## 7. Vulkan path
 
-- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the NVR DXVK extension present. Technique 0 only; any other index
+- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the Vegas Shaders DXVK extension present. Technique 0 only; any other index
   is refused and falls back to the D3D9 technique for the session.
 - File: src/hlsl/NewVegas/Compute/LUT.frag (the same maths, line for line, as the D3D9 pass).
 - Bindings (set 1): binding 0 = the picture; bindings 1, 2, 3 = the day, night and interior tables. An unusable slot is bound to the

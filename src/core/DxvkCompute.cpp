@@ -20,24 +20,24 @@ void DxvkCompute::Initialize(IDirect3DDevice9* device) {
 
 	ID3D9NvrExt* ext = nullptr;
 	if (FAILED(device->QueryInterface(__uuidof(ID3D9NvrExt), (void**)&ext)) || !ext) {
-		_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "NVR DXVK extension not present (native D3D9 or stock DXVK): compute paths off, D3D9 passes used");
-		Logger::Log("UNOFFICIAL NVR DXVK: %s", StatusText);
+		_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK extension not present (native D3D9 or stock DXVK): compute paths off, D3D9 passes used");
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s", StatusText);
 		return;
 	}
 
 	ext->GetInfo(&ExtInfo);
 	if (ExtInfo.ExtVersionMajor != NVR_EXT_VERSION_MAJOR) {
-		_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "NVR DXVK extension %u.%u found but this NVR needs %u.x: compute paths off",
+		_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK extension %u.%u found but this build of Vegas Shaders needs %u.x: compute paths off",
 			ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, (unsigned)NVR_EXT_VERSION_MAJOR);
-		Logger::Log("UNOFFICIAL NVR DXVK: %s", StatusText);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s", StatusText);
 		ext->Release();
 		return;
 	}
 
 	Ext = ext;	// keeps a device reference for the session (never disposed, like the managers)
-	_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "NVR DXVK extension %u.%u on DXVK %s (push %u bytes, subgroup %u): compute paths available",
+	_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK extension %u.%u on DXVK %s (push %u bytes, subgroup %u): compute paths available",
 		ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, ExtInfo.DxvkVersion, ExtInfo.MaxPushBytes, ExtInfo.SubgroupSize);
-	Logger::Log("UNOFFICIAL NVR DXVK: %s", StatusText);
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s", StatusText);
 }
 
 const char* DxvkCompute::Status() {
@@ -48,7 +48,7 @@ void DxvkCompute::Fail(const char* Reason) {
 	if (Failed) return;
 	Failed = true;
 	_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "compute paths OFF for this session: %s", Reason ? Reason : "unknown");
-	Logger::Log("UNOFFICIAL NVR DXVK: %s", StatusText);
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s", StatusText);
 }
 
 bool DxvkCompute::LoadSpirv(const char* Name, std::vector<char>& Words) {
@@ -58,20 +58,20 @@ bool DxvkCompute::LoadSpirv(const char* Name, std::vector<char>& Words) {
 
 	std::ifstream file(path, std::ios::binary | std::ios::ate);
 	if (!file) {
-		Logger::Log("UNOFFICIAL NVR DXVK: cannot open %s", path);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:cannot open %s", path);
 		return false;
 	}
 	std::streamsize size = file.tellg();
 	file.seekg(0, std::ios::beg);
 	if (size < 20 || (size % 4) != 0) {
-		Logger::Log("UNOFFICIAL NVR DXVK: %s is not SPIR-V (size %d)", path, (int)size);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s is not SPIR-V (size %d)", path, (int)size);
 		return false;
 	}
 	Words.resize((size_t)size);
 	file.read(Words.data(), size);
 	if (!file) {
 		Words.clear();
-		Logger::Log("UNOFFICIAL NVR DXVK: could not read %s", path);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:could not read %s", path);
 		return false;
 	}
 	return true;
@@ -82,7 +82,7 @@ ID3D9NvrExtPipeline* DxvkCompute::CreatePipeline(const char* Name, const NVR_EXT
 
 	std::vector<char> words;
 	if (!LoadSpirv(Name, words)) {	// 2026-11-02: only this pass is off (it used to switch every compute path off for the session)
-		Logger::Log("UNOFFICIAL NVR DXVK: %s.spv missing: that pass is off, the rest keep running", Name);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s.spv missing: that pass is off, the rest keep running", Name);
 		return nullptr;
 	}
 
@@ -100,11 +100,11 @@ ID3D9NvrExtPipeline* DxvkCompute::CreatePipeline(const char* Name, const NVR_EXT
 	ID3D9NvrExtPipeline* pipeline = nullptr;
 	HRESULT result = Ext->CreateComputePipeline(&desc, &pipeline);
 	if (FAILED(result) || !pipeline) {
-		Logger::Log("UNOFFICIAL NVR DXVK: CreateComputePipeline(%s) failed (%08lX); DXVK's log says why", Name, result);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:CreateComputePipeline(%s) failed (%08lX); DXVK's log says why", Name, result);
 		Fail("a compute pipeline was refused");
 		return nullptr;
 	}
-	Logger::Log("UNOFFICIAL NVR DXVK: compute pipeline %s ready (%u bindings, %u push bytes)", Name, Count, PushSize);
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:compute pipeline %s ready (%u bindings, %u push bytes)", Name, Count, PushSize);
 	return pipeline;
 }
 
@@ -114,7 +114,7 @@ ID3D9NvrExtBuffer* DxvkCompute::CreateBuffer(UINT Size, UINT Flags, const char* 
 	ID3D9NvrExtBuffer* buffer = nullptr;
 	HRESULT result = Ext->CreateBuffer(&desc, &buffer);
 	if (FAILED(result) || !buffer) {
-		Logger::Log("UNOFFICIAL NVR DXVK: CreateBuffer(%s, %u bytes) failed (%08lX)", Name ? Name : "", Size, result);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:CreateBuffer(%s, %u bytes) failed (%08lX)", Name ? Name : "", Size, result);
 		Fail("a buffer could not be created");
 		return nullptr;
 	}
@@ -127,7 +127,7 @@ ID3D9NvrExtBuffer* DxvkCompute::CreateBufferNoFail(UINT Size, UINT Flags, const 
 	ID3D9NvrExtBuffer* buffer = nullptr;
 	HRESULT result = Ext->CreateBuffer(&desc, &buffer);
 	if (FAILED(result) || !buffer) {
-		Logger::Log("UNOFFICIAL NVR DXVK: CreateBuffer(%s, %u bytes) failed (%08lX)", Name ? Name : "", Size, result);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:CreateBuffer(%s, %u bytes) failed (%08lX)", Name ? Name : "", Size, result);
 		return nullptr;
 	}
 	return buffer;
@@ -150,7 +150,7 @@ ID3D9NvrExtSampler* DxvkCompute::CreateSampler(NVR_EXT_FILTER Filter, NVR_EXT_AD
 	ID3D9NvrExtSampler* sampler = nullptr;
 	HRESULT result = Ext->CreateSampler(&desc, &sampler);
 	if (FAILED(result) || !sampler) {
-		Logger::Log("UNOFFICIAL NVR DXVK: CreateSampler failed (%08lX)", result);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:CreateSampler failed (%08lX)", result);
 		Fail("a sampler could not be created");
 		return nullptr;
 	}
@@ -160,7 +160,7 @@ ID3D9NvrExtSampler* DxvkCompute::CreateSampler(NVR_EXT_FILTER Filter, NVR_EXT_AD
 ID3D9NvrExtPipeline* DxvkCompute::CreateGraphicsPipeline(const char* Name, const NVR_EXT_BINDING_DESC* Bindings, UINT Count, UINT PushSize, bool UsesSamplers, UINT TargetCount, NVR_EXT_BLEND Blend, bool FailAll) {
 	if (!Available()) return nullptr;
 	if (ExtInfo.ExtVersionMinor < 1) {
-		Logger::Log("UNOFFICIAL NVR DXVK: full-screen passes need extension 1.1 (this d3d9.dll has %u.%u): %s stays a D3D9 pass", ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, Name);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:full-screen passes need extension 1.1 (this d3d9.dll has %u.%u): %s stays a D3D9 pass", ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, Name);
 		return nullptr;
 	}
 
@@ -169,7 +169,7 @@ ID3D9NvrExtPipeline* DxvkCompute::CreateGraphicsPipeline(const char* Name, const
 	// session (FSR included) the first time such an effect drew: GodRays, WetWorld, AmbientOcclusion and ShadowsExteriors still try
 	// the Vulkan passes the shader rewrite (wave 3) removed. A refused pipeline below still stops everything (a broken d3d9.dll).
 	if (!LoadSpirv(Name, words)) {
-		Logger::Log("UNOFFICIAL NVR DXVK: %s.spv missing: %s stays a D3D9 pass, the rest keep running", Name, Name);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s.spv missing: %s stays a D3D9 pass, the rest keep running", Name, Name);
 		return nullptr;
 	}
 
@@ -190,11 +190,11 @@ ID3D9NvrExtPipeline* DxvkCompute::CreateGraphicsPipeline(const char* Name, const
 	ID3D9NvrExtPipeline* pipeline = nullptr;
 	HRESULT result = Ext->CreateGraphicsPipeline(&desc, &pipeline);
 	if (FAILED(result) || !pipeline) {
-		Logger::Log("UNOFFICIAL NVR DXVK: CreateGraphicsPipeline(%s) failed (%08lX); DXVK's log says why", Name, result);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:CreateGraphicsPipeline(%s) failed (%08lX); DXVK's log says why", Name, result);
 		if (FailAll) Fail("a pass pipeline was refused");
 		return nullptr;
 	}
-	Logger::Log("UNOFFICIAL NVR DXVK: pass %s ready (%u bindings, %u push bytes, %u target%s)", Name, Count, PushSize, TargetCount, TargetCount == 1 ? "" : "s");
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:pass %s ready (%u bindings, %u push bytes, %u target%s)", Name, Count, PushSize, TargetCount, TargetCount == 1 ? "" : "s");
 	return pipeline;
 }
 
@@ -351,7 +351,7 @@ bool DxvkCompute::RegisterReplacement(const char* Name, const void* Bytecode, UI
 
 	if (ExtInfo.ExtVersionMinor < 2) {
 		static bool said = false;
-		if (!said) Logger::Log("UNOFFICIAL NVR DXVK: shader replacements need extension 1.2 (this d3d9.dll has %u.%u): %s and the others stay as they are", ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, Name);
+		if (!said) Logger::Log("UNOFFICIAL Vegas Shaders DXVK:shader replacements need extension 1.2 (this d3d9.dll has %u.%u): %s and the others stay as they are", ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, Name);
 		said = true;
 		return false;
 	}
@@ -360,20 +360,20 @@ bool DxvkCompute::RegisterReplacement(const char* Name, const void* Bytecode, UI
 	std::ifstream file(path, std::ios::binary | std::ios::ate);
 	std::streamsize size = file ? (std::streamsize)file.tellg() : 0;
 	if (size < 20 || (size % 4) != 0) {
-		Logger::Log("UNOFFICIAL NVR DXVK: %s is not SPIR-V (size %d): %s stays as it is", path, (int)size, Name);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s is not SPIR-V (size %d): %s stays as it is", path, (int)size, Name);
 		return false;
 	}
 	file.seekg(0, std::ios::beg);
 	words.resize((size_t)size);
 	file.read(words.data(), size);
-	if (!file) { Logger::Log("UNOFFICIAL NVR DXVK: could not read %s", path); return false; }
+	if (!file) { Logger::Log("UNOFFICIAL Vegas Shaders DXVK:could not read %s", path); return false; }
 
 	char manifest[MAX_PATH];
 	_snprintf_s(manifest, sizeof(manifest), _TRUNCATE, "%sReplace\\%s.txt", Paths::ComputeDir(), key);
 	NVR_EXT_SHADER_REPLACEMENT_DESC desc = {};
 	bool floatsGiven = false;
 	if (!ParseReplacementManifest(manifest, desc.TextureMask, desc.FloatRegisterMask, floatsGiven)) {
-		Logger::Log("UNOFFICIAL NVR DXVK: %s has no %s (textures= / floats= lines): %s stays as it is", path, manifest, Name);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s has no %s (textures= / floats= lines): %s stays as it is", path, manifest, Name);
 		return false;
 	}
 
@@ -384,10 +384,10 @@ bool DxvkCompute::RegisterReplacement(const char* Name, const void* Bytecode, UI
 	desc.pDebugName = Name;
 	HRESULT result = Ext->RegisterShaderReplacement(&desc);
 	if (FAILED(result)) {
-		Logger::Log("UNOFFICIAL NVR DXVK: RegisterShaderReplacement(%s) refused (%08lX; DXVK's log says why, usually textures= naming a sampler the original does not use): it stays as it is", Name, result);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:RegisterShaderReplacement(%s) refused (%08lX; DXVK's log says why, usually textures= naming a sampler the original does not use): it stays as it is", Name, result);
 		return false;
 	}
-	Logger::Log("UNOFFICIAL NVR DXVK: %s will run as %s (textures %04X, %s float layout)", Name, path, desc.TextureMask, floatsGiven ? "listed" : "original compacted");
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s will run as %s (textures %04X, %s float layout)", Name, path, desc.TextureMask, floatsGiven ? "listed" : "original compacted");
 	return true;
 }
 
@@ -511,10 +511,10 @@ static ID3D9NvrExtTess* DisplaceTess() {
 		DisplaceQueried = true;
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (ext && SUCCEEDED(ext->QueryInterface(__uuidof(ID3D9NvrExtTess), (void**)&DisplaceInterface)) && DisplaceInterface)
-			Logger::Log("UNOFFICIAL NVR DXVK: NvrDxvkDisplacement: this d3d9.dll has the tessellation interface (1.7-displace); the land's shaders are registered as they load");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK:NvrDxvkDisplacement: this d3d9.dll has the tessellation interface (1.7-displace); the land's shaders are registered as they load");
 		else {
 			DisplaceInterface = nullptr;
-			Logger::Log("UNOFFICIAL NVR DXVK: NvrDxvkDisplacement is on but this d3d9.dll has no tessellation interface (needs NVR DXVK 1.7-displace): the land stays as it is");
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK:NvrDxvkDisplacement is on but this d3d9.dll has no tessellation interface (needs Vegas Shaders DXVK 1.7-displace): the land stays as it is");
 		}
 	}
 	return DisplaceInterface;	// kept for the session (a device reference, like the extension itself)
@@ -563,7 +563,7 @@ static unsigned RegisterDisplaceObject(ID3D9NvrExtTess* Tess, const char* Name, 
 		desc.pDebugName = Name;
 		const HRESULT result = Tess->RegisterTessVertexShader(&desc);
 		if (SUCCEEDED(result)) DisplaceObjRegistered[0]++;
-		else Logger::Log("UNOFFICIAL NVR DXVK: displacement: object vertex shader %s refused (%08lX; DXVK's log says why): its objects stay flat", Name, result);
+		else Logger::Log("UNOFFICIAL Vegas Shaders DXVK:displacement: object vertex shader %s refused (%08lX; DXVK's log says why): its objects stay flat", Name, result);
 		return SUCCEEDED(result) ? DxvkCompute::kDisplaceObjects : 0;
 	}
 
@@ -583,7 +583,7 @@ static unsigned RegisterDisplaceObject(ID3D9NvrExtTess* Tess, const char* Name, 
 	std::vector<char> tes, tesCcw;
 	if (slot < 2 || slot > 3 || !DxvkCompute::LoadSpirv(cw, tes)) {
 		DisplaceObjSkipped++;
-		Logger::Log("UNOFFICIAL NVR DXVK: displacement: object pixel shader %s: height map at s%d, no %s.spv: drawn flat (its object's other passes may not be)", Name, slot, cw);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:displacement: object pixel shader %s: height map at s%d, no %s.spv: drawn flat (its object's other passes may not be)", Name, slot, cw);
 		return 0;
 	}
 	const bool haveCcw = DxvkCompute::LoadSpirv(ccw, tesCcw);
@@ -604,7 +604,7 @@ static unsigned RegisterDisplaceObject(ID3D9NvrExtTess* Tess, const char* Name, 
 	if (SUCCEEDED(result)) DisplaceObjRegistered[1]++;
 	else {
 		DisplaceObjSkipped++;
-		Logger::Log("UNOFFICIAL NVR DXVK: displacement: object pixel shader %s refused (%08lX; DXVK's log says why): drawn flat", Name, result);
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:displacement: object pixel shader %s refused (%08lX; DXVK's log says why): drawn flat", Name, result);
 	}
 	return SUCCEEDED(result) ? DxvkCompute::kDisplaceObjects : 0;
 }
@@ -635,7 +635,7 @@ unsigned DxvkCompute::RegisterDisplace(const char* Name, const char* TemplateNam
 		desc.pDebugName = Name;
 		const HRESULT result = tess->RegisterTessVertexShader(&desc);
 		if (SUCCEEDED(result)) { if (shadow) DisplaceShadowVs++; else DisplaceRegistered[0]++; }
-		Logger::Log("UNOFFICIAL NVR DXVK: displacement: land %svertex shader %s %s (%08lX)", shadow ? "shadow caster " : "", Name,
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:displacement: land %svertex shader %s %s (%08lX)", shadow ? "shadow caster " : "", Name,
 			SUCCEEDED(result) ? "registered" : "refused (DXVK's log says why)", result);
 		return SUCCEEDED(result) ? family : 0;
 	}
@@ -669,7 +669,7 @@ unsigned DxvkCompute::RegisterDisplace(const char* Name, const char* TemplateNam
 		if (LoadSpirv(cw, tes)) haveCcw = LoadSpirv(ccw, tesCcw);
 		else {
 			depthAtS6 = false;
-			Logger::Log("UNOFFICIAL NVR DXVK: displacement: %s: no %s.spv (copy the new Compute\\Tess shaders): ObjectBlend off for this land", Name, cw);
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK:displacement: %s: no %s.spv (copy the new Compute\\Tess shaders): ObjectBlend off for this land", Name, cw);
 		}
 	}
 	if (!depthAtS6) {
@@ -682,7 +682,7 @@ unsigned DxvkCompute::RegisterDisplace(const char* Name, const char* TemplateNam
 			_snprintf_s(ccw, sizeof(ccw), _TRUNCATE, "Tess\\TerrainDisplace-t%d-ccw.tes", layers);
 		}
 		if (!LoadSpirv(cw, tes)) {
-			if (shadow) Logger::Log("UNOFFICIAL NVR DXVK: displacement: %s: no %s.spv (copy the new Compute\\Tess shaders): %d-layer land casts flat shadows", Name, cw, layers);
+			if (shadow) Logger::Log("UNOFFICIAL Vegas Shaders DXVK:displacement: %s: no %s.spv (copy the new Compute\\Tess shaders): %d-layer land casts flat shadows", Name, cw, layers);
 			return 0;
 		}
 		haveCcw = LoadSpirv(ccw, tesCcw);
@@ -709,7 +709,7 @@ unsigned DxvkCompute::RegisterDisplace(const char* Name, const char* TemplateNam
 			if (depthAtS6) DisplaceDepthShaders++;
 		}
 	}
-	else Logger::Log("UNOFFICIAL NVR DXVK: displacement: land %spixel shader %s refused (%08lX; DXVK's log says why): its land stays flat%s", shadow ? "shadow caster " : "",
+	else Logger::Log("UNOFFICIAL Vegas Shaders DXVK:displacement: land %spixel shader %s refused (%08lX; DXVK's log says why): its land stays flat%s", shadow ? "shadow caster " : "",
 		Name, result, shadow ? " in the sun's shadow maps" : "");
 	return SUCCEEDED(result) ? family : 0;
 }

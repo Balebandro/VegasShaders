@@ -245,11 +245,11 @@ technique Copy {
 		if (api == device_api::vulkan) {
 			effect_runtime* none = nullptr;
 			if (VkRuntime.compare_exchange_strong(none, runtime))
-				Logger::Log("UNOFFICIAL ReShade: Vulkan runtime found (ReShade as a Vulkan layer under DXVK): NVR depth goes over through DXVK's interop (ReShadeNVRDepth); drawing before the HUD needs ReShade's D3D9 runtime and stays off.");
+				Logger::Log("UNOFFICIAL ReShade: Vulkan runtime found (ReShade as a Vulkan layer under DXVK): Vegas Shaders depth goes over through DXVK's interop (ReShadeNVRDepth); drawing before the HUD needs ReShade's D3D9 runtime and stays off.");
 			return;
 		}
 		if (!ReportedOther) {
-			Logger::Log("UNOFFICIAL ReShade: its runtime is neither D3D9 nor Vulkan (API %u): NVR depth and drawing before the HUD are off, only ReShadeDepthCompat applies.", (unsigned)api);
+			Logger::Log("UNOFFICIAL ReShade: its runtime is neither D3D9 nor Vulkan (API %u): Vegas Shaders depth and drawing before the HUD are off, only ReShadeDepthCompat applies.", (unsigned)api);
 			ReportedOther = true;
 		}
 	}
@@ -314,7 +314,7 @@ technique Copy {
 		// A new image: the first copy, or DXVK gave the texture another VkImage.
 		const uint32_t generation = SharedGeneration.load(std::memory_order_acquire);
 		if (generation != Vk.generation) {
-			ReleaseView(runtime, "unbound (NVR's depth copy has a new image)");
+			ReleaseView(runtime, "unbound (Vegas Shaders' depth copy has a new image)");
 			Vk.generation = generation;
 			const uint64_t image = SharedImage.load(std::memory_order_relaxed);
 			const uint32_t layout = SharedLayout.load(std::memory_order_relaxed);
@@ -325,22 +325,22 @@ technique Copy {
 					dev->create_resource_view(resource{ image }, resource_usage::shader_resource, resource_view_desc(format::r32_float, 0, 1, 0, 1), &Vk.view)) {
 					Vk.image = image;
 					Vk.resting = resting;
-					Logger::Log("UNOFFICIAL ReShade (Vulkan): view made of NVR's depth copy (DXVK image %08x%08x, %ux%u, resting layout %u).",
+					Logger::Log("UNOFFICIAL ReShade (Vulkan): view made of Vegas Shaders' depth copy (DXVK image %08x%08x, %ux%u, resting layout %u).",
 						(unsigned)(image >> 32), (unsigned)image, desc.texture.width, desc.texture.height, layout);
 				}
 				else {
 					Vk.view = { 0 };
-					Logger::Log("UNOFFICIAL ReShade (Vulkan): no view could be made of NVR's depth copy (type %u, format %u, samples %u): NVR depth not handed over.",
+					Logger::Log("UNOFFICIAL ReShade (Vulkan): no view could be made of Vegas Shaders' depth copy (type %u, format %u, samples %u): Vegas Shaders depth not handed over.",
 						(unsigned)desc.type, (unsigned)desc.texture.format, (unsigned)desc.texture.samples);
 				}
 			}
-			else if (image) Logger::Log("UNOFFICIAL ReShade (Vulkan): DXVK keeps NVR's depth copy in layout %u, which is not handled here: NVR depth not handed over.", layout);
+			else if (image) Logger::Log("UNOFFICIAL ReShade (Vulkan): DXVK keeps Vegas Shaders' depth copy in layout %u, which is not handled here: Vegas Shaders depth not handed over.", layout);
 		}
 
 		const bool want = TheSettingManager->SettingsMain.Main.ReShadeNVRDepth && Vk.view != 0 && Vk.stale <= StalePresents;
 		if (!want) {
 			if (Vk.bound) {
-				BindDepth(runtime, resource_view{ 0 }, Vk.stale > StalePresents ? "unbound (no new NVR depth for a few frames)" : "unbound");
+				BindDepth(runtime, resource_view{ 0 }, Vk.stale > StalePresents ? "unbound (no new Vegas Shaders depth for a few frames)" : "unbound");
 				Vk.bound = false;
 				Vk.depthVariables.clear();
 			}
@@ -358,7 +358,7 @@ technique Copy {
 			}
 		}
 		if (!Vk.bound || Vk.rebind) {
-			BindDepth(runtime, Vk.view, Vk.bound ? "bound again to NVR's combined depth" : "bound to NVR's combined depth");
+			BindDepth(runtime, Vk.view, Vk.bound ? "bound again to Vegas Shaders' combined depth" : "bound to Vegas Shaders' combined depth");
 			Vk.bound = true;
 			Vk.rebind = false;
 			FindDepthVariables(runtime);
@@ -617,7 +617,7 @@ technique Copy {
 		for (uint32_t v = RESHADE_API_VERSION; v >= 1 && !version; --v)
 			if (registerAddon(NvrModule, v)) version = v;
 		if (!version) {
-			Logger::Log("UNOFFICIAL ReShade: ReShade refused NVR as an add-on (API versions %u..1, try %u); see ReShade.log.", RESHADE_API_VERSION, RegisterTries);
+			Logger::Log("UNOFFICIAL ReShade: ReShade refused Vegas Shaders as an add-on (API versions %u..1, try %u); see ReShade.log.", RESHADE_API_VERSION, RegisterTries);
 			return false;
 		}
 		reshade::register_event<reshade::addon_event::init_effect_runtime>(OnInitRuntime);
@@ -627,7 +627,7 @@ technique Copy {
 		reshade::register_event<reshade::addon_event::reshade_finish_effects>(OnFinishEffects);
 		reshade::register_event<reshade::addon_event::reshade_reloaded_effects>(OnReloadedEffects);
 		Registered = true;
-		Logger::Log("UNOFFICIAL ReShade: NVR registered as a ReShade add-on (API version %u, headers %u).", version, RESHADE_API_VERSION);
+		Logger::Log("UNOFFICIAL ReShade: Vegas Shaders registered as a ReShade add-on (API version %u, headers %u).", version, RESHADE_API_VERSION);
 		return true;
 	}
 
@@ -701,7 +701,7 @@ technique Copy {
 		DepthCopiedAt = PresentCount;
 		static bool reported = false;
 		if (!reported) {
-			Logger::Log("UNOFFICIAL ReShade: NVR's combined depth handed to ReShade as DEPTH (%s source, %s depth, near remap %s).",
+			Logger::Log("UNOFFICIAL ReShade: Vegas Shaders' combined depth handed to ReShade as DEPTH (%s source, %s depth, near remap %s).",
 				format == D3DFMT_R32F ? "R32F" : "G32R32F", TheRenderManager->IsReversedDepth() ? "reversed" : "standard", remap ? "on" : "off");
 			reported = true;
 		}
@@ -714,7 +714,7 @@ technique Copy {
 		if (InteropFailed || !DepthTexture) return;
 		ID3D9VkInteropTexture* interop = nullptr;
 		if (FAILED(DepthTexture->QueryInterface(__uuidof(ID3D9VkInteropTexture), reinterpret_cast<void**>(&interop))) || !interop) {
-			Logger::Log("UNOFFICIAL ReShade: ReShade runs as a Vulkan layer, but NVR's depth texture has no DXVK interop interface (not DXVK, or a very old one): NVR depth is not handed over.");
+			Logger::Log("UNOFFICIAL ReShade: ReShade runs as a Vulkan layer, but Vegas Shaders' depth texture has no DXVK interop interface (not DXVK, or a very old one): Vegas Shaders depth is not handed over.");
 			InteropFailed = true;
 			return;
 		}
@@ -723,7 +723,7 @@ technique Copy {
 		const HRESULT result = interop->GetVulkanImageInfo(&image, &layout, nullptr);
 		interop->Release();
 		if (FAILED(result) || !image) {
-			Logger::Log("UNOFFICIAL ReShade: DXVK gave no image for NVR's depth texture (%08lx): NVR depth is not handed over.", result);
+			Logger::Log("UNOFFICIAL ReShade: DXVK gave no image for Vegas Shaders' depth texture (%08lx): Vegas Shaders depth is not handed over.", result);
 			InteropFailed = true;
 			return;
 		}
@@ -731,7 +731,7 @@ technique Copy {
 			SharedImage.store(image, std::memory_order_relaxed);
 			SharedLayout.store(layout, std::memory_order_relaxed);
 			const uint32_t generation = SharedGeneration.fetch_add(1, std::memory_order_release) + 1;
-			Logger::Log("UNOFFICIAL ReShade: NVR's depth copy is DXVK image %08x%08x, resting layout %u (generation %u).",
+			Logger::Log("UNOFFICIAL ReShade: Vegas Shaders' depth copy is DXVK image %08x%08x, resting layout %u (generation %u).",
 				(unsigned)(image >> 32), (unsigned)image, layout, generation);
 		}
 		CopySerial.fetch_add(1, std::memory_order_release);
@@ -838,11 +838,11 @@ technique Copy {
 		static bool reportedDrawn = false, reportedSkipped = false;	// each case logged once (menus may alternate them)
 		const bool fits = CanDrawInto(Device, OutputSurface, isBackBuffer);
 		if (fits && !reportedDrawn) {
-			Logger::Log("UNOFFICIAL ReShade: effects drawn before the HUD (into %s).", isBackBuffer ? "the back buffer" : "NVR's output, back buffer size and format");
+			Logger::Log("UNOFFICIAL ReShade: effects drawn before the HUD (into %s).", isBackBuffer ? "the back buffer" : "Vegas Shaders' output, back buffer size and format");
 			reportedDrawn = true;
 		}
 		if (!fits && !reportedSkipped) {
-			Logger::Log("UNOFFICIAL ReShade: NVR's output does not match the back buffer (size, format or multisampling); ReShade draws those frames at present, over the HUD.");
+			Logger::Log("UNOFFICIAL ReShade: Vegas Shaders' output does not match the back buffer (size, format or multisampling); ReShade draws those frames at present, over the HUD.");
 			reportedSkipped = true;
 		}
 		if (!fits) return;

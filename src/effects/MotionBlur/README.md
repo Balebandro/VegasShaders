@@ -100,7 +100,7 @@ Files:
 - ObjectMotion.glsl is not included by this shader.
 
 Route choice (src/effects/MotionBlur.cpp ExtRender, src/core/EffectRecord.cpp Render):
-- The Vulkan route is used when the NVR DXVK extension is present, the NvrDxvkPasses key is on (`[Main]` group in the defaults toml, default true), the effect is not on the keep-on-D3D9 list, and the technique has no SM6 build selected (Sm6Covers). Otherwise the D3D9 technique runs.
+- The Vulkan route is used when the Vegas Shaders DXVK extension is present, the NvrDxvkPasses key is on (`[Main]` group in the defaults toml, default true), the effect is not on the keep-on-D3D9 list, and the technique has no SM6 build selected (Sm6Covers). Otherwise the D3D9 technique runs.
 - Native D3D9 and stock DXVK never take this route.
 
 Failure behaviour:

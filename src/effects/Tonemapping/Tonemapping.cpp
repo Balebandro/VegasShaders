@@ -9,6 +9,7 @@ void TonemappingShaders::RegisterConstants() {
 	sm->RegisterConstant("TESR_LotteData", &Constants.LotteData);
 	sm->RegisterConstant("TESR_ToneMapping", &Constants.ToneMapping);
 	sm->RegisterConstant("TESR_ToneMappingClip", &Constants.Clip);
+	sm->RegisterConstant("TESR_ToneMappingNight", &Constants.Night);	// 2026-11-04 Night colour shift
 }
 
 
@@ -50,6 +51,10 @@ void TonemappingShaders::UpdateConstants() {
 
 	Constants.LotteData = D3DXVECTOR4(mix(&ValuesStruct::TonemapContrast), mix(&ValuesStruct::TonemapBrightness),
 		mix(&ValuesStruct::TonemapMidpoint), mix(&ValuesStruct::TonemapShoulder));
+
+	// 2026-11-04 Night colour shift: blended by time of day and place like the rest; off = strength 0 (the shaders skip it)
+	Constants.Night = D3DXVECTOR4(NightShiftEnabled ? max(0.0f, min(1.0f, mix(&ValuesStruct::NightShift))) : 0.0f,
+		max(0.01f, mix(&ValuesStruct::NightShiftLevel)), 0.0f, 0.0f);
 
 	// operator 1 (VTLottes/AMDLottes) wants its curve constants derived from the raw values
 	if (Constants.HDRData.x == 1.0) ScaleLotte(Constants.LotteData, Constants.BloomData.w);
@@ -102,10 +107,13 @@ static void ReadTonemapGroup(const char* tonemapSection, const char* bloomSectio
 	out.TonemapBrightness = cfg->GetSettingF(tonemapSection, "TonemapBrightness");
 	out.TonemapMidpoint = cfg->GetSettingF(tonemapSection, "TonemapMidpoint");
 	out.TonemapShoulder = cfg->GetSettingF(tonemapSection, "TonemapShoulder");
+	out.NightShift = cfg->GetSettingF(tonemapSection, "NightShift");
+	out.NightShiftLevel = cfg->GetSettingF(tonemapSection, "NightShiftLevel");
 }
 
 void TonemappingShaders::UpdateSettings() {
 	ReadTonemapGroup("Shaders.Tonemapping.Main", "Shaders.Bloom.Main", Settings.Main);
 	ReadTonemapGroup("Shaders.Tonemapping.Night", "Shaders.Bloom.Night", Settings.Night);
 	ReadTonemapGroup("Shaders.Tonemapping.Interiors", "Shaders.Bloom.Interiors", Settings.Interiors);
+	NightShiftEnabled = TheSettingManager->GetSettingI("Shaders.Tonemapping.Main", "NightShiftEnabled") != 0;
 }

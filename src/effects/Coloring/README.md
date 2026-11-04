@@ -104,7 +104,7 @@ Other behaviour:
 
 ## 7. Vulkan path
 
-- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the NVR DXVK extension. Both techniques use the same file, and the
+- Choice: [Main.Main.Performance] NvrDxvkPasses (default true) with the Vegas Shaders DXVK extension. Both techniques use the same file, and the
   push flag lutPass selects the LUT (1 for ColoringLUT). If the pass is refused, the D3D9 technique runs for the session.
 - File: src/hlsl/NewVegas/Compute/Coloring.frag (the same maths as the D3D9 effect, line for line).
 - Bindings (set 1): binding 0 = the picture; bindings 1, 2, 3 = the day, night and interior LUT textures, read only when lutPass is 1.

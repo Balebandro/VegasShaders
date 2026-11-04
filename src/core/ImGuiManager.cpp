@@ -515,6 +515,7 @@ static bool FollowDeviceState() {
 }
 
 void ImGuiManager::NewFrame() {
+	SessionLog::StageScope stage("the settings menu (input)");	// 2026-11-04 (CRASH lines)
 	if (!gOverlay.ready) Initialize();
 	if (!gOverlay.ready || !FollowDeviceState()) return;
 
@@ -539,6 +540,7 @@ void ImGuiManager::NewFrame() {
 static void DrawMenuFrame();
 
 void ImGuiManager::Render() {
+	SessionLog::StageScope stage("the settings menu (drawing)");	// 2026-11-04 (CRASH lines)
 	if (!gOverlay.ready || gOverlay.deviceLost) return;
 	DrawMenuFrame();
 	ImGui::EndFrame();
@@ -633,6 +635,9 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.Terrain.Blending",             "Enabled",            RestartRule::TurnOn },
 	{ "Shaders.Terrain.Variation",            "Enabled",            RestartRule::Changed },	// TERRAIN_VARIATION (deep/csports)
 	{ "Shaders.Terrain.Variation",            "Layers",             RestartRule::Changed },	// TERRAIN_VARIATION_LAYERS
+	{ "Shaders.Terrain.Macro",                "Enabled",            RestartRule::Changed },	// TERRAIN_MACRO (2026-11-04)
+	{ "Shaders.PBR.Dust",                     "Enabled",            RestartRule::Changed },	// DUST_ON (2026-11-04)
+	{ "Shaders.PBR.MicroShadow",              "Enabled",            RestartRule::Changed },	// MICRO_SHADOW_ON (2026-11-04)
 	{ "Shaders.HandBlood.Status",             "Enabled",            RestartRule::Changed },
 	{ "Shaders.Cloth.Main",                   "Enabled",            RestartRule::TurnOn },
 	{ "Shaders.WetWorld.Main",                "HudDrops",           RestartRule::TurnOn },	// HUD_RAIN_ON: above 0 at start
@@ -2043,6 +2048,12 @@ static const GroupSwitch kLampHazeSwitch = { "Lamp haze",
 	"A soft glow of the room's lamps in the indoor fog's air (the settings below). Needs the current fog.", LampHazeGet, LampHazeSet };
 
 static bool GT7ExposureGet() { return TheSettingManager->GetSettingI("Shaders.Exposure.Main", "Mode") == 1; }
+static bool NightShiftGet() { return TheSettingManager->GetSettingI("Shaders.Tonemapping.Main", "NightShiftEnabled") != 0; }
+static void NightShiftSet(bool on) { TheSettingManager->SetSetting("Shaders.Tonemapping.Main", "NightShiftEnabled", on); }
+static const GroupSwitch kNightShiftSwitch = { "Night colour shift",
+	"In the dark the eye loses colour and sees blues best: dim parts of the picture turn paler and cooler, lamps keep their colour. "
+	"The same switch on the Main, Night and Interiors pages.", NightShiftGet, NightShiftSet };
+
 static void GT7ExposureSet(bool on) { TheSettingManager->SetSetting("Shaders.Exposure.Main", "Mode", on ? 1 : 0); }
 static const GroupSwitch kGT7ExposureSwitch = { "Use eye adaptation",
 	"Exposure Mode 1: auto-exposure and white balance as the eye adapts, in place of the classic exposure (Mode 0). The same switch "
@@ -2104,6 +2115,13 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::Legacy, false, "Indoors, for the legacy fog (it also uses the shared settings above).", nullptr },
 	{ "Shaders.VolumetricFog.Interiors", "Lamp haze", "LampHaze, LampHazeAnisotropy, LampHazeCore, LampHazeMaxLamps",
 		FogType::None, false, "The room's lamps light the indoor fog's air: a soft glow round each lamp. Off by default.", nullptr, &kLampHazeSwitch },
+
+	{ "Shaders.Tonemapping.Main", "Night colour shift", "NightShift, NightShiftLevel",
+		FogType::None, false, "Dim parts of the picture lose colour and turn cooler, as the eye sees in the dark. Off by default.", nullptr, &kNightShiftSwitch },
+	{ "Shaders.Tonemapping.Night", "Night colour shift", "NightShift, NightShiftLevel",
+		FogType::None, false, "At night: the strength most people will want to change.", nullptr, &kNightShiftSwitch },
+	{ "Shaders.Tonemapping.Interiors", "Night colour shift", "NightShift, NightShiftLevel",
+		FogType::None, false, "Indoors (dark rooms).", nullptr, &kNightShiftSwitch },
 
 	{ "Shaders.Exposure.Main", "Eye adaptation", "AdaptExposure, AdaptWhiteBalance, AdaptWeatherLight",
 		FogType::None, false, "Auto-exposure and white balance that adapt as the eye does, metering the whole view. While it is on, MinBrightness, "
@@ -2475,7 +2493,8 @@ static const MenuGroup* FindMenuGroup(const std::string& section, const char* ke
 static bool IsGroupSwitchKey(const std::string& section, const char* key) {
 	return (section == kFogMain && strcmp(key, "LegacyFog") == 0) ||
 		(section == "Shaders.VolumetricFog.Interiors" && strcmp(key, "LampHazeEnabled") == 0) ||	// 2026-11-04: the Lamp haze group's switch
-		(section == "Shaders.Exposure.Main" && strcmp(key, "Mode") == 0);	// 2026-11-04: the Eye adaptation group's switch
+		(section == "Shaders.Exposure.Main" && strcmp(key, "Mode") == 0) ||	// 2026-11-04: the Eye adaptation group's switch
+		(section == "Shaders.Tonemapping.Main" && strcmp(key, "NightShiftEnabled") == 0);	// 2026-11-04: the Night colour shift group's switch
 }
 
 // What a page is for, in plain words, under its title.
@@ -2768,6 +2787,7 @@ static const MenuMove kMenuMoves[] = {
 	{ "CloudShadows", "ShadowsExteriors", "Cloud Shadows (flat clouds)" },
 	{ "Foliage", "Plants", "Foliage glow" },
 	{ "DustMotes", "VolumetricFog", "Dust motes" },	// 2026-11-04 (user: "make motes live under vol fog")
+	{ "LocalExposure", "Exposure", "Local exposure" },	// 2026-11-04 (it works with the exposure)
 };
 // Test shots (gMenu.revealPage): whether this node leads to the page shown, so the shot's sidebar shows it.
 static bool LeadsToSelected(const std::string& path) {

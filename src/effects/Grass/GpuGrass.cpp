@@ -120,12 +120,12 @@ namespace {
 			Tried = true;
 			if (!ext || FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtGeometry), (void**)&Geometry)) || !Geometry) {
 				Geometry = nullptr;
-				TurnOff("this d3d9.dll has no geometry passes (needs NVR DXVK 1.7-grass)");
+				TurnOff("this d3d9.dll has no geometry passes (needs the Vegas Shaders DXVK fork 1.7-grass)");
 				return false;
 			}
 			if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtGeometryScene), (void**)&Scene)) || !Scene) {
 				Scene = nullptr;
-				TurnOff("this d3d9.dll cannot draw geometry into the scene with its depth buffer (needs NVR DXVK 1.7-grass, fork patch 0024)");
+				TurnOff("this d3d9.dll cannot draw geometry into the scene with its depth buffer (needs the Vegas Shaders DXVK fork 1.7-grass, fork patch 0024)");
 				return false;
 			}
 			if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtReadback), (void**)&Readback))) Readback = nullptr;	// only for the counts in the log
@@ -190,7 +190,7 @@ namespace {
 				return false;
 			}
 			if (Readback && FAILED(Readback->CreateReadbackBuffer(kStatsBytes, "GpuGrass counts readback", &ReadbackBuf))) ReadbackBuf = nullptr;
-			Logger::Log("UNOFFICIAL GPU grass: ready (NVR DXVK scene geometry passes)%s", ReadbackBuf ? "" : "; no readback (no counts in the log)");
+			Logger::Log("UNOFFICIAL GPU grass: ready (Vegas Shaders DXVK scene geometry passes)%s", ReadbackBuf ? "" : "; no readback (no counts in the log)");
 		}
 
 		const UINT blades = (UINT)(std::min)((std::max)(S.MaxBlades, 4096), 2097152);
@@ -515,7 +515,7 @@ bool BeginEarly(IDirect3DDevice9* Device, bool GrassEnabled) {
 	if (Off || !S.Enabled || !GrassEnabled || !Device) return false;
 	if (!DxvkCompute::Available()) {
 		static bool said = false;
-		if (!said) Logger::Log("UNOFFICIAL GPU grass: needs the NVR DXVK d3d9.dll (1.7-grass); %s: the game's grass as before", DxvkCompute::Status());
+		if (!said) Logger::Log("UNOFFICIAL GPU grass: needs the Vegas Shaders DXVK fork's d3d9.dll (1.7-grass); %s: the game's grass as before", DxvkCompute::Status());
 		said = true;
 		return false;
 	}

@@ -2,7 +2,7 @@
 
 Status 2026-11-02 (branch claude/rw3-lens): the D3D9 effect `src/hlsl/NewVegas/Effects/Underwater.fx.hlsl` and the four Vulkan passes (`Compute/UnderwaterGodrays.frag`, `UnderwaterBlur.frag`, `UnderwaterWater.frag`, `UnderwaterDistortion.frag`, shared `Underwater.glsl`) were written fresh from this spec. The text below describes the new shader. Fixed from the old one: caustic projection plane (now the water surface height, TESR_WaterSettings x, not the underwater flag z: open question 1); sun vertical component guarded (open question 3); no horizontal-view division (open question 4). TESR_FogColor is no longer declared (it was never used; open question 7). Not changed: the settings, the pass order, the wobble clock (open question 2).
 
-Source read: `the source tree` (read only). Covers the D3D9 effect, its Vulkan (NVR DXVK) port, and the settings it reads.
+Source read: `the source tree` (read only). Covers the D3D9 effect, its Vulkan (Vegas Shaders DXVK) port, and the settings it reads.
 
 ## 1. Purpose
 
@@ -137,7 +137,7 @@ Files (`src/hlsl/NewVegas/Compute/`):
 - `UnderwaterDistortion.frag`: pass 5.
 - Compiled `.spv` files exist next to the four `.frag` passes. The shared `.glsl` is not compiled on its own.
 
-Selection (the frame-chain effect draw path in `src/core/EffectRecord.cpp`): the Vulkan port runs only when all of these hold: `[Main.Main.Performance] NvrDxvkPasses` is on; the NVR DXVK extension is available; no rect frame is active (RenderScale at 1); the effect is not named in `NvrDxvkKeepD3D9`; the technique is not covered by the SM6 switch; the effect has not failed earlier in the session; the target belongs to the frame chain; and the technique index is 0 with no target clear. If any check fails, the effect's Vulkan routine returns false and the D3D9 technique runs. Pipelines are created once, on first use, with the pass names above. If a pipeline, sampler or required texture is missing, the frame is left as it was and the D3D9 technique runs. Required textures for the port: the depth, normals and point-shadow textures, and the caustic and blue-noise file textures (the caustic texture is sampled with mips; the blue noise at level 0).
+Selection (the frame-chain effect draw path in `src/core/EffectRecord.cpp`): the Vulkan port runs only when all of these hold: `[Main.Main.Performance] NvrDxvkPasses` is on; the Vegas Shaders DXVK extension is available; no rect frame is active (RenderScale at 1); the effect is not named in `NvrDxvkKeepD3D9`; the technique is not covered by the SM6 switch; the effect has not failed earlier in the session; the target belongs to the frame chain; and the technique index is 0 with no target clear. If any check fails, the effect's Vulkan routine returns false and the D3D9 technique runs. Pipelines are created once, on first use, with the pass names above. If a pipeline, sampler or required texture is missing, the frame is left as it was and the D3D9 technique runs. Required textures for the port: the depth, normals and point-shadow textures, and the caustic and blue-noise file textures (the caustic texture is sampled with mips; the blue noise at level 0).
 
 Constants: one uniform buffer (set 2, binding 0, std140), filled every frame from the same registered constants the D3D9 technique uploads, in this order: reciprocal resolution, sun direction, game time, water coefficients, sun colour, water fog, water volume, wave params, water settings, shallow colour, deep colour, horizon colour, sky colour, camera position, camera data (15 vec4s, 240 bytes), then projection (4x4, 64 bytes at offset 240) and view (4x4, 64 bytes at offset 304). Total 368 bytes. The matrices are copied as the engine stores them.
 
@@ -180,7 +180,7 @@ Cost class: multi-pass (five passes), per-pixel loop. Pass 1 is a 49-step loop o
 6. Ranges for the water keys are not stated in the defaults file, and no clamping was confirmed in the reader.
 7. Unused values (TESR_FogColor is now dropped from the shader; the others are unchanged): WaterVolume y, WaveParams x, y and w, WaterSettings w, and the water shader's shore and refraction values are not used by the active passes. Confirm no other pass depends on them before a new shader drops them.
 8. The wave normal texture (sampler register 3) is still declared and loaded in the new D3D9 file but no pass reads it. Vulkan does not bind it. Whether the C++ needs it at all is still open.
-9. Vulkan vertex stage: the Compute folder has no vertex shader; the full-screen stage is assumed to come from the NVR DXVK extension. Confirm its name and coordinate convention.
+9. Vulkan vertex stage: the Compute folder has no vertex shader; the full-screen stage is assumed to come from the Vegas Shaders DXVK extension. Confirm its name and coordinate convention.
 10. First-person weapon and held items: whether they are drawn before this effect (and so get tinted and wobbled). The effect has no mask. Not checked.
 11. The scene-effects block that calls this effect may have an enclosing condition beyond this effect's own. Not traced.
 12. TAA, FSR and DLSS jitter: no jitter correction on the depth read. Whether this shows as shimmer on the wobble or caustics has not been checked in the picture.

@@ -97,7 +97,7 @@ namespace PassFamilyView {
 		const int want = TheSettingManager->GetSettingI("Main.Main.Misc", "PassFamilyView");
 		if (want && !Mode) { OnFrames = 0; LogLines = 0; }
 		if (Mode && OnFrames == 6) {
-			Logger::Log("PASS FAMILY frame: objects coloured: one pass 0-1 lamps %u, 2 lamps %u, 3+ lamps %u | several passes 3 lamps %u, 4 lamps %u, 5 lamps %u, 6+ lamps %u | other NVR shaders %u",
+			Logger::Log("PASS FAMILY frame: objects coloured: one pass 0-1 lamps %u, 2 lamps %u, 3+ lamps %u | several passes 3 lamps %u, 4 lamps %u, 5 lamps %u, 6+ lamps %u | other shaders of Vegas Shaders %u",
 				Counts[1], Counts[2], Counts[3], Counts[4], Counts[5], Counts[6], Counts[7], Counts[8]);
 		}
 		Mode = want;
