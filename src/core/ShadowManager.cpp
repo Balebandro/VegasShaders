@@ -2312,6 +2312,12 @@ void ShadowManager::RenderShadowMaps() {
 	D3DVIEWPORT9 savedViewport;
 
 	D3DXVECTOR4* dataConst = &TheShaderManager->Effects.ShadowsExteriors->Constants.Data;
+	// UNOFFICIAL 2026-11-05 (user: first person, every shadow but the grass's flickers in and out while moving or turning): the world's values
+	// of TESR_ShadowData (x the quality, y the darkness: ShadowsExteriorEffect::UpdateConstants, before this) are borrowed by the caster
+	// passes below (x the caster kind, y their alpha test: RenderPass.cpp) and were never put back, so the world's shaders read the last
+	// pass's: darkness 0 (no sun shadows) whenever an opaque pass happened to draw last (the staggered cascades, the flashlight's map; in
+	// third person the character map's draw happened to leave 1). Put back at the end.
+	const float worldQuality = dataConst->x, worldDarkness = dataConst->y;
 	D3DXVECTOR4* orthoConst = &TheShaderManager->Effects.ShadowsExteriors->Constants.OrthoData;
 	dev->GetDepthStencilSurface(&savedDepth);
 	dev->GetRenderTarget(0, &savedTarget);
@@ -3367,6 +3373,8 @@ void ShadowManager::RenderShadowMaps() {
 	}
 
 	// reset renderer to previous state
+	dataConst->x = worldQuality;	// UNOFFICIAL 2026-11-05 (above)
+	dataConst->y = worldDarkness;
 	dev->SetDepthStencilSurface(savedDepth);
 	dev->SetRenderTarget(0, savedTarget);
 	dev->SetViewport(&savedViewport);
@@ -3592,6 +3600,9 @@ bool ShadowManager::RenderViewModelShadowMap(NiCamera* FirstPersonCamera) {
 	if (!TheShaderManager->GameState.isExterior || !Shadows->Enabled || !Shadows->Settings.Exteriors.Enabled) return skip("indoors or exterior shadows off");
 	if (Shadows->Constants.ShadowFade.y <= 0.0f || Shadows->Constants.ForwardData.x != 0.0f) return skip(Shadows->Constants.ShadowFade.y <= 0.0f ? "sun shadow maps inactive" : "forward sun shadows off this frame");
 	if (!Player || !Player->firstPersonNiNode || !FirstPersonCamera) return skip("no first-person model or camera");
+	// UNOFFICIAL 2026-11-05 (user: in first person the world's shadows drop out once no viewmodel is on screen, the weapon holstered): no
+	// map then; nothing of the viewmodel is drawn for it to shadow.
+	if (!Player->process || !Player->process->IsWeaponOut()) return skip("weapon holstered: no viewmodel on screen");
 
 	IDirect3DDevice9* Device = TheRenderManager->device;
 	NiDX9RenderState* RenderState = TheRenderManager->renderState;
