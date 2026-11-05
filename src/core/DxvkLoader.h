@@ -1,7 +1,7 @@
 #pragma once
 
 // UNOFFICIAL 2026-11-04 DxvkLoader: the DXVK fork's d3d9.dll from a mod manager's mod. Mod Organizer 2 maps only Data, so a
-// d3d9.dll in a mod never reaches the game folder, where Windows looks for it. Instead Data\NVSE\Plugins\NvrDxvk\ holds it (as
+// d3d9.dll in a mod never reaches the game folder, where Windows looks for it. Instead Data\NVSE\Plugins\VSDxvk\ holds it (as
 // the DLSS / RT helpers' NvrDlss / NvrRt folders do), with an optional dxvk.conf. At plugin load, before the game makes its
 // Direct3D:
 // - DXVK_CONFIG_FILE points DXVK at that dxvk.conf (unless the environment already names one);
@@ -56,7 +56,7 @@ namespace DxvkLoader {
 	}
 
 	inline void Load() {
-		const std::string dir = Paths::PluginsDir() + "NvrDxvk\\";
+		const std::string dir = Paths::PluginsDir() + "VSDxvk\\";
 		const std::string dll = dir + "d3d9.dll", config = dir + "dxvk.conf";
 		if (GetFileAttributesA(dll.c_str()) == INVALID_FILE_ATTRIBUTES) return;	// no mod: nothing to say
 
