@@ -136,11 +136,6 @@ struct SettingsMainStruct
 		NiPoint3	StaffOnBackPos, StaffOnBackRot;
 	};
 
-	struct SleepingModeStruct {	// [Main.SleepingMode.Main]
-		bool	Enabled;
-		UInt8	Mode;	// the sleeping mode
-	};
-
 	struct WeatherModeStruct {	// [Main.WeatherMode.*]: the weathers' night, fog and sun colours are scaled by these
 		bool		Enabled;
 		NiPoint3	CoeffNight, CoeffFog, CoeffSun;
@@ -209,7 +204,6 @@ struct SettingsMainStruct
 	FrameRateStruct			FrameRate;			// [Main.FrameRate.*]
 	GrassModeStruct			GrassMode;			// [Main.GrassMode.*]
 	MountedCombatStruct		MountedCombat;		// [Main.MountedCombat.*]
-	SleepingModeStruct		SleepingMode;		// [Main.SleepingMode.*]
 	WeatherModeStruct		WeatherMode;		// [Main.WeatherMode.*]
 	ShadowModeStruct		ShadowMode;			// [Main.ShadowMode.*]
 	ShadersStruct			Shaders;			// not read

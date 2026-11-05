@@ -635,7 +635,7 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.Terrain.Variation",            "Layers",             RestartRule::Changed },	// TERRAIN_VARIATION_LAYERS
 	{ "Shaders.HandBlood.Status",             "Enabled",            RestartRule::Changed },
 	{ "Shaders.Cloth.Main",                   "Enabled",            RestartRule::TurnOn },
-	{ "Shaders.WetWorld.Main",                "HudDrops",           RestartRule::TurnOn },	// HUD_RAIN_ON: above 0 at start
+	{ "Shaders.WetnessEffects.HudRaindrops",  "Enabled",            RestartRule::TurnOn },	// HUD_RAIN_ON: on at start
 	{ "Shaders.VolumetricClouds.Main",        "Resolution",         RestartRule::Changed },	// textures made at start
 	{ "Shaders.VolumetricClouds.Main",        "HalfResolution",     RestartRule::Changed },
 	{ "Shaders.VolumetricClouds.Main",        "ShadowResolution",   RestartRule::Changed },
@@ -668,7 +668,6 @@ static float RestartState(const RestartSetting& r, bool atStart) {
 	const std::string key = r.Key;
 	if (key == "CubeReflections")
 		return (get("Shaders.PBR.Metal", "CubeReflections") > 0.0f || get("Shaders.PBR.EnvMaps", "CubeReflections") > 0.0f) ? 1.0f : 0.0f;
-	if (key == "HudDrops") return get(r.Section, r.Key) > 0.0f ? 1.0f : 0.0f;
 	if (key == "SmithCorrelated") return get(r.Section, r.Key) == 1.0f ? 1.0f : 0.0f;
 	return get(r.Section, r.Key);
 }
@@ -1134,7 +1133,7 @@ static void RenderColorTriple(SettingManager::Configuration::ConfigNode& nodeR, 
 
 // ---- Settings drawn as a list of choices -------------------------------------------------------------------------------------
 // Whole numbers that pick one of a few modes get a dropdown of names. Keyed by "Section.Key": the key alone repeats ("Mode" is a
-// different thing for Cinema, DepthOfField and SleepingMode).
+// different thing for Cinema and DepthOfField).
 //
 // Cinema and DepthOfField Mode: the C++ also takes 3 and 4 (Cinema.cpp, DepthOfField.cpp), tests left from the Oblivion code that
 // check for persuasion. New Vegas has no persuasion, so 3 always switches the effect off ("Disabled") and 4 is a copy of 1 or 2 or
@@ -1155,8 +1154,6 @@ static const char* const kToneMappers[] = {
 	"11 - Perceptual (Polyphony)",
 };
 static const char* const kWhenShown[] = { "0 - Always", "1 - Not during dialog", "2 - Only during dialog", "3 - Disabled" };
-// SleepingMode Mode (no comment in the settings file): the cases of ShowSleepWaitMenuHook (src/core/Hooks/SleepingCommon.cpp)
-static const char* const kRestModes[] = { "0 - Always (Wait, Sit, Sleep)", "1 - Sleeping only", "2 - Sitting only", "3 - Sitting & Sleeping" };
 static const char* const kExposureModes[] = { "0 - Classic (screen average)", "1 - Eye adaptation (whole view, white balance)" };	// UNOFFICIAL [Shaders.Exposure.Main] Mode
 static const char* const kShadowQualities[] = { "0 - Low", "1 - Medium", "2 - High", "3 - Full", "4 - Custom" };
 static const char* const kShadowFormats[] = { "0 - 16 bit", "1 - 32 bit" };
@@ -1181,7 +1178,6 @@ static const Choices* ChoicesFor(const char* section, const char* key) {
 		{ "Shaders.DepthOfField.FirstPersonView.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.ThirdPersonView.Mode", NAMES(kWhenShown) },
 		{ "Shaders.DepthOfField.VanityView.Mode", NAMES(kWhenShown) },
-		{ "Main.SleepingMode.Main.Mode", NAMES(kRestModes) },
 		{ "Shaders.ShadowsExteriors.Main.Quality", NAMES(kShadowQualities) },
 		{ "Shaders.ShadowsExteriors.ShadowMaps.Format", NAMES(kShadowFormats) },
 		{ "Shaders.ShadowsExteriors.ShadowMaps.CascadeResolution", NAMES(kCascadeSizes) },
@@ -2382,9 +2378,6 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::None, false, "Light bounced from what is on screen (needs the DXVK fork).", nullptr },
 
 	// Shaders.WetWorld.Main
-	{ "Shaders.WetWorld.Main", "Rain on your weapon",
-		"HudDrops, HudDropSize, HudDropDensity, HudRefraction, HudReflection, HudGloss, HudWetGloss, HudWetTime, HudDryTime, HudDebug",
-		FogType::None, true, "Rain drops gather on your first-person weapon while you stand in the rain, and dry off under cover.", nullptr },
 	{ "Shaders.WetWorld.Main", "Wet ground that lasts",
 		"Persistent, PersistentWetTime, PersistentDryTime, PersistentPuddleFill, PersistentPuddleDry, PersistentShade, PersistentMapSize, "
 		"PersistentMapResolution, PersistentDebugView",
